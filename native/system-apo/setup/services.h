@@ -1,0 +1,54 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * Restarting the audio stack, which is how an effect list edit takes effect.
+ *
+ * Windows reads an endpoint's effect registration when the endpoint is built,
+ * not when a stream starts, so a newly attached effect appears only after the
+ * endpoint builder has run again. Signing out or rebooting does it too; this
+ * is the version that takes four seconds.
+ *
+ * Any stream that is open at the time is cut. That is normal and expected —
+ * the same thing happens when a driver updates — and the helper does not try
+ * to be clever about it.
+ */
+#ifndef FLUIDEQ_ENGINE_SETUP_SERVICES_H
+#define FLUIDEQ_ENGINE_SETUP_SERVICES_H
+
+#include <string>
+
+namespace fluideq_engine::setup {
+
+/**
+ * Stops what depends on `Audiosrv`, then `Audiosrv`, then
+ * `AudioEndpointBuilder`, and starts everything back the other way round —
+ * including after a failure, so a restart that failed half way leaves the
+ * sound as it was. See `restart_services` for the order and what is put back.
+ *
+ * Every wait is an alertable sleep woken by the service control manager's own
+ * notification. There is no polling and no deadline: how long a machine takes
+ * to stop its audio service is not something this program can know, and a
+ * timeout would only turn a slow machine into a reported failure. A service
+ * that fails instead of finishing ends its wait with the failure.
+ */
+bool restart_audio(std::wstring& error);
+
+/**
+ * Returns once neither `Audiosrv` nor `AudioEndpointBuilder` is part way
+ * through starting, stopping, pausing or continuing — at once when neither is.
+ *
+ * What an engine command waits on before it is tried again (`retry.h`). Woken
+ * by the service control manager like every other wait here. A service that
+ * is simply stopped is settled: waiting for it to start would never end on a
+ * machine where it is disabled, and the command's own restart starts it.
+ * Needs only the right to read a service's state, so it runs unelevated too.
+ */
+bool wait_audio_settled(std::wstring& error);
+
+}  // namespace fluideq_engine::setup
+
+#endif  // FLUIDEQ_ENGINE_SETUP_SERVICES_H

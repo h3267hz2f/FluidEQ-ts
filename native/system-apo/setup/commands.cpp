@@ -1,0 +1,704 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+#include "commands.h"
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <algorithm>
+#include <initializer_list>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "acl.h"
+#include "backup.h"
+#include "com_registration.h"
+#include "digest.h"
+#include "endpoints.h"
+#include "fs.h"
+#include "fx_list.h"
+#include "fx_modes.h"
+#include "json.h"
+#include "registry.h"
+#include "services.h"
+#include "slot_memory.h"
+
+namespace fluideq_engine::setup {
+
+namespace {
+
+/**
+ * The largest DLL `install` will read. The engine is under a megabyte and the
+ * runtime's largest under 700 KB; the cap is only there because the file is
+ * read whole into memory, from a folder a user can write in.
+ */
+constexpr size_t kMaxDllBytes = 64 * 1024 * 1024;
+
+void fail(CommandResult& result, std::wstring message) {
+  result.ok = false;
+  result.error = std::move(message);
+}
+
+/**
+ * The slot one output gets when none was named: what was learned about it,
+ * then what the endpoint's own registration says (`default_slot_for`, read
+ * from how it was first found — the backup — because the first attach may
+ * since have added lists to an endpoint whose driver reads only the old
+ * values), then what Windows says about it.
+ */
+Slot slot_for(const std::wstring& guid, const FxValues& original) {
+  const std::optional<Slot> learned = remembered_slot(guid);
+  if (learned.has_value()) {
+    return *learned;
+  }
+  return default_slot_for(original, endpoint_is_combined(guid));
+}
+
+/**
+ * Adds our class id to one endpoint, recording what was there first.
+ *
+ * The backup is written before anything is planned, not after: an attach that
+ * crashed between the write and the backup would leave an endpoint carrying
+ * our effect with no record of how to take it off again.
+ *
+ * An effect already on the endpoint in a different slot than asked for is
+ * moved, not added beside itself: two registrations of one engine would
+ * process the sound twice wherever both were created. And a slot named on
+ * the command line is remembered for this output, so that the next attach
+ * with no slot named — the app enabling it again, an install with
+ * `--attach-all` — does not put the engine back where it was never loaded.
+ */
+bool attach_one(const std::wstring& guid, std::optional<Slot> named,
+                bool& attached, std::wstring& error) {
+  FxValues before;
+  if (!read_fx_values(guid, before, error)) {
+    return false;
+  }
+  // Not when the effect is already on this endpoint. Its backup either exists
+  // — in which case `save_backup_once` would do nothing anyway — or somebody
+  // deleted it by hand, and recreating it now would record the endpoint with
+  // ourselves already in it. A detach against that backup keeps us attached
+  // forever, because it says we were always there.
+  if (!is_attached(before, kEngineClsid) &&
+      !save_backup_once(guid, before, error)) {
+    return false;
+  }
+  const std::optional<FxValues> saved = load_backup(guid);
+  const Slot slot =
+      named.has_value() ? *named : slot_for(guid, saved.value_or(before));
+  // Moving needs the backup, which says which lists were the vendor's; with
+  // none, the current values stand in for it and nothing is deleted, exactly
+  // as a detach would do.
+  const FxPlan plan = plan_move(before, saved.value_or(before), kEngineClsid,
+                                slot);
+  if (!plan.refused.empty()) {
+    // A legacy value already registered to somebody else. Nothing written,
+    // and the effect stays wherever it was — the app reads the answer and
+    // stops trying slots on this output.
+    error = L"cannot attach to " + std::wstring(slot_name(slot)) + L" on " +
+            guid + L": " + plan.refused;
+    return false;
+  }
+  if (plan.changed && !write_fx_values(guid, before, plan.after, error)) {
+    return false;
+  }
+  if (named.has_value()) {
+    remember_slot(guid, slot);
+  }
+  attached = is_attached(plan.after, kEngineClsid);
+  return true;
+}
+
+bool detach_one(const std::wstring& guid, bool& attached,
+                std::wstring& error) {
+  FxValues current;
+  if (!read_fx_values(guid, current, error)) {
+    return false;
+  }
+  const std::optional<FxValues> saved = load_backup(guid);
+  // With no backup there is no way to know which values this program created,
+  // so it takes none of them away: passing the current values as the
+  // reference means every key that exists is treated as one that was already
+  // there, and only our own entry comes out of the lists.
+  const FxValues& reference = saved.has_value() ? *saved : current;
+  const FxPlan plan = plan_detach(current, reference, kEngineClsid);
+  if (plan.changed && !write_fx_values(guid, current, plan.after, error)) {
+    return false;
+  }
+  attached = is_attached(plan.after, kEngineClsid);
+  if (!attached) {
+    remove_backup(guid);
+  }
+  return true;
+}
+
+/**
+ * Deletes the installed files, and settles for the next reboot when it
+ * cannot.
+ *
+ * The effect stays mapped into audiodg.exe until the audio stack is
+ * restarted, so the DLL of a just-uninstalled engine is routinely still in
+ * use. It has already been unregistered and detached by this point, so a file
+ * left on disk until the next boot is inert — failing the whole uninstall
+ * over it would be worse.
+ */
+void remove_install_tree(const std::wstring& directory) {
+  for (const std::wstring& name : files_matching(directory, L"*")) {
+    const std::wstring file = directory + L"\\" + name;
+    if (DeleteFileW(file.c_str()) != 0) {
+      continue;
+    }
+    const std::wstring aside = file + L".removed";
+    DeleteFileW(aside.c_str());
+    if (MoveFileExW(file.c_str(), aside.c_str(), MOVEFILE_REPLACE_EXISTING) !=
+        0) {
+      MoveFileExW(aside.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
+  }
+  RemoveDirectoryW(directory.c_str());
+}
+
+/** Endpoint ids with a backup file, which are the ones ever attached. */
+std::vector<std::wstring> endpoints_with_backups() {
+  std::vector<std::wstring> guids;
+  const std::wstring directory = backup_dir();
+  if (directory.empty()) {
+    return guids;
+  }
+  for (const std::wstring& name : files_matching(directory, L"*.json")) {
+    const size_t dot = name.find_last_of(L'.');
+    if (dot == std::wstring::npos) {
+      continue;
+    }
+    const std::wstring guid = name.substr(0, dot);
+    if (is_valid_endpoint_guid(guid)) {
+      guids.push_back(guid);
+    }
+  }
+  return guids;
+}
+
+/**
+ * The endpoints named on the command line: one bad id is the whole command.
+ *
+ * A user who asked for a specific output and did not get it must be told so;
+ * there is no "most of it worked" here to fall back on.
+ */
+void attach_each(const std::vector<std::wstring>& guids,
+                 std::optional<Slot> slot,
+                 CommandResult& result) {
+  for (const std::wstring& guid : guids) {
+    if (!endpoint_key_exists(guid)) {
+      fail(result, L"there is no output with the id " + guid);
+      return;
+    }
+    EndpointResult one;
+    one.guid = guid;
+    if (!attach_one(guid, slot, one.attached, result.error)) {
+      result.ok = false;
+      result.endpoints.push_back(one);
+      return;
+    }
+    result.endpoints.push_back(one);
+  }
+}
+
+/**
+ * Every render endpoint on the machine, and the loop finishes.
+ *
+ * Deliberately not `attach_each` with a flag: the two have opposite rules.
+ * The awkward endpoint is real — a composite list stored as `REG_EXPAND_SZ`,
+ * a key an OEM's driver locked down — and aborting on it left the engine
+ * installed, attached to every output before it, with the audio restart
+ * skipped and an exit code that said the install had failed. The verdict is
+ * `summarise_attach_all`'s, which is the pure half of this and the tested
+ * one.
+ */
+void attach_all_endpoints(const std::vector<std::wstring>& guids,
+                          std::optional<Slot> slot,
+                          CommandResult& result) {
+  for (const std::wstring& guid : guids) {
+    EndpointResult one;
+    one.guid = guid;
+    if (!endpoint_key_exists(guid)) {
+      one.error = L"there is no output with the id " + guid;
+    } else if (!attach_one(guid, slot, one.attached, one.error)) {
+      if (one.error.empty()) {
+        one.error = L"the output could not be attached";
+      }
+    }
+    result.endpoints.push_back(one);
+  }
+  const AttachOutcome outcome = summarise_attach_all(result.endpoints);
+  if (!outcome.ok) {
+    fail(result, outcome.error);
+  }
+}
+
+/**
+ * Takes Equalizer APO out of one endpoint, recording what it looked like.
+ *
+ * Recorded before anything is written, like the attach above, so that a run
+ * that dies between the two leaves a machine whose Equalizer APO can still be
+ * put back. `attached` reports whether APO is still in the lists afterwards,
+ * which is what the app shows.
+ */
+bool suspend_apo_one(const std::wstring& guid, bool& attached,
+                     std::wstring& error) {
+  FxValues before;
+  if (!read_fx_values(guid, before, error)) {
+    return false;
+  }
+  const FxPlan plan = plan_suspend_apo(before);
+  if (!plan.changed) {
+    // Equalizer APO is not in this output's registration. Nothing is written
+    // and nothing is recorded: a record here would restore, on the way back,
+    // a state this program never changed.
+    attached = false;
+    return true;
+  }
+  if (!save_apo_off_once(guid, before, error)) {
+    return false;
+  }
+  if (!write_fx_values(guid, before, plan.after, error)) {
+    return false;
+  }
+  attached = false;
+  return true;
+}
+
+/**
+ * Puts it back on one endpoint, and forgets it.
+ *
+ * An endpoint with nothing recorded is not an error: it is every output the
+ * machine has that Equalizer APO was never on.
+ */
+bool restore_apo_one(const std::wstring& guid, bool& attached,
+                     std::wstring& error) {
+  const std::optional<FxValues> saved = load_apo_off(guid);
+  if (!saved.has_value()) {
+    attached = false;
+    return true;
+  }
+  FxValues current;
+  if (!read_fx_values(guid, current, error)) {
+    return false;
+  }
+  const FxPlan plan = plan_restore_apo(current, *saved, kEngineClsid);
+  if (plan.changed && !write_fx_values(guid, current, plan.after, error)) {
+    return false;
+  }
+  // Only once it is actually back. A record kept after a failed write is what
+  // gives the next switch another chance at it.
+  remove_apo_off(guid);
+  attached = true;
+  return true;
+}
+
+/**
+ * Every output, and the loop finishes.
+ *
+ * Same rule as `--attach-all` and for the same reason: one output whose key
+ * an OEM locked down must not stop Equalizer APO being switched off on the
+ * one being listened to. The failures are reported per endpoint.
+ */
+void suspend_apo_all(CommandResult& result) {
+  std::vector<Endpoint> endpoints;
+  if (!list_render_endpoints(endpoints, result.error)) {
+    result.ok = false;
+    return;
+  }
+  for (const Endpoint& endpoint : endpoints) {
+    EndpointResult one;
+    one.guid = endpoint.guid;
+    if (!endpoint_key_exists(endpoint.guid)) {
+      continue;
+    }
+    if (!suspend_apo_one(endpoint.guid, one.attached, one.error)) {
+      if (one.error.empty()) {
+        one.error = L"Equalizer APO could not be switched off on this output";
+      }
+      result.endpoints.push_back(one);
+      continue;
+    }
+    result.endpoints.push_back(one);
+  }
+  // The verdict, which the loop above deliberately does not decide per
+  // output: like `--attach-all`, one output done is a command that did
+  // something, and only every output refusing is a failure. Without this the
+  // exit code said "ok" for a run that changed nothing, and the app logged a
+  // success over an Equalizer APO still fully registered.
+  const AttachOutcome outcome = summarise_attach_all(result.endpoints);
+  if (!outcome.ok) {
+    fail(result, outcome.error);
+  }
+}
+
+/**
+ * Every output this program has a record for, plus any the machine still has.
+ *
+ * The records are the authority — an output that has since been unplugged is
+ * still restored, because its registration is still in the registry and will
+ * be read again the moment it comes back.
+ */
+void restore_apo_all(CommandResult& result) {
+  for (const std::wstring& guid : apo_off_endpoints()) {
+    EndpointResult one;
+    one.guid = guid;
+    if (!restore_apo_one(guid, one.attached, one.error)) {
+      if (one.error.empty()) {
+        one.error = L"Equalizer APO could not be put back on this output";
+      }
+      result.endpoints.push_back(one);
+      continue;
+    }
+    result.endpoints.push_back(one);
+  }
+  // Stricter than the switch-off: ANY output Equalizer APO could not be put
+  // back on is a failure, because this is somebody else's equaliser and the
+  // record of how to restore it is all that is left. Reported as one, the
+  // record stays for the next attempt; reported as success, it would read as
+  // done and the output would stay broken for good.
+  size_t failed = 0;
+  for (const EndpointResult& one : result.endpoints) {
+    if (!one.error.empty()) {
+      ++failed;
+    }
+  }
+  if (failed != 0) {
+    fail(result, L"Equalizer APO could not be put back on " +
+                     std::to_wstring(failed) + L" output(s)");
+  }
+}
+
+void detach_each(const std::vector<std::wstring>& guids,
+                 CommandResult& result) {
+  for (const std::wstring& guid : guids) {
+    EndpointResult one;
+    one.guid = guid;
+    one.attached = true;
+    if (!detach_one(guid, one.attached, result.error)) {
+      result.ok = false;
+      result.endpoints.push_back(one);
+      return;
+    }
+    result.endpoints.push_back(one);
+  }
+}
+
+/**
+ * Every output the engine is already on, given the processing modes value its
+ * slot lacks (`plan_mode_in_place`). Which outputs it is on, and in which
+ * slot, stay exactly as they are; an output it is not on is not touched.
+ *
+ * Every helper before 2.0.1 wrote pids 5 to 7 without that value, which
+ * leaves the engine registered for discovery only — a Sound BlasterX G6 had
+ * it that way, attached on every reading and never once created. An install
+ * is what an engine update runs, and what the machine-wide repair runs, so
+ * this is how every such output on a machine is put right at once, rather
+ * than one at a time as each is heard silent. The outputs looked at are the
+ * ones with a backup: every output the engine was ever attached to.
+ *
+ * Each output it writes is listed, so the log says what the install touched;
+ * one that cannot be written fails nothing else, as `--attach-all` treats an
+ * output it could not attach, and is listed with its reason.
+ */
+void complete_modes(CommandResult& result) {
+  for (const std::wstring& guid : endpoints_with_backups()) {
+    FxValues before;
+    std::wstring error;
+    if (!read_fx_values(guid, before, error)) {
+      // Not knowing what is there, nothing is written there.
+      result.endpoints.push_back(
+          {guid, false, L"could not read the output's effects: " + error});
+      continue;
+    }
+    const FxPlan plan = plan_mode_in_place(before, kEngineClsid);
+    if (!plan.changed) {
+      continue;
+    }
+    EndpointResult one{guid, true, std::wstring()};
+    if (!write_fx_values(guid, before, plan.after, error)) {
+      one.error = L"could not give the engine its processing mode: " + error;
+    }
+    result.endpoints.push_back(one);
+  }
+}
+
+void run_install(const Options& options, CommandResult& result) {
+  const std::wstring source = module_dir();
+  const std::wstring target = install_dir();
+  if (source.empty() || target.empty()) {
+    fail(result, L"could not work out where to install from or to");
+    return;
+  }
+  if (!path_exists(source + L"\\FluidEQ-Engine.dll")) {
+    fail(result, L"FluidEQ-Engine.dll is not next to the setup program");
+    return;
+  }
+  if (!ensure_directory(target)) {
+    // Captured before the message is built: anything else that touches the
+    // Win32 API in between replaces the code with its own.
+    const unsigned long why = GetLastError();
+    fail(result, L"could not create " + target + L": " + describe_error(why));
+    return;
+  }
+  // Every DLL beside the helper, not only the effect: the effect is built
+  // against the shared runtime, and audiodg.exe searches its own directory
+  // and the system directory — never ours. A missing runtime DLL makes the
+  // effect fail to load with no message anywhere.
+  //
+  // And each one exactly as this program was built beside it (`digest.h`).
+  // The folder they are copied from is the app's, which a per-user install
+  // leaves writable by anything the user runs; copied unchecked, a DLL put
+  // there was installed into Program Files, registered, and loaded into
+  // audiodg.exe the next time somebody accepted an engine update. Read
+  // through one locked handle and written from those same bytes, so nothing
+  // can change between the check and the copy.
+  std::vector<std::pair<std::wstring, std::vector<unsigned char>>> verified;
+  for (const std::wstring& name : files_matching(source, L"*.dll")) {
+    const char* expected = shipped_digest(name);
+    std::optional<std::vector<unsigned char>> bytes =
+        expected == nullptr ? std::nullopt
+                            : read_locked(source + L"\\" + name, kMaxDllBytes);
+    if (!bytes.has_value() || sha256_hex(*bytes) != expected) {
+      fail(result, name + L" beside the setup program is not the one it was "
+                          L"built with, so nothing was installed");
+      return;
+    }
+    verified.emplace_back(name, std::move(*bytes));
+  }
+  for (const auto& [name, bytes] : verified) {
+    if (!replace_with_bytes(bytes, target + L"\\" + name, result.error)) {
+      result.ok = false;
+      return;
+    }
+  }
+  if (!register_engine(target + L"\\FluidEQ-Engine.dll", result.error) ||
+      !enable_unsigned_effects(result.error) ||
+      !ensure_engine_tree(result.error)) {
+    result.ok = false;
+    return;
+  }
+  if (options.attach_all) {
+    std::vector<Endpoint> found;
+    if (!list_render_endpoints(found, result.error)) {
+      result.ok = false;
+      return;
+    }
+    std::vector<std::wstring> guids;
+    for (const Endpoint& endpoint : found) {
+      guids.push_back(endpoint.guid);
+    }
+    attach_all_endpoints(guids, options.slot, result);
+    if (!result.ok) {
+      return;
+    }
+  }
+  // After `--attach-all`, which gives every output it attaches its mode
+  // itself; what is left is the outputs an older helper attached.
+  complete_modes(result);
+  if (options.restart_audio && !restart_audio(result.error)) {
+    result.ok = false;
+  }
+}
+
+void run_uninstall(const Options& options, CommandResult& result) {
+  std::vector<std::wstring> guids = endpoints_with_backups();
+  // Also whatever is attached without a backup — a backup file deleted by
+  // hand must not leave an effect nobody can take off again.
+  std::vector<Endpoint> active;
+  std::wstring listed;
+  if (list_render_endpoints(active, listed)) {
+    for (const Endpoint& endpoint : active) {
+      FxValues values;
+      std::wstring ignored;
+      if (read_fx_values(endpoint.guid, values, ignored) &&
+          is_attached(values, kEngineClsid) &&
+          std::find(guids.begin(), guids.end(), endpoint.guid) ==
+              guids.end()) {
+        guids.push_back(endpoint.guid);
+      }
+    }
+  }
+  detach_each(guids, result);
+  if (!result.ok) {
+    return;
+  }
+  // Whatever was switched off to make room for this engine goes back on the
+  // way out. Leaving Equalizer APO disabled by a program that is no longer on
+  // the machine would be this installer silently breaking somebody else's
+  // equalizer for good.
+  //
+  // Into its own result, and the uninstall goes on regardless: an uninstall
+  // that stopped here would leave the engine registered and its files in
+  // place, and the next attempt would stop at the same output — a machine
+  // that can never be rid of FluidEQ is worse than one output Equalizer APO
+  // has to be put back on by hand. What does not go on is the purge below,
+  // because the records under `apo-off\` are the only way that hand repair
+  // can be exact. The failure is reported all the same: the uninstaller logs
+  // the exit code, and the app logs the per-output reasons.
+  CommandResult restored;
+  restore_apo_all(restored);
+  const bool apo_left_off = !restored.ok;
+  for (const EndpointResult& one : restored.endpoints) {
+    result.endpoints.push_back(one);
+  }
+  if (!unregister_engine(result.error)) {
+    result.ok = false;
+    return;
+  }
+  const std::wstring target = install_dir();
+  if (!target.empty()) {
+    remove_install_tree(target);
+  }
+  if (options.purge && !apo_left_off) {
+    const std::wstring root = engine_root();
+    if (!root.empty()) {
+      delete_directory_tree(root);
+    }
+  }
+  if (apo_left_off) {
+    fail(result, restored.error);
+  }
+}
+
+}  // namespace
+
+bool ensure_engine_tree(std::wstring& error) {
+  const std::wstring parent = engine_parent();
+  const std::wstring root = engine_root();
+  if (root.empty()) {
+    error = L"could not find the machine's program data directory";
+    return false;
+  }
+  if (!ensure_directory(root) || !ensure_directory(config_dir()) ||
+      !ensure_directory(backup_dir()) || !ensure_directory(apo_off_dir()) ||
+      !ensure_directory(slots_dir())) {
+    const unsigned long why = GetLastError();
+    error = L"could not create " + root + L": " + describe_error(why);
+    return false;
+  }
+  // Owners first: permissions on a folder a user owns are theirs to rewrite.
+  // Then each list, root before the folders that are tighter or looser than
+  // it, since each of those replaces what the root just passed down. See
+  // `acl.h` for who may do what, and why.
+  for (const std::wstring& folder :
+       {parent, root, backup_dir(), apo_off_dir(), slots_dir()}) {
+    if (!take_ownership(folder, error)) {
+      return false;
+    }
+  }
+  if (!apply_read_only_acl(parent, error) || !apply_engine_acl(root, error) ||
+      !apply_config_acl(config_dir(), error) ||
+      !apply_read_only_acl(backup_dir(), error) ||
+      !apply_read_only_acl(apo_off_dir(), error) ||
+      !apply_read_only_acl(slots_dir(), error)) {
+    return false;
+  }
+  const std::wstring log = setup_log_path();
+  if ((!path_exists(log) && !append_utf8(log, std::wstring())) ||
+      !apply_log_acl(log, error)) {
+    if (error.empty()) {
+      error = L"could not create " + log + L": " + describe_error(GetLastError());
+    }
+    return false;
+  }
+  // An empty `config.txt` rather than none: the effect's watcher waits on the
+  // directory, and the app appends to this file. A missing one reads as "no
+  // configuration" everywhere it is looked at, which is the same answer an
+  // empty one gives — but only the empty one can be edited without first
+  // creating it.
+  const std::wstring config = config_dir() + L"\\config.txt";
+  if (!path_exists(config) && !write_utf8(config, std::wstring())) {
+    const unsigned long why = GetLastError();
+    error = L"could not create " + config + L": " + describe_error(why);
+    return false;
+  }
+  return true;
+}
+
+void run_command(const Options& options, CommandResult& result) {
+  if (options.command == L"install") {
+    run_install(options, result);
+    return;
+  }
+  if (options.command == L"uninstall") {
+    run_uninstall(options, result);
+    return;
+  }
+  if (options.command == L"restart-audio") {
+    if (!restart_audio(result.error)) {
+      result.ok = false;
+    }
+    return;
+  }
+  if (options.command == L"attach") {
+    if (!ensure_engine_tree(result.error)) {
+      result.ok = false;
+      return;
+    }
+    attach_each(options.guids, options.slot, result);
+  } else if (options.command == L"detach") {
+    detach_each(options.guids, result);
+  } else if (options.command == L"suspend-apo") {
+    // The tree, because the record of what was switched off lives in it and
+    // this command can be the first thing that ever writes there.
+    if (!ensure_engine_tree(result.error)) {
+      result.ok = false;
+      return;
+    }
+    suspend_apo_all(result);
+  } else if (options.command == L"restore-apo") {
+    restore_apo_all(result);
+  } else {
+    // The command line parser accepts a closed set and this function handles
+    // all of it, so getting here means the two lists have drifted apart. Named
+    // rather than folded into `detach`, where a new command would silently
+    // have taken effects off every output the caller named.
+    fail(result, L"the command " + options.command +
+                     L" reached the runner, which does not know how to run it");
+  }
+  if (result.ok && options.restart_audio && !restart_audio(result.error)) {
+    result.ok = false;
+  }
+}
+
+std::wstring result_json(const std::wstring& command,
+                         const CommandResult& result) {
+  std::wstring out = L"{\"command\":\"";
+  out += json_escape(command);
+  out += L"\",\"ok\":";
+  out += result.ok ? L"true" : L"false";
+  out += L",\"error\":\"";
+  out += json_escape(result.error);
+  out += L"\",\"endpoints\":[";
+  for (size_t at = 0; at < result.endpoints.size(); ++at) {
+    if (at != 0) {
+      out += L',';
+    }
+    out += L"{\"guid\":\"";
+    out += json_escape(result.endpoints[at].guid);
+    out += L"\",\"attached\":";
+    out += result.endpoints[at].attached ? L"true" : L"false";
+    // Only present on the endpoints that failed, so a reader can tell an
+    // output that was skipped by `--attach-all` from one that simply is not
+    // attached yet. `readFluidEngineStatus` ignores unknown fields.
+    if (!result.endpoints[at].error.empty()) {
+      out += L",\"error\":\"";
+      out += json_escape(result.endpoints[at].error);
+      out += L'"';
+    }
+    out += L'}';
+  }
+  out += L"]}";
+  return out;
+}
+
+}  // namespace fluideq_engine::setup

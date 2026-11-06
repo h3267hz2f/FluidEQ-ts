@@ -1,0 +1,1 @@
+{"major_iv":{"marshall:major_iv::autoeq_rtings":{"gainDb":-5.8,"bands":[{"type":"low_shelf","frequency":105,"gain_db":1.4,"q":0.71},{"type":"peak_dip","frequency":180,"gain_db":-3.2,"q":1.1},{"type":"peak_dip","frequency":1250,"gain_db":3.8,"q":1.4},{"type":"peak_dip","frequency":4600,"gain_db":-4.5,"q":2.5},{"type":"high_shelf","frequency":10000,"gain_db":-1.8,"q":0.71}]}}}

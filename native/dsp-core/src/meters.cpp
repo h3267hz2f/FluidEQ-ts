@@ -1,0 +1,968 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+#include "fluideq/meters.h"
+
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <vector>
+
+#include "fluideq/bass_forge.h"
+#include "meters_deesser.h"
+#include "meters_eq_live.h"
+#include "meters_footsteps.h"
+#include "meters_transform.h"
+
+/*
+ * `meters.h` mirrors this count rather than including the header, so that
+ * every stage in the rack does not pull `harmonics.h` and `biquad.h` in for
+ * one integer. This is the only place the two are compiled together, so it is
+ * the only place that can hold them equal.
+ */
+static_assert(FEQ_METER_BASS_FORGE_BANDS == FEQ_BASS_FORGE_BANDS,
+              "the meter's Forge band count must match the stage's");
+
+namespace {
+
+/**
+ * `AnalyserNode`'s own smoothing constant — but not at its own rate.
+ *
+ * Every graph in the panel was drawn against a spectrum smoothed by exactly
+ * this much, so the decay a listener sees has to match. What cannot be copied
+ * is the coefficient on its own, because smoothing is per UPDATE and the two
+ * engines update at different speeds: `AnalyserNode` re-transforms on every
+ * call to `getFloatFrequencyData`, which the graphs make once per animation
+ * frame — sixty a second — while these publish one window per
+ * `FEQ_METER_WINDOW` samples, about twenty-three a second at 48 kHz.
+ *
+ * Copied literally, that is the same decay stretched over two and a half times
+ * as long, and it was noticed immediately: the graphs "have slow release" on
+ * the native engine. `smoothing_for` converts it.
+ */
+constexpr double kReferenceSmoothing = 0.8;
+/** Animation frames a second, which is the rate the reference smooths at. */
+constexpr double kReferenceRate = 60.0;
+
+/**
+ * The coefficient that decays at the reference's speed, at our rate.
+ *
+ * Preserving the time constant means preserving `a^rate`, so
+ * `a_ours = a_reference^(rate_reference / rate_ours)`. At 48 kHz that is
+ * 0.8^(60/23.44) = 0.564; at 44.1 kHz, 0.538. Derived rather than dialled in
+ * by eye, so it stays right on a device this has never run on.
+ */
+double smoothing_for(double sample_rate) {
+  const double windows_per_second =
+      sample_rate / static_cast<double>(FEQ_METER_WINDOW);
+  if (!(windows_per_second > 0.0)) {
+    return kReferenceSmoothing;
+  }
+  return std::pow(kReferenceSmoothing, kReferenceRate / windows_per_second);
+}
+
+/**
+ * One stage's window, published by the audio thread and read by the host.
+ *
+ * A seqlock rather than a mutex, because the writer is the audio callback: a
+ * lock it can wait on is a lock the scheduler can park another thread inside,
+ * and that is a dropout with no bug in it. The writer never waits at all here;
+ * a reader that catches a torn window sees an odd or changed sequence and takes
+ * the next one instead. A frame skipped at 24 fps is invisible, and a frame
+ * spliced out of two different moments is a spike that looks like signal.
+ */
+struct StageWindow {
+  std::atomic<uint32_t> sequence{0};
+  /**
+   * Both channels, left in the first half and right in the second.
+   *
+   * Kept apart rather than summed to mono, and that is a correctness fix rather
+   * than a refinement. `AnalyserNode` — which this replaces — analyses the mono
+   * down-mix, `0.5 * (L + R)`, and for anti-phase material that is silence: the
+   * repository's own karaoke fixture measures a correlation of exactly -1.000
+   * and a mono peak of 1.5e-5 against a channel peak of 1.0, because a vocal
+   * removal built from L-R cancels perfectly when summed back.
+   *
+   * The panel drew nothing at all for that content while it was playing, on
+   * both engines, and had done for the life of the app. Since a graph that does
+   * not move while music plays is the exact defect this file exists to remove,
+   * it is fixed here rather than reproduced faithfully.
+   */
+  std::vector<float> filling;
+  uint32_t fill = 0;
+  /** Published, read under the seqlock. Same layout. */
+  std::vector<float> published;
+  /** Bumped on every publish, so a reader can tell "new" from "again". */
+  std::atomic<uint64_t> generation{0};
+  /** Reader-side only: smoothing state and the last generation drawn. */
+  std::vector<double> smoothed;
+  uint64_t drawn = 0;
+};
+
+/** The scope's own published window, on the same seqlock discipline. */
+struct ScopeWindow {
+  std::atomic<uint32_t> sequence{0};
+  std::vector<float> filling;
+  uint32_t fill = 0;
+  double sum_left_right = 0.0;
+  double sum_left_squared = 0.0;
+  double sum_right_squared = 0.0;
+  float peak_left = 0.0f;
+  float peak_right = 0.0f;
+
+  std::vector<float> published;
+  std::atomic<double> correlation{1.0};
+  std::atomic<float> published_peak_left{0.0f};
+  std::atomic<float> published_peak_right{0.0f};
+  std::atomic<uint64_t> generation{0};
+  uint64_t drawn = 0;
+};
+
+/**
+ * Per-band activity, on the same seqlock discipline as the windows.
+ *
+ * Small enough to copy whole on every block, which is what keeps it simple:
+ * sixty-four pairs of floats is a quarter of a kilobyte, against a window of
+ * eight. There is no partial update to get wrong.
+ */
+struct BandWindow {
+  std::atomic<uint32_t> sequence{0};
+  std::vector<float> amounts;
+  std::vector<float> levels;
+  std::atomic<uint32_t> count{0};
+};
+
+/**
+ * The floor every dB reading in this file lands on when there is nothing.
+ *
+ * Matches `amplitude_db` in `post_filter_normalizer.cpp` and the `-120` the
+ * renderer's meters treat as "no signal", so a silent window reads the same
+ * whichever of the three produced the number.
+ */
+constexpr float kMeterFloorDb = -120.0f;
+
+/**
+ * Fold a value into a running minimum held by the audio thread.
+ *
+ * A compare-exchange loop rather than a store, because the reader clears the
+ * slot with an exchange and the two must not lose each other's work: a plain
+ * load-compare-store between the reader's take and its clear would resurrect
+ * the window that was just read. The loop is uncontended in practice — one
+ * audio thread writes, one control thread clears — so it retries approximately
+ * never, and it never blocks, which is the only property the callback needs.
+ */
+void fold_minimum(std::atomic<float>& slot, float value) {
+  float seen = slot.load(std::memory_order_relaxed);
+  while (value < seen &&
+         !slot.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
+/** The same, for a peak hold. */
+void fold_maximum(std::atomic<float>& slot, float value) {
+  float seen = slot.load(std::memory_order_relaxed);
+  while (value > seen &&
+         !slot.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
+/** The same again, keeping whichever value is furthest from zero. */
+void fold_by_magnitude(std::atomic<float>& slot, float value) {
+  float seen = slot.load(std::memory_order_relaxed);
+  while (std::fabs(value) > std::fabs(seen) &&
+         !slot.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
+/**
+ * A peak that falls at the Normalizer meter's own release, per block.
+ *
+ * 350 ms, the constant the worklet used, kept because the bars were tuned
+ * against it. Derived from `frames` and the rate rather than from the reporting
+ * interval so the fall time does not change when the host skips a frame.
+ */
+constexpr double kNormalizerReleaseMs = 350.0;
+
+void fold_released_peak(std::atomic<float>& slot,
+                        double value,
+                        uint32_t frames,
+                        double sample_rate) {
+  const double release_samples = (kNormalizerReleaseMs / 1000.0) * sample_rate;
+  const double decay =
+      release_samples > 0.0
+          ? std::exp(-static_cast<double>(frames) / release_samples)
+          : 0.0;
+  const double held = slot.load(std::memory_order_relaxed) * decay;
+  slot.store(static_cast<float>(value > held ? value : held),
+             std::memory_order_relaxed);
+}
+
+}  // namespace
+
+struct FeqMeters {
+  std::atomic<uint64_t> room_report{0};
+  std::atomic<float> live_input_peak{-120};
+  std::atomic<float> live_input_lufs{-120};
+  std::atomic<float> live_reference_lufs{-120};
+  std::atomic<float> live_output_lufs{-120};
+  std::atomic<int> live_level_state{0};
+  std::atomic<double> denoise_reduction{0}, denoise_floor{-120};
+  std::atomic<uint32_t> denoise_clicks{0}, denoise_underruns{0};
+  std::atomic<int> denoise_profile{0}, denoise_voice{0};
+  std::atomic<double> denoise_bands[FEQ_DENOISE_PROFILE_BANDS]{};
+  std::atomic<double> denoise_gains[FEQ_DENOISE_PROFILE_BANDS]{};
+  uint32_t channels = 2;
+  std::atomic<int> enabled{0};
+  StageWindow stages[FEQ_METER_STAGE_COUNT];
+  ScopeWindow scope;
+  BandWindow bands;
+  std::atomic<float> exciter_bands[FEQ_METER_EXCITER_BANDS];
+  std::atomic<float> exciter_organic{0.0f};
+  /** Deepest gain reduction over the last block, in dB. Never positive. */
+  std::atomic<float> maximizer_reduction_db{0.0f};
+  /** Dimension's mono guard: 1 wide open, 0 fully shut. */
+  std::atomic<float> dimension_guard{1.0f};
+  /**
+   * How loud the output actually is: momentary, short term, integrated, range.
+   *
+   * Four independent atomics for the same reason as the Master tail's: each is
+   * its own readout, they move at a tenth of the rate the panel repaints at,
+   * and there is no shape here to tear. Not cleared on read — a loudness
+   * measurement that reset itself every frame would be a meter that could
+   * never settle, which is the opposite of what integrated means.
+   */
+  std::atomic<float> loudness_momentary_lufs{-120.0f};
+  std::atomic<float> loudness_short_term_lufs{-120.0f};
+  std::atomic<float> loudness_integrated_lufs{-120.0f};
+  std::atomic<float> loudness_range_lu{0.0f};
+  /**
+   * The Master tail's window, folded per block and cleared on read.
+   *
+   * Independent atomics rather than a seqlock, for the reason the exciter's
+   * four are: each is drawn as its own readout, so a reader that caught one
+   * from this window and the next from the one after is showing a number that
+   * is at worst one block stale, on a panel that repaints every sixteen
+   * milliseconds. There is no shape here to tear.
+   */
+  std::atomic<float> auto_headroom_reduction_db{0.0f};
+  std::atomic<float> auto_headroom_true_peak_db{kMeterFloorDb};
+  /** The Normalizer's bars: held peaks with their own release, never cleared. */
+  std::atomic<float> normalizer_input_peaks[2];
+  std::atomic<float> normalizer_output_peaks[2];
+  std::atomic<float> normalizer_applied_gain_db{0.0f};
+  /**
+   * Bass Forge's eight bands before it ran and after, in dBFS.
+   *
+   * Independent atomics rather than a seqlock, for the reason the exciter's
+   * are: each band is a point on an eight-point graph that repaints every
+   * sixteen milliseconds, so a reader catching band 3 from this block and
+   * band 4 from the next is drawing a curve at worst one block stale. There
+   * is no shape here fine enough to tear.
+   */
+  std::atomic<float> bass_forge_input_db[FEQ_METER_BASS_FORGE_BANDS];
+  std::atomic<float> bass_forge_output_db[FEQ_METER_BASS_FORGE_BANDS];
+  /** Bass Punch's three applied gains. At rest they are 0 dB, not the floor. */
+  std::atomic<float> bass_punch_transient_db{0.0f};
+  std::atomic<float> bass_punch_sustain_db{0.0f};
+  std::atomic<float> bass_punch_duck_db{0.0f};
+  /** The De-esser's window (`meters_deesser.h`). */
+  DeEsserMeterWindow deesser;
+  /** Footsteps' window (`meters_footsteps.h`). */
+  FootstepsMeterWindow footsteps;
+  /**
+   * The EQ tap (`meters_eq_live.h`). Its slot in `stages` is never filled:
+   * the EQ graph reads the newest audio, not windows in a row.
+   */
+  EqLiveWindow eq_live;
+  std::vector<double> window;
+  /** Reader-side scratch, so the transform allocates nothing per frame. */
+  std::vector<double> real;
+  std::vector<double> imaginary;
+  /** Where the two channels' magnitudes are summed before smoothing. */
+  std::vector<double> magnitudes;
+  std::vector<float> snapshot;
+  /**
+   * The device rate. Atomic, because it is set from the device's thread while
+   * the reader works out its smoothing and the EQ tap's pace from it.
+   */
+  std::atomic<double> sample_rate{48000.0};
+};
+
+extern "C" {
+
+FeqMeters* feq_meters_create(uint32_t channels) {
+  auto* meters = new (std::nothrow) FeqMeters();
+  if (meters == nullptr) {
+    return nullptr;
+  }
+  meters->channels = channels == 0 ? 1 : channels;
+  meters->window = meter_blackman(FEQ_METER_WINDOW);
+  meters->real.assign(FEQ_METER_WINDOW, 0.0);
+  meters->imaginary.assign(FEQ_METER_WINDOW, 0.0);
+  meters->magnitudes.assign(FEQ_METER_BINS, 0.0);
+  meters->snapshot.assign(static_cast<size_t>(FEQ_METER_WINDOW) * 2, 0.0f);
+  for (auto& stage : meters->stages) {
+    stage.filling.assign(static_cast<size_t>(FEQ_METER_WINDOW) * 2, 0.0f);
+    stage.published.assign(static_cast<size_t>(FEQ_METER_WINDOW) * 2, 0.0f);
+    stage.smoothed.assign(FEQ_METER_BINS, 0.0);
+  }
+  for (auto& band : meters->exciter_bands) {
+    band.store(0.0f, std::memory_order_relaxed);
+  }
+  // Forge's two runs open at the display floor rather than at zero, because
+  // zero dBFS is full scale: a graph fed nothing would paint both curves
+  // pinned at the top until the first block arrived.
+  for (uint32_t band = 0; band < FEQ_METER_BASS_FORGE_BANDS; band += 1) {
+    meters->bass_forge_input_db[band].store(kMeterFloorDb,
+                                            std::memory_order_relaxed);
+    meters->bass_forge_output_db[band].store(kMeterFloorDb,
+                                             std::memory_order_relaxed);
+  }
+  // An array of atomics takes no member initializer, so silence is set here.
+  for (uint32_t channel = 0; channel < 2; channel += 1) {
+    meters->normalizer_input_peaks[channel].store(0.0f,
+                                                  std::memory_order_relaxed);
+    meters->normalizer_output_peaks[channel].store(0.0f,
+                                                   std::memory_order_relaxed);
+  }
+  meters->bands.amounts.assign(FEQ_METER_MAX_BANDS, 0.0f);
+  meters->bands.levels.assign(FEQ_METER_MAX_BANDS, 0.0f);
+  meters->scope.filling.assign(
+      static_cast<size_t>(FEQ_METER_SCOPE_PAIRS) * 2, 0.0f);
+  meters->scope.published.assign(
+      static_cast<size_t>(FEQ_METER_SCOPE_PAIRS) * 2, 0.0f);
+  return meters;
+}
+
+void feq_meters_destroy(FeqMeters* meters) { delete meters; }
+
+void feq_meters_set_sample_rate(FeqMeters* meters, double sample_rate) {
+  if (meters != nullptr && sample_rate > 0.0) {
+    meters->sample_rate.store(sample_rate, std::memory_order_relaxed);
+  }
+}
+
+void feq_meters_set_enabled(FeqMeters* meters, int enabled) {
+  if (meters == nullptr) {
+    return;
+  }
+  // The EQ tap's ring still holds whatever played when the panel last
+  // closed; a fresh listening starts from silence instead. Only on the
+  // switch: the engine's link says "on" with every frame it asks for.
+  if (enabled != 0 && meters->enabled.load(std::memory_order_acquire) == 0) {
+    eq_live_restart(meters->eq_live);
+  }
+  meters->enabled.store(enabled != 0 ? 1 : 0, std::memory_order_release);
+}
+
+int feq_meters_enabled(const FeqMeters* meters) {
+  return meters != nullptr && meters->enabled.load(std::memory_order_acquire);
+}
+
+void feq_meters_capture(FeqMeters* meters,
+                        uint32_t stage,
+                        const float* const* channels,
+                        uint32_t frames) {
+  if (meters == nullptr || channels == nullptr ||
+      stage >= FEQ_METER_STAGE_COUNT ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+
+  StageWindow& target = meters->stages[stage];
+  const float* left = channels[0];
+  const float* right = meters->channels > 1 ? channels[1] : channels[0];
+  if (left == nullptr || right == nullptr) {
+    return;
+  }
+  if (stage == FEQ_METER_STAGE_EQ) {
+    eq_live_capture(meters->eq_live, left, right, frames);
+    return;
+  }
+
+  for (uint32_t at = 0; at < frames; at += 1) {
+    // Kept as two channels, not summed. See `StageWindow`: the mono down-mix
+    // `AnalyserNode` performs is exactly zero for anti-phase material, and the
+    // panel drew nothing at all while such a track played.
+    target.filling[target.fill] = left[at];
+    target.filling[FEQ_METER_WINDOW + target.fill] = right[at];
+    target.fill += 1;
+    if (target.fill < FEQ_METER_WINDOW) {
+      continue;
+    }
+    target.fill = 0;
+    // Odd while writing, even when settled: a reader between the two sees a
+    // sequence it cannot trust and takes the next window instead.
+    const uint32_t sequence = target.sequence.load(std::memory_order_relaxed);
+    target.sequence.store(sequence + 1, std::memory_order_release);
+    std::memcpy(target.published.data(), target.filling.data(),
+                sizeof(float) * FEQ_METER_WINDOW * 2);
+    target.sequence.store(sequence + 2, std::memory_order_release);
+    target.generation.fetch_add(1, std::memory_order_release);
+  }
+
+  if (stage != FEQ_METER_STAGE_MASTER) {
+    return;
+  }
+
+  /**
+   * The scope, the needle and the peaks, taken at the master tap only.
+   *
+   * After the mid/side decode and every gain, because that is where the samples
+   * are left and right again and are what actually leaves for the device.
+   * Measured earlier, the goniometer would draw the middle against the
+   * difference — a picture that is wrong in a way that still looks plausible.
+   */
+  ScopeWindow& scope = meters->scope;
+  for (uint32_t at = 0; at < frames; at += 1) {
+    const float l = left[at];
+    const float r = right[at];
+    scope.sum_left_right += static_cast<double>(l) * r;
+    scope.sum_left_squared += static_cast<double>(l) * l;
+    scope.sum_right_squared += static_cast<double>(r) * r;
+    scope.peak_left = std::fmax(scope.peak_left, std::fabs(l));
+    scope.peak_right = std::fmax(scope.peak_right, std::fabs(r));
+
+    const uint32_t pair = scope.fill / 2;
+    if (pair < FEQ_METER_SCOPE_PAIRS) {
+      scope.filling[scope.fill] = l;
+      scope.filling[scope.fill + 1] = r;
+    }
+    scope.fill += 2;
+    if (scope.fill < static_cast<uint32_t>(FEQ_METER_SCOPE_PAIRS) * 2) {
+      continue;
+    }
+    scope.fill = 0;
+
+    const double denominator =
+        std::sqrt(scope.sum_left_squared * scope.sum_right_squared);
+    // Silence has no correlation to report, and zero would read on the needle
+    // as a warning about nothing. One is what the worklet reports there too.
+    const double correlation =
+        denominator > 1e-12 ? scope.sum_left_right / denominator : 1.0;
+
+    const uint32_t sequence = scope.sequence.load(std::memory_order_relaxed);
+    scope.sequence.store(sequence + 1, std::memory_order_release);
+    std::memcpy(scope.published.data(), scope.filling.data(),
+                sizeof(float) * FEQ_METER_SCOPE_PAIRS * 2);
+    scope.correlation.store(correlation, std::memory_order_relaxed);
+    scope.published_peak_left.store(scope.peak_left, std::memory_order_relaxed);
+    scope.published_peak_right.store(scope.peak_right,
+                                     std::memory_order_relaxed);
+    scope.sequence.store(sequence + 2, std::memory_order_release);
+    scope.generation.fetch_add(1, std::memory_order_release);
+
+    scope.sum_left_right = 0.0;
+    scope.sum_left_squared = 0.0;
+    scope.sum_right_squared = 0.0;
+    scope.peak_left = 0.0f;
+    scope.peak_right = 0.0f;
+  }
+}
+
+int feq_meters_read_spectrum(FeqMeters* meters,
+                             uint32_t stage,
+                             float* out_db,
+                             uint32_t bins) {
+  if (meters == nullptr || out_db == nullptr ||
+      stage >= FEQ_METER_STAGE_COUNT || bins != FEQ_METER_BINS) {
+    return 0;
+  }
+  const double sample_rate = meters->sample_rate.load(std::memory_order_relaxed);
+  if (stage == FEQ_METER_STAGE_EQ) {
+    return eq_live_read_short(meters->eq_live, sample_rate, out_db);
+  }
+  StageWindow& target = meters->stages[stage];
+  const uint64_t generation = target.generation.load(std::memory_order_acquire);
+  if (generation == target.drawn) {
+    return 0;
+  }
+
+  // Two attempts, not a loop without end: the writer never waits, so a reader
+  // that loses twice is a reader whose frame is already late. Skipping it is
+  // correct — the next window is 43 ms away and the display runs faster.
+  for (int attempt = 0; attempt < 2; attempt += 1) {
+    const uint32_t before = target.sequence.load(std::memory_order_acquire);
+    if ((before & 1u) != 0u) {
+      continue;
+    }
+    std::memcpy(meters->snapshot.data(), target.published.data(),
+                sizeof(float) * FEQ_METER_WINDOW * 2);
+    const uint32_t after = target.sequence.load(std::memory_order_acquire);
+    if (before != after) {
+      continue;
+    }
+
+    /**
+     * Both channels' MAGNITUDES averaged, from one transform.
+     *
+     * Averaging the spectra rather than the signals is the whole point. For
+     * ordinary correlated material the two are the same to within a fraction of
+     * a decibel, so nothing a listener has been reading changes. For anti-phase
+     * material the signal sum is zero and the magnitude average is the true
+     * level — which is the difference between a graph that works on every track
+     * and one that goes blank on some of them.
+     */
+    const float* left = meters->snapshot.data();
+    const float* right = left + FEQ_METER_WINDOW;
+    for (uint32_t at = 0; at < FEQ_METER_WINDOW; at += 1) {
+      meters->real[at] = left[at] * meters->window[at];
+      meters->imaginary[at] = right[at] * meters->window[at];
+    }
+    meter_two_channel_magnitudes(meters->real.data(), meters->imaginary.data(),
+                                 FEQ_METER_WINDOW, FEQ_METER_BINS,
+                                 meters->magnitudes.data());
+
+    const double smoothing = smoothing_for(sample_rate);
+    for (uint32_t bin = 0; bin < FEQ_METER_BINS; bin += 1) {
+      const double previous = meters->stages[stage].smoothed[bin];
+      const double blended =
+          smoothing * previous + (1.0 - smoothing) * meters->magnitudes[bin];
+      meters->stages[stage].smoothed[bin] = blended;
+      out_db[bin] = static_cast<float>(
+          20.0 * std::log10(std::fmax(blended, kMeterMagnitudeFloor)));
+    }
+    target.drawn = generation;
+    return 1;
+  }
+  return 0;
+}
+
+int feq_meters_read_eq_detail(FeqMeters* meters,
+                              float* out_db,
+                              uint32_t bins) {
+  if (meters == nullptr || out_db == nullptr ||
+      bins != FEQ_METER_DETAIL_BINS) {
+    return 0;
+  }
+  return eq_live_read_long(meters->eq_live,
+                           meters->sample_rate.load(std::memory_order_relaxed),
+                           out_db);
+}
+
+void feq_meters_publish_bands(FeqMeters* meters,
+                              const double* amounts,
+                              const double* levels,
+                              uint32_t count) {
+  if (meters == nullptr || amounts == nullptr || levels == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  const uint32_t span = count > FEQ_METER_MAX_BANDS ? FEQ_METER_MAX_BANDS
+                                                    : count;
+  BandWindow& target = meters->bands;
+  const uint32_t sequence = target.sequence.load(std::memory_order_relaxed);
+  target.sequence.store(sequence + 1, std::memory_order_release);
+  for (uint32_t band = 0; band < span; band += 1) {
+    target.amounts[band] = static_cast<float>(amounts[band]);
+    target.levels[band] = static_cast<float>(levels[band]);
+  }
+  target.count.store(span, std::memory_order_relaxed);
+  target.sequence.store(sequence + 2, std::memory_order_release);
+}
+
+void feq_meters_publish_exciter(FeqMeters* meters,
+                                const double* bands,
+                                double organic) {
+  if (meters == nullptr || bands == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  /**
+   * Four independent atomics, no seqlock.
+   *
+   * Each value is read on its own and drawn as its own light, so a reader that
+   * caught three from one block and one from the next would be showing a
+   * picture that is at worst one block stale in one place — twenty microseconds
+   * of skew on a display that repaints every sixteen milliseconds. A lock to
+   * prevent that would be ceremony around nothing.
+   */
+  for (uint32_t band = 0; band < FEQ_METER_EXCITER_BANDS; band += 1) {
+    meters->exciter_bands[band].store(static_cast<float>(bands[band]),
+                                      std::memory_order_relaxed);
+  }
+  meters->exciter_organic.store(static_cast<float>(organic),
+                                std::memory_order_relaxed);
+}
+
+void feq_meters_read_exciter(FeqMeters* meters,
+                             float* out_bands,
+                             float* out_organic) {
+  if (meters == nullptr || out_bands == nullptr || out_organic == nullptr) {
+    return;
+  }
+  for (uint32_t band = 0; band < FEQ_METER_EXCITER_BANDS; band += 1) {
+    out_bands[band] = meters->exciter_bands[band].load(
+        std::memory_order_relaxed);
+  }
+  *out_organic = meters->exciter_organic.load(std::memory_order_relaxed);
+}
+
+void feq_meters_publish_maximizer(FeqMeters* meters, double reduction_db) {
+  if (meters == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  meters->maximizer_reduction_db.store(static_cast<float>(reduction_db),
+                                       std::memory_order_relaxed);
+}
+
+void feq_meters_read_maximizer(FeqMeters* meters, float* out_reduction_db) {
+  if (meters == nullptr || out_reduction_db == nullptr) {
+    return;
+  }
+  *out_reduction_db =
+      meters->maximizer_reduction_db.load(std::memory_order_relaxed);
+}
+
+void feq_meters_publish_loudness(FeqMeters* meters,
+                                 const FeqLoudnessReading* reading) {
+  if (meters == nullptr || reading == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  meters->loudness_momentary_lufs.store(
+      static_cast<float>(reading->momentary_lufs), std::memory_order_relaxed);
+  meters->loudness_short_term_lufs.store(
+      static_cast<float>(reading->short_term_lufs), std::memory_order_relaxed);
+  meters->loudness_integrated_lufs.store(
+      static_cast<float>(reading->integrated_lufs), std::memory_order_relaxed);
+  meters->loudness_range_lu.store(static_cast<float>(reading->range_lu),
+                                  std::memory_order_relaxed);
+}
+
+void feq_meters_read_loudness(FeqMeters* meters, float* out_loudness) {
+  if (meters == nullptr || out_loudness == nullptr) {
+    return;
+  }
+  out_loudness[0] =
+      meters->loudness_momentary_lufs.load(std::memory_order_relaxed);
+  out_loudness[1] =
+      meters->loudness_short_term_lufs.load(std::memory_order_relaxed);
+  out_loudness[2] =
+      meters->loudness_integrated_lufs.load(std::memory_order_relaxed);
+  out_loudness[3] = meters->loudness_range_lu.load(std::memory_order_relaxed);
+}
+
+void feq_meters_publish_dimension(FeqMeters* meters, double guard) {
+  if (meters == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  meters->dimension_guard.store(static_cast<float>(guard),
+                                std::memory_order_relaxed);
+}
+
+void feq_meters_read_dimension(FeqMeters* meters, float* out_guard) {
+  if (meters == nullptr || out_guard == nullptr) {
+    return;
+  }
+  *out_guard = meters->dimension_guard.load(std::memory_order_relaxed);
+}
+
+void feq_meters_publish_bass_forge(FeqMeters* meters, const double* input_db,
+                                   const double* output_db) {
+  if (meters == nullptr || input_db == nullptr || output_db == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  for (uint32_t band = 0; band < FEQ_METER_BASS_FORGE_BANDS; band += 1) {
+    meters->bass_forge_input_db[band].store(static_cast<float>(input_db[band]),
+                                            std::memory_order_relaxed);
+    meters->bass_forge_output_db[band].store(
+        static_cast<float>(output_db[band]), std::memory_order_relaxed);
+  }
+}
+
+void feq_meters_read_bass_forge(FeqMeters* meters, float* out_input_db,
+                                float* out_output_db) {
+  if (meters == nullptr || out_input_db == nullptr ||
+      out_output_db == nullptr) {
+    return;
+  }
+  for (uint32_t band = 0; band < FEQ_METER_BASS_FORGE_BANDS; band += 1) {
+    out_input_db[band] =
+        meters->bass_forge_input_db[band].load(std::memory_order_relaxed);
+    out_output_db[band] =
+        meters->bass_forge_output_db[band].load(std::memory_order_relaxed);
+  }
+}
+
+void feq_meters_publish_bass_punch(FeqMeters* meters, double transient_db,
+                                   double sustain_db, double duck_db) {
+  if (meters == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  /*
+   * The transient is FOLDED and the other two are stored, which is measured
+   * rather than tidy.
+   *
+   * All three are published per block — about 94 a second at 512 frames — and
+   * read once per analysis window, about 23. So three blocks in four are never
+   * seen. The sustain and the duck are slow envelopes and survive that: over a
+   * real gated note through the real host they reached 9.0 and 6.0 dB in the
+   * frames that were sampled. The transient is a few milliseconds wide and
+   * read exactly 0.0 dB in all 69 frames of the same run, while the chain test
+   * reading every block saw it reach 7.6 — a lane that would have drawn flat
+   * on a stage doing its loudest work.
+   *
+   * Folded by magnitude and not by sign, because `attack` runs both ways: a
+   * negative setting softens the leading edge, and the deepest softening is
+   * the reading that matters just as much as the hardest sharpening.
+   */
+  fold_by_magnitude(meters->bass_punch_transient_db,
+                    static_cast<float>(transient_db));
+  meters->bass_punch_sustain_db.store(static_cast<float>(sustain_db),
+                                      std::memory_order_relaxed);
+  meters->bass_punch_duck_db.store(static_cast<float>(duck_db),
+                                   std::memory_order_relaxed);
+}
+
+void feq_meters_read_bass_punch(FeqMeters* meters, float* out_transient_db,
+                                float* out_sustain_db, float* out_duck_db) {
+  if (meters == nullptr || out_transient_db == nullptr ||
+      out_sustain_db == nullptr || out_duck_db == nullptr) {
+    return;
+  }
+  /*
+   * The transient is cleared as it is taken; the other two are not.
+   *
+   * A hold that survives its own read cannot say "nothing happened in this
+   * window", and the note after a kick has to be able to. The sustain and the
+   * duck are stored rather than folded, so there is nothing to clear — the
+   * next block overwrites them either way.
+   */
+  *out_transient_db =
+      meters->bass_punch_transient_db.exchange(0.0f, std::memory_order_relaxed);
+  *out_sustain_db =
+      meters->bass_punch_sustain_db.load(std::memory_order_relaxed);
+  *out_duck_db = meters->bass_punch_duck_db.load(std::memory_order_relaxed);
+}
+
+void feq_meters_publish_deesser(FeqMeters* meters,
+                                const FeqDeEsserReport* report) {
+  if (meters == nullptr || report == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  deesser_window_fold(meters->deesser, *report);
+}
+
+void feq_meters_read_deesser(FeqMeters* meters, FeqDeEsserReport* out) {
+  if (meters == nullptr || out == nullptr) {
+    return;
+  }
+  deesser_window_take(meters->deesser, out);
+}
+
+void feq_meters_publish_footsteps(FeqMeters* meters,
+                                  const FeqFootstepsReport* report) {
+  if (meters == nullptr || report == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  footsteps_window_fold(meters->footsteps, *report);
+}
+
+void feq_meters_read_footsteps(FeqMeters* meters, FeqFootstepsReport* out) {
+  if (meters == nullptr || out == nullptr) {
+    return;
+  }
+  footsteps_window_take(meters->footsteps, out);
+}
+
+void feq_meters_publish_master(FeqMeters* meters,
+                               const FeqMasterTelemetry* telemetry) {
+  if (meters == nullptr || telemetry == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  fold_minimum(meters->auto_headroom_reduction_db,
+               static_cast<float>(telemetry->auto_headroom_reduction_db));
+  fold_maximum(meters->auto_headroom_true_peak_db,
+               static_cast<float>(telemetry->auto_headroom_true_peak_db));
+}
+
+void feq_meters_read_master(FeqMeters* meters, FeqMasterTelemetry* out) {
+  if (meters == nullptr || out == nullptr) {
+    return;
+  }
+  out->auto_headroom_reduction_db =
+      meters->auto_headroom_reduction_db.exchange(0.0f,
+                                                  std::memory_order_relaxed);
+  out->auto_headroom_true_peak_db =
+      meters->auto_headroom_true_peak_db.exchange(kMeterFloorDb,
+                                                  std::memory_order_relaxed);
+}
+
+void feq_meters_publish_normalizer(FeqMeters* meters,
+                                   const double* input_peaks,
+                                   const double* output_peaks,
+                                   double applied_gain_db,
+                                   uint32_t frames,
+                                   double sample_rate) {
+  if (meters == nullptr || input_peaks == nullptr || output_peaks == nullptr ||
+      meters->enabled.load(std::memory_order_acquire) == 0) {
+    return;
+  }
+  for (uint32_t channel = 0; channel < 2; channel += 1) {
+    fold_released_peak(meters->normalizer_input_peaks[channel],
+                       input_peaks[channel], frames, sample_rate);
+    fold_released_peak(meters->normalizer_output_peaks[channel],
+                       output_peaks[channel], frames, sample_rate);
+  }
+  meters->normalizer_applied_gain_db.store(
+      static_cast<float>(applied_gain_db), std::memory_order_relaxed);
+}
+
+void feq_meters_read_normalizer(FeqMeters* meters,
+                                float* out_input_peaks,
+                                float* out_output_peaks,
+                                float* out_applied_gain_db) {
+  if (meters == nullptr || out_input_peaks == nullptr ||
+      out_output_peaks == nullptr || out_applied_gain_db == nullptr) {
+    return;
+  }
+  for (uint32_t channel = 0; channel < 2; channel += 1) {
+    out_input_peaks[channel] =
+        meters->normalizer_input_peaks[channel].load(std::memory_order_relaxed);
+    out_output_peaks[channel] = meters->normalizer_output_peaks[channel].load(
+        std::memory_order_relaxed);
+  }
+  *out_applied_gain_db =
+      meters->normalizer_applied_gain_db.load(std::memory_order_relaxed);
+}
+
+uint32_t feq_meters_read_bands(FeqMeters* meters,
+                               float* out_amounts,
+                               float* out_levels,
+                               uint32_t capacity) {
+  if (meters == nullptr || out_amounts == nullptr || out_levels == nullptr) {
+    return 0;
+  }
+  BandWindow& source = meters->bands;
+  for (int attempt = 0; attempt < 2; attempt += 1) {
+    const uint32_t before = source.sequence.load(std::memory_order_acquire);
+    if ((before & 1u) != 0u) {
+      continue;
+    }
+    const uint32_t count = source.count.load(std::memory_order_relaxed);
+    const uint32_t span = count > capacity ? capacity : count;
+    for (uint32_t band = 0; band < span; band += 1) {
+      out_amounts[band] = source.amounts[band];
+      out_levels[band] = source.levels[band];
+    }
+    if (source.sequence.load(std::memory_order_acquire) != before) {
+      continue;
+    }
+    return span;
+  }
+  return 0;
+}
+
+int feq_meters_read_scope(FeqMeters* meters,
+                          float* out_pairs,
+                          uint32_t pairs,
+                          double* out_correlation,
+                          float* out_peaks) {
+  if (meters == nullptr || out_pairs == nullptr || out_correlation == nullptr ||
+      out_peaks == nullptr || pairs != FEQ_METER_SCOPE_PAIRS) {
+    return 0;
+  }
+  ScopeWindow& scope = meters->scope;
+  const uint64_t generation = scope.generation.load(std::memory_order_acquire);
+  if (generation == scope.drawn) {
+    return 0;
+  }
+
+  for (int attempt = 0; attempt < 2; attempt += 1) {
+    const uint32_t before = scope.sequence.load(std::memory_order_acquire);
+    if ((before & 1u) != 0u) {
+      continue;
+    }
+    std::memcpy(out_pairs, scope.published.data(),
+                sizeof(float) * FEQ_METER_SCOPE_PAIRS * 2);
+    const double correlation =
+        scope.correlation.load(std::memory_order_relaxed);
+    const float left = scope.published_peak_left.load(std::memory_order_relaxed);
+    const float right =
+        scope.published_peak_right.load(std::memory_order_relaxed);
+    const uint32_t after = scope.sequence.load(std::memory_order_acquire);
+    if (before != after) {
+      continue;
+    }
+    *out_correlation = correlation;
+    out_peaks[0] = left;
+    out_peaks[1] = right;
+    scope.drawn = generation;
+    return 1;
+  }
+  return 0;
+}
+
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "Room telemetry must be lock-free");
+void feq_meters_publish_room(FeqMeters* meters, const FeqRoomReport* report) {
+  if (!meters || !report) return;
+  uint32_t bits = 0;
+  std::memcpy(&bits, &report->reference_gain_db, sizeof(bits));
+  meters->room_report.store((static_cast<uint64_t>(bits) << 32) | report->flags,
+                            std::memory_order_relaxed);
+}
+void feq_meters_read_room(const FeqMeters* meters, FeqRoomReport* report) {
+  if (!report) return;
+  uint64_t packed =
+      meters ? meters->room_report.load(std::memory_order_relaxed) : 0;
+  report->flags = static_cast<uint32_t>(packed);
+  uint32_t bits = static_cast<uint32_t>(packed >> 32);
+  std::memcpy(&report->reference_gain_db, &bits, sizeof(bits));
+}
+void feq_meters_publish_denoise(FeqMeters* meters, const FeqDenoiseReport* report) {
+  if (meters == nullptr || report == nullptr) return;
+  meters->denoise_reduction.store(report->reduction_db, std::memory_order_relaxed);
+  meters->denoise_floor.store(report->noise_floor_db, std::memory_order_relaxed);
+  meters->denoise_clicks.store(report->clicks_repaired, std::memory_order_relaxed);
+  meters->denoise_underruns.store(report->voice_underruns, std::memory_order_relaxed);
+  meters->denoise_profile.store(report->profile_ready, std::memory_order_relaxed);
+  meters->denoise_voice.store(report->voice_model_loaded, std::memory_order_relaxed);
+  for (uint32_t band = 0; band < FEQ_DENOISE_PROFILE_BANDS; ++band) {
+    meters->denoise_bands[band].store(report->floor_bands_db[band], std::memory_order_relaxed);
+    meters->denoise_gains[band].store(report->hiss_reduction_bands_db[band], std::memory_order_relaxed);
+  }
+}
+void feq_meters_read_denoise(const FeqMeters* meters, FeqDenoiseReport* report) {
+  if (meters == nullptr || report == nullptr) return;
+  report->reduction_db = meters->denoise_reduction.load(std::memory_order_relaxed);
+  report->noise_floor_db = meters->denoise_floor.load(std::memory_order_relaxed);
+  report->clicks_repaired = meters->denoise_clicks.load(std::memory_order_relaxed);
+  report->voice_underruns = meters->denoise_underruns.load(std::memory_order_relaxed);
+  report->profile_ready = meters->denoise_profile.load(std::memory_order_relaxed);
+  report->voice_model_loaded = meters->denoise_voice.load(std::memory_order_relaxed);
+  for (uint32_t band = 0; band < FEQ_DENOISE_PROFILE_BANDS; ++band) {
+    report->floor_bands_db[band] = meters->denoise_bands[band].load(std::memory_order_relaxed);
+    report->hiss_reduction_bands_db[band] = meters->denoise_gains[band].load(std::memory_order_relaxed);
+  }
+}
+
+void feq_meters_publish_live_input(FeqMeters* meters, double peak_db, double lufs,
+                                 double reference_lufs, int level_state, double output_lufs) {
+  if (meters == nullptr) return;
+  meters->live_input_peak.store(static_cast<float>(peak_db), std::memory_order_relaxed);
+  meters->live_input_lufs.store(static_cast<float>(lufs), std::memory_order_relaxed);
+  meters->live_reference_lufs.store(static_cast<float>(reference_lufs), std::memory_order_relaxed);
+  meters->live_level_state.store(level_state, std::memory_order_relaxed);
+  meters->live_output_lufs.store(static_cast<float>(output_lufs), std::memory_order_relaxed);
+}
+void feq_meters_read_live_input(FeqMeters* meters, float* values) {
+  if (meters == nullptr || values == nullptr) return;
+  values[0] = meters->live_input_peak.load(std::memory_order_relaxed);
+  values[1] = meters->live_input_lufs.load(std::memory_order_relaxed);
+  values[2] = meters->live_reference_lufs.load(std::memory_order_relaxed);
+  values[3] = static_cast<float>(meters->live_level_state.load(std::memory_order_relaxed));
+  values[4] = meters->live_output_lufs.load(std::memory_order_relaxed);
+}
+}  // extern "C"

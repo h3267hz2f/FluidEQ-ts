@@ -1,0 +1,529 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+#include "watcher.h"
+
+#include <process.h>
+
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "paths.h"
+
+namespace fluideq_engine {
+
+namespace {
+
+/**
+ * The change-notification handle, closed on every way out of `run()`.
+ *
+ * `run()` builds log strings and can therefore throw, and the thread
+ * procedure above it swallows what escapes. A handle leaked on that path
+ * would hold a directory open for as long as audiodg.exe lives, on a machine
+ * that has already run out of memory once.
+ */
+class ChangeNotification {
+ public:
+  explicit ChangeNotification(HANDLE handle) noexcept : handle_(handle) {}
+  ~ChangeNotification() { close(); }
+
+  ChangeNotification(const ChangeNotification&) = delete;
+  ChangeNotification& operator=(const ChangeNotification&) = delete;
+
+  bool valid() const noexcept {
+    return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+  }
+  HANDLE get() const noexcept { return handle_; }
+
+  void close() noexcept {
+    if (valid()) {
+      FindCloseChangeNotification(handle_);
+    }
+    handle_ = INVALID_HANDLE_VALUE;
+  }
+
+ private:
+  HANDLE handle_;
+};
+
+/**
+ * The link's own lines, under no endpoint: it belongs to the process, not to
+ * any one of the outputs whose watchers share it.
+ */
+void log_owner(std::string_view message) noexcept {
+  trace(no_endpoint(), message);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+
+Watcher::Watcher(GraphSlot& slot, Log& log, Endpoint endpoint,
+                 std::wstring config_dir, uint32_t sample_rate,
+                 uint32_t channels, uint32_t max_frames,
+                 unsigned long channel_mask, std::atomic<SplitTap*>* split,
+                 bool default_mode)
+    : slot_(slot),
+      log_(log),
+      endpoint_(std::move(endpoint)),
+      config_dir_(std::move(config_dir)),
+      sample_rate_(sample_rate),
+      channels_(channels),
+      max_frames_(max_frames),
+      channel_mask_(channel_mask),
+      split_slot_(split),
+      default_mode_(default_mode) {}
+
+Watcher::~Watcher() { stop(); }
+
+void Watcher::load_initial() {
+  // A separate display connection cannot affect the engine's owner signal.
+  try {
+    analysis_ = std::make_unique<AnalysisLink>(endpoint_.guid, sample_rate_, channels_);
+  } catch (...) {
+    log_.write("DSP displays unavailable; audio processing continues");
+  }
+  try {
+    leveling_ = leveling_for(endpoint_.guid);
+  } catch (...) {
+    log_.write("song leveling memory unavailable; leveling relearns per stream");
+  }
+  open_level_prediction();
+  if (endpoint_.guid.empty()) {
+    // Windows handed this instance no device collection, so there is no way
+    // to tell which `Device:` blocks apply. Everything unguarded still does.
+    log_.write("no endpoint identified; only unguarded configuration applies");
+  }
+  if (!is_directory(config_dir_)) {
+    log_.write("configuration directory " + to_utf8(config_dir_) +
+               " is not present; waiting for it");
+  }
+  // Before the first reload, so the first graph already knows whether
+  // FluidEQ is there — `acquire` has tried the pipe by the time it returns.
+  owner_ = OwnerLink::acquire(owner_pipe_name(), &log_owner);
+  if (owner_ == nullptr) {
+    log_.write("cannot tell whether FluidEQ is running; the configuration "
+               "applies whether it is or not");
+  }
+  reload();
+}
+
+bool Watcher::owner_present() const noexcept {
+  return owner_ == nullptr || owner_->present();
+}
+
+bool Watcher::start() {
+  stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (stop_event_ == nullptr) {
+    log_.write("could not create the stop event; configuration changes will "
+               "not be picked up");
+    return false;
+  }
+  reset_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (reset_event_ == nullptr) {
+    CloseHandle(stop_event_);
+    stop_event_ = nullptr;
+    log_.write("could not create the reset event; the effect would keep its "
+               "filter state across a pipeline flush");
+    return false;
+  }
+  status_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (status_event_ == nullptr) {
+    // Not worth refusing the watcher over: everything else goes on, and the
+    // status simply keeps saying nothing has reached the engine until the
+    // next time anything else has it rewritten.
+    log_.write("could not create the status event; the status will not say "
+               "when sound first reaches this output or how long its blocks "
+               "take");
+  }
+  if (split_slot_ != nullptr && default_mode_) {
+    split_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (split_event_ == nullptr) {
+      // A second output from a main output at a rate first met after this
+      // lock then plays nothing until the configuration next changes.
+      log_.write("could not create the second output event; its status will "
+                 "not follow it");
+    }
+  }
+  if (owner_ != nullptr) {
+    owner_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    try {
+      if (owner_event_ != nullptr) {
+        owner_->subscribe(owner_event_);
+      }
+    } catch (...) {
+      CloseHandle(owner_event_);
+      owner_event_ = nullptr;
+    }
+    if (owner_event_ == nullptr) {
+      // FluidEQ coming or going is then only noticed at the next change in
+      // the configuration directory, which a starting app always makes.
+      log_.write("could not subscribe to FluidEQ coming and going");
+    }
+  }
+  unsigned id = 0;
+  // `_beginthreadex` rather than `CreateThread`: this thread runs the C++
+  // runtime — strings, vectors, the resolver — and the CRT wants to know
+  // about a thread before that thread uses it.
+  const uintptr_t handle =
+      _beginthreadex(nullptr, 0, &Watcher::thread_entry, this, 0, &id);
+  if (handle == 0) {
+    CloseHandle(stop_event_);
+    stop_event_ = nullptr;
+    CloseHandle(reset_event_);
+    reset_event_ = nullptr;
+    if (status_event_ != nullptr) {
+      CloseHandle(status_event_);
+      status_event_ = nullptr;
+    }
+    if (split_event_ != nullptr) {
+      CloseHandle(split_event_);
+      split_event_ = nullptr;
+    }
+    if (owner_event_ != nullptr) {
+      owner_->unsubscribe(owner_event_);
+      CloseHandle(owner_event_);
+      owner_event_ = nullptr;
+    }
+    log_.write("could not start the configuration watcher; changes will not "
+               "be picked up");
+    return false;
+  }
+  thread_ = reinterpret_cast<HANDLE>(handle);
+  // Below normal inside audiodg.exe, whose audio threads run far above it:
+  // designing a 4097-tap FIR must never be scheduled against the callback
+  // that has 10 ms to fill a buffer.
+  SetThreadPriority(thread_, THREAD_PRIORITY_BELOW_NORMAL);
+  return true;
+}
+
+void Watcher::stop() noexcept {
+  if (thread_ != nullptr) {
+    SetEvent(stop_event_);
+    WaitForSingleObject(thread_, INFINITE);
+    CloseHandle(thread_);
+    thread_ = nullptr;
+  }
+  if (stop_event_ != nullptr) {
+    CloseHandle(stop_event_);
+    stop_event_ = nullptr;
+  }
+  // After the join for the same reason the stop event is: the thread waits on
+  // it, and closing a handle a wait is standing on is undefined.
+  if (reset_event_ != nullptr) {
+    CloseHandle(reset_event_);
+    reset_event_ = nullptr;
+  }
+  // The audio thread is stopped before `stop()` is reached — Windows does not
+  // call `APOProcess` outside a lock — so nothing can be setting this now.
+  if (status_event_ != nullptr) {
+    CloseHandle(status_event_);
+    status_event_ = nullptr;
+  }
+  if (split_event_ != nullptr) {
+    CloseHandle(split_event_);
+    split_event_ = nullptr;
+  }
+  // Unsubscribed before it is closed: the link may be setting it from its own
+  // thread right up until `unsubscribe` returns.
+  if (owner_event_ != nullptr) {
+    owner_->unsubscribe(owner_event_);
+    CloseHandle(owner_event_);
+    owner_event_ = nullptr;
+  }
+  // The last watcher to let go ends the link's thread and its connection.
+  owner_.reset();
+  // Windows has let this output go: say so, or the app goes on reading a
+  // "locked" left by an engine that is no longer running it.
+  report_status(false);
+  if (split_slot_ != nullptr) {
+    split_slot_->store(nullptr, std::memory_order_release);
+  }
+  split_.reset();
+  // Only now: until the thread has joined it is still the owner of these.
+  slot_.clear();
+  rack_source_ = nullptr;
+  for (const OwnedGraph& retired : owned_) {
+    delete retired.graph;
+  }
+  owned_.clear();
+  analysis_.reset();
+}
+
+unsigned __stdcall Watcher::thread_entry(void* self) {
+  // Nothing may leave this thread. It runs inside audiodg.exe, and an
+  // exception escaping a thread procedure there is a terminate() that takes
+  // every output on the machine down with it — building a path string when
+  // the process is out of memory is enough to reach here.
+  try {
+    static_cast<Watcher*>(self)->run();
+  } catch (...) {
+    // The endpoint keeps whatever graph was last published; it simply stops
+    // following further changes.
+  }
+  return 0;
+}
+
+void Watcher::run() {
+  // Main's initial graph is already ready. Sharing cannot hold up its lock,
+  // fail its setup, or take its graph down if optional allocation fails.
+  // Set priority here as well as in start(): the child may run before the
+  // parent gets its thread handle back.
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  if (split_slot_ != nullptr && default_mode_) {
+    try {
+      LARGE_INTEGER frequency{};
+      if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0) {
+        split_ = std::make_unique<SplitTap>(
+            endpoint_.guid, sample_rate_, channels_, channel_mask_, true,
+            frequency.QuadPart, config_dir_);
+        split_slot_->store(split_.get(), std::memory_order_release);
+      } else {
+        log_.write("second outputs unavailable: no clock; main processing continues");
+      }
+    } catch (...) {
+      log_.write("second outputs unavailable: setup failed; main processing continues");
+    }
+  }
+  // FILE_NAME covers a create, a rename and a delete; LAST_WRITE and SIZE
+  // cover external editors rewriting in place. The app publishes complete
+  // profiles by rename, so FILE_NAME is required even for an existing file.
+  constexpr DWORD kFilter = FILE_NOTIFY_CHANGE_LAST_WRITE |
+                            FILE_NOTIFY_CHANGE_SIZE |
+                            FILE_NOTIFY_CHANGE_FILE_NAME;
+
+  for (;;) {
+    // The configuration directory may not exist yet — the engine can be
+    // attached before the app has ever written a profile. Waiting on the
+    // deepest ancestor that does exist turns "not there yet" into an event
+    // instead of a retry loop.
+    const std::wstring watched = deepest_existing(config_dir_);
+    if (watched.empty()) {
+      break;
+    }
+    const ChangeNotification change(
+        FindFirstChangeNotificationW(watched.c_str(), TRUE, kFilter));
+    if (!change.valid()) {
+      log_.write("cannot watch " + to_utf8(watched) +
+                 "; configuration changes will not be picked up");
+      unwatched_ = true;
+      report_status(true);
+      break;
+    }
+    const bool watching_config = watched == config_dir_;
+    // Declared after `change`, so it lets go of the handle before it closes.
+    struct Armed {
+      HANDLE& slot;
+      ~Armed() { slot = nullptr; }
+    } const armed{change_armed_};
+    change_armed_ = watching_config ? change.get() : nullptr;
+    if (watching_config) {
+      // A write that landed between the last resolve and this notification
+      // being armed would otherwise never be seen.
+      reload();
+    }
+
+    bool rearm = false;
+    // A null handle anywhere in the array fails the whole wait, so each one
+    // that may be absent is appended rather than left as a hole, and its
+    // place is one no wake can name when it is.
+    constexpr DWORD kAbsent = MAXIMUM_WAIT_OBJECTS;
+    HANDLE handles[9] = {stop_event_, reset_event_, change.get()};
+    DWORD count = 3;
+    const auto append = [&](HANDLE handle) {
+      if (handle == nullptr) {
+        return kAbsent;
+      }
+      handles[count] = handle;
+      return count++;
+    };
+    const DWORD status_at = append(status_event_);
+    const DWORD owner_at = append(owner_event_);
+    const DWORD split_at = append(split_event_);
+    const DWORD base_count = count;
+    while (!rearm) {
+      // Optional transport ownership uses the same event loop. A dead
+      // writer or graceful release wakes control; there is no retry timer.
+      count = base_count;
+      const DWORD writer_at = append(split_ ? split_->writer_process() : nullptr);
+      const DWORD release_at = append(split_ ? split_->writer_released() : nullptr);
+      const DWORD init_at = append(split_ ? split_->initializing() : nullptr);
+      const DWORD woke =
+          WaitForMultipleObjects(count, handles, FALSE, INFINITE);
+      if (woke == WAIT_OBJECT_0) {
+        return;
+      }
+      if (init_at != kAbsent && (woke == WAIT_OBJECT_0 + init_at ||
+                                 woke == WAIT_ABANDONED_0 + init_at)) {
+        // Waiting on a mutex grants ownership, including abandonment. Pass
+        // that ownership through exactly once; prepare releases it. stop is
+        // always the first wait handle even while another process is stuck.
+        split_->prepare(handles[init_at]);
+        report_status(true);
+        continue;
+      }
+      if (woke == WAIT_OBJECT_0 + 1) {
+        // `Reset` asked for it, and it is answered with a graph that KEEPS
+        // the audio already in flight — see `request_reset`.
+        //
+        // It used to be a fresh graph with nothing carried into it.
+        // That is right for an effect on one stream, whose next samples have
+        // nothing to do with its last ones. This is an endpoint effect: it
+        // processes the mix, and Windows flushes that pipeline whenever any
+        // stream on the output starts, stops or changes format — eight times
+        // in thirteen minutes of ordinary listening — while the music that
+        // was already playing carries straight on through it.
+        //
+        // With the room on that is not a lost effect, it is a hole. Every
+        // channel is folded through the room's convolution, so the room IS
+        // the signal path, and a convolver with no history has nothing to put
+        // out for its first partition: 512 frames, 11 ms at 48 kHz, of
+        // silence in the middle of the music, every time anything on the
+        // machine opened or closed a sound. `dsp_chain_test.cpp` measures
+        // both sides of it: the handover keeps a tone at -0.1 dBFS across
+        // twelve rebuilds in a row, and its positive control — the same room
+        // built without one — is -200 dBFS for its first block.
+        //
+        // And a rebuild short-circuits when the configuration has not
+        // changed, which a flush by itself never does, so the common flush
+        // now costs a directory read instead of a whole graph.
+        reload();
+        continue;
+      }
+      if (status_at != kAbsent && woke == WAIT_OBJECT_0 + status_at) {
+        // Sound has reached this output's engine for the first time since
+        // Windows built its chain — `say_it_carried` — or a block took a
+        // larger share of its time than any before — `say_it_was_slow`.
+        // Nothing about the audio changes; the app is told, and that is the
+        // whole point.
+        log_timing();
+        report_status(true);
+        continue;
+      }
+      if (owner_at != kAbsent && woke == WAIT_OBJECT_0 + owner_at) {
+        // FluidEQ came or went. The reload reads which, and either builds the
+        // configuration's graph or a pass-through one.
+        reload();
+        continue;
+      }
+      if ((split_at != kAbsent && woke == WAIT_OBJECT_0 + split_at) ||
+          (writer_at != kAbsent && woke == WAIT_OBJECT_0 + writer_at) ||
+          (release_at != kAbsent && woke == WAIT_OBJECT_0 + release_at)) {
+        // The second output this instance plays changed, or met a main
+        // output at a rate it has no kernel for — `split_wake`.
+        if (split_) split_->prepare();
+        report_status(true);
+        continue;
+      }
+      if (woke != WAIT_OBJECT_0 + 2) {
+        rearm = true;  // The handle went bad; rebuild the watch.
+        break;
+      }
+      // A starting app writes into this directory before anything else, so a
+      // change here is the moment a missing pipe may have become a present
+      // one. Asked before the reload rather than after: the link connects on
+      // its own thread and wakes this one again when it has.
+      if (owner_ != nullptr) {
+        owner_->retry();
+      }
+      // Re-armed before the reload, not after: a write landing while the
+      // reload runs then wakes the next wait, and meanwhile tells an edit's
+      // level being worked out that a newer edit has made it worthless
+      // (`change_pending`). Nothing is missed either way — Windows keeps
+      // what changed between two calls and answers the next one at once.
+      const bool rearmed = FindNextChangeNotification(change.get()) != 0;
+      if (watching_config) {
+        reload();
+      } else if (is_directory(config_dir_)) {
+        rearm = true;  // It exists now: watch it directly instead.
+        break;
+      }
+      if (!rearmed) {
+        rearm = true;  // Usually the watched directory itself was removed.
+      }
+    }
+  }
+
+  // Nothing left to watch. Waiting here is not a poll and costs nothing; the
+  // alternative — returning — would leave `stop()` joining a thread that had
+  // already gone, which is fine, but this keeps the audio running with
+  // whatever graph was last published rather than silently abandoning the
+  // endpoint's ability to be reconfigured without a restart.
+  //
+  // The reset event is waited on as well, and answered the same way as above
+  // — the graph keeps what is in flight — on an endpoint whose configuration
+  // directory has gone. There is no rack and no room to keep there, so this
+  // is about the two paths agreeing rather than about the sound.
+  // The status event is waited on here as well: an output with no
+  // configuration directory still has an app asking whether its sound is
+  // going through the engine at all.
+  HANDLE idle_handles[3] = {stop_event_, reset_event_, status_event_};
+  const DWORD idle_count = status_event_ != nullptr ? 3 : 2;
+  for (;;) {
+    const DWORD woke =
+        WaitForMultipleObjects(idle_count, idle_handles, FALSE, INFINITE);
+    if (idle_count == 3 && woke == WAIT_OBJECT_0 + 2) {
+      log_timing();
+      report_status(true);
+      continue;
+    }
+    if (woke != WAIT_OBJECT_0 + 1) {
+      return;  // Stop, or a wait that cannot be repeated.
+    }
+    reload();
+  }
+}
+
+bool Watcher::stop_requested() const noexcept {
+  // Before `start()` there is no event and nothing has asked to stop:
+  // `load_initial` runs this same path on the caller's thread.
+  return stop_event_ != nullptr &&
+         WaitForSingleObject(stop_event_, 0) == WAIT_OBJECT_0;
+}
+
+bool Watcher::change_pending() const noexcept {
+  return change_armed_ != nullptr &&
+         WaitForSingleObject(change_armed_, 0) == WAIT_OBJECT_0;
+}
+
+void Watcher::say_it_carried() noexcept {
+  // Null before `start()` and after `stop()`, and the audio thread runs
+  // between the two — see the header for why one `SetEvent` on that thread
+  // is worth it, and why it happens at most once for each lock.
+  if (status_event_ != nullptr) {
+    SetEvent(status_event_);
+  }
+}
+
+void Watcher::say_it_was_slow() noexcept {
+  // As `say_it_carried`: null outside `start()`..`stop()`, and set at most
+  // once per step of `timing_step` in a lock.
+  if (status_event_ != nullptr) {
+    SetEvent(status_event_);
+  }
+}
+
+void Watcher::split_wake() noexcept {
+  // As `say_it_carried`: null outside `start()`..`stop()`, which is outside
+  // the only time the audio thread runs.
+  if (split_event_ != nullptr) {
+    SetEvent(split_event_);
+  }
+}
+
+void Watcher::request_reset() noexcept {
+  // Null before `start()` and after `stop()`. Both are states in which there
+  // is nothing to reset: no thread is running and no graph is on the audio
+  // thread. `LockForProcess`/`UnlockForProcess` and `Reset` all arrive on the
+  // audio engine's non-real-time thread, so this handle cannot be closed
+  // underneath the call.
+  if (reset_event_ != nullptr) {
+    SetEvent(reset_event_);
+  }
+}
+
+}  // namespace fluideq_engine

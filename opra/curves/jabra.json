@@ -1,0 +1,1 @@
+{"elite_10":{"jabra:elite_10::autoeq_rtings":{"gainDb":-4.3,"bands":[{"type":"low_shelf","frequency":105,"gain_db":-1.8,"q":0.71},{"type":"peak_dip","frequency":310,"gain_db":-1.9,"q":1.2},{"type":"peak_dip","frequency":2900,"gain_db":2.6,"q":1.9},{"type":"high_shelf","frequency":10000,"gain_db":-1.5,"q":0.71}]}}}

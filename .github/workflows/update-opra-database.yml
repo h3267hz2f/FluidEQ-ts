@@ -1,0 +1,67 @@
+name: Update OPRA database
+
+on:
+  workflow_dispatch:
+  # OPRA re-imports its sources once a month, so checking weekly would mostly
+  # be asking a question whose answer has not changed.
+  schedule:
+    - cron: '23 6 5 * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/update-opra-database.yml'
+      - 'scripts/build-opra-database.ts'
+
+permissions:
+  contents: write
+
+jobs:
+  publish-database:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out FluidEQ
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Fetched from OPRA's own repository rather than from the CDN Roon runs:
+      # that endpoint is offered for non-commercial and open-source use, and
+      # FluidEQ is sold. Mirroring it ourselves is what they ask commercial
+      # consumers to do.
+      - name: Build the bundled library from OPRA
+        run: pnpm opra:update
+
+      - name: Validate what was built
+        run: pnpm test:opra
+
+      # OPRA's data is CC BY-SA 4.0, and the reshaping above makes what we ship
+      # adapted material. The archive is downloaded and unpacked on its own,
+      # away from the repository the rest of the notices live in, so attribution
+      # and the licence are only carried if they are inside the archive.
+      - name: Package database
+        run: |
+          zip -qr opra-database.zip opra assets/opra-version.json \
+            assets/licenses/CC-BY-SA-4.0-LICENSE.txt \
+            assets/licenses/OPRA-ATTRIBUTION.txt
+
+      # The assets go onto the current version release rather than a release of
+      # their own. A standalone data release is the newest release the moment it
+      # is published, which makes it what GitHub answers /releases/latest with —
+      # and that is where the app's GitHub update feed goes looking for
+      # latest.yml. It found a database archive instead.
+      - name: Publish update assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(gh release view --json tagName --jq .tagName)
+          gh release upload "$latest" opra-database.zip assets/opra-version.json --clobber

@@ -1,0 +1,253 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+// What the watcher tells others about the graphs it publishes: `engine.log`,
+// and the status file the app reads. Its own file because `watcher.cpp` is
+// about threads and handovers, and this is only ever about saying so.
+
+#include "watcher.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "config_file.h"
+#include "paths.h"
+#include "programme.h"
+#include "split_file.h"
+#include "status_file.h"
+
+namespace fluideq_engine {
+
+namespace {
+
+// The `ignored` line is emitted once per distinct set. The cap stops a config
+// being rewritten with a different stray command every second from growing
+// this list without bound; a machine that reaches it has already told the log
+// everything it had to say.
+constexpr size_t kMaxIgnoredSetsLogged = 32;
+
+std::string join(const std::vector<std::string>& items) {
+  std::string out;
+  for (const std::string& item : items) {
+    if (!out.empty()) {
+      out += ", ";
+    }
+    out += item;
+  }
+  return out;
+}
+
+}  // namespace
+
+void Watcher::log_chain(const Chain& chain, const Graph& graph,
+                        bool owner_present) {
+  std::string files;
+  for (const std::wstring& file : chain.files_read) {
+    if (!files.empty()) {
+      files += ", ";
+    }
+    files += to_utf8(file_name_of(file));
+  }
+  std::string line = "chain loaded: files=" +
+                     std::to_string(chain.files_read.size());
+  if (!files.empty()) {
+    line += " (" + files + ")";
+  }
+  line += " bands=" + std::to_string(chain.bands.size());
+  line += " graphic_curves=" + std::to_string(chain.graphic_curves.size());
+  line += " preamp=" + decibels(chain.preamp_db) + " dB";
+  line += " ir=" + (chain.convolution_path.empty()
+                        ? std::string("none")
+                        : to_utf8(chain.convolution_path));
+  line += " rack=" + (chain.dsp_values.empty()
+                          ? std::string("none")
+                          : std::to_string(chain.dsp_values.size()) +
+                                " values");
+  line += " latency=" + std::to_string(graph.latency_frames()) + " frames";
+  log_.write(line);
+
+  for (const std::string& warning : graph.warnings()) {
+    log_.write("graph warning: " + warning);
+  }
+
+  if (!chain.ignored.empty() &&
+      logged_ignored_.size() < kMaxIgnoredSetsLogged) {
+    const std::string set = join(chain.ignored);
+    const bool seen = std::find(logged_ignored_.begin(), logged_ignored_.end(),
+                                set) != logged_ignored_.end();
+    if (!seen) {
+      // Recorded before it is written, so reaching the cap silences the line
+      // rather than turning it into one entry per reload.
+      logged_ignored_.push_back(set);
+      log_.write("ignored commands (this engine does not run them): " + set);
+    }
+  }
+
+  std::string reason;
+  if (graph.is_passthrough()) {
+    if (!owner_present) {
+      reason = "FluidEQ is not running";
+    } else if (!is_directory(config_dir_)) {
+      reason = "no configuration directory";
+    } else if (chain.files_read.empty()) {
+      reason = "no config.txt in the configuration directory";
+    } else if (!chain.matched) {
+      reason = "no configuration block names this endpoint";
+    } else {
+      reason = "the configuration asks for nothing on this endpoint";
+    }
+  }
+  if (!have_passthrough_reason_ || reason != passthrough_reason_) {
+    passthrough_reason_ = reason;
+    have_passthrough_reason_ = true;
+    if (!reason.empty()) {
+      log_.write("pass-through: " + reason);
+    } else {
+      log_.write("processing this endpoint");
+    }
+  }
+}
+
+void Watcher::log_timing() noexcept {
+  try {
+    const auto timing = output_block_timing(endpoint_.guid);
+    if (!timing) {
+      return;
+    }
+    const BlockTiming::Reading reading = timing->read();
+    const uint32_t step = timing_step(reading.slowest_permille);
+    if (reading.blocks == 0 || step <= timing_step_logged_) {
+      return;
+    }
+    timing_step_logged_ = step;
+    log_.write(describe_timing(reading));
+  } catch (...) {
+    // A line the log never gets costs the report, not the audio.
+  }
+}
+
+void Watcher::report_status(bool locked) noexcept {
+  try {
+    bool written = true;
+    std::string why;
+    if (!locked) {
+      written = status_.leave(&why);
+    } else if (!endpoint_.guid.empty()) {  // Else nothing to match it to.
+      EngineStatus status;
+      status.endpoint = endpoint_.guid;
+      status.locked = true;
+      status.processing = last_processing_;
+      status.owner = last_owner_;
+      status.reason = passthrough_reason_;
+      status.problems = graph_problems_;
+      status.channels = channels_;
+      status.room = room_state_;
+      status.rate = sample_rate_;
+      status.latency = latency_;
+      status.latency_parts = latency_parts_;
+      status.latency_active = latency_active_;
+      status.game_mode = game_mode_;
+      char source_id[17] = {};
+      std::snprintf(source_id, sizeof(source_id), "%016llx",
+                    static_cast<unsigned long long>(source_report_.source));
+      const bool source_ready = !source_prepare_failed_ && !source_invalid_ &&
+          rack_source_ != nullptr && slot_.active() == rack_source_ &&
+          source_report_.ready;
+      status.source_analysis = EngineStatus::SourceAnalysis{1,
+          source_report_.library ? "library" : "live",
+          source_report_.engine_owner ? "engine" : "host", source_id,
+          source_report_.epoch, source_report_.revision, source_ready,
+          source_ready && source_report_.voice_ready};
+      if (source_prepare_failed_ || source_invalid_) {
+        status.problems.push_back("source-analysis");
+      }
+      if (split_ && split_->transport_failed()) status.problems.push_back("split-transport");
+      // The output's, not this instance's: Windows runs one instance per
+      // signal-processing mode and only the one carrying what is playing
+      // ever sets it.
+      if (const auto carried = output_carried_flag(endpoint_.guid)) {
+        status.carried = carried->load(std::memory_order_relaxed);
+      }
+      // The output's too, for the same reason.
+      if (const auto timing = output_block_timing(endpoint_.guid)) {
+        const BlockTiming::Reading reading = timing->read();
+        if (reading.blocks > 0) {
+          status.load = reading;
+        }
+      }
+      if (reload_failed_) {
+        status.problems.push_back("reload-failed");
+      }
+      if (unwatched_) {
+        status.problems.push_back("unwatched");
+      }
+      if (const auto song = leveling_ ? leveling_->last_song() : std::nullopt) {
+        char id[17] = {};
+        std::snprintf(id, sizeof(id), "%016llx",
+                      static_cast<unsigned long long>(song->song_id));
+        status.last_song = EngineStatus::FinishedSong{
+            id, song->level_lufs, song->peak_db, song->seconds};
+      }
+      if (const auto split = split_ ? split_->report() : std::nullopt) {
+        status.split = EngineStatus::Split{
+            split->from,
+            split->state == SplitState::playing ? "playing" : "waiting",
+            split->lag_us / 1000.0, split->underruns,
+            0.0,
+            sample_rate_ > 0 ? latency_ * 1000.0 / sample_rate_ : 0.0};
+      }
+      written = status_.publish(status, &why);
+    }
+    // Once per run of failures, with the step and Windows' error: the line
+    // used to say only that it failed, and a launch where the app restarted
+    // Windows audio over a status this could not write left nothing to read
+    // but the fact. A later success re-arms it, so the next failure is a
+    // line of its own rather than silence.
+    if (written) {
+      status_failure_logged_ = false;
+    } else if (!status_failure_logged_) {
+      status_failure_logged_ = true;
+      log_.write("could not write this output's status for the app (" + why +
+                 ")");
+    }
+  } catch (...) {
+    // A status the app never sees costs its notice, not the audio.
+  }
+}
+
+bool Watcher::follow_programme() noexcept {
+  if (!leveling_) {
+    return false;
+  }
+  try {
+    const auto name = endpoint_config_name(kProgrammeFileStem, endpoint_);
+    const std::optional<std::string> text = name
+        ? read_config_file(config_dir_ + L"\\" + *name) : std::nullopt;
+    // No file is no song: the app deletes it on quit and writes nothing under
+    // Equalizer APO, and silence is then what ends a programme.
+    return leveling_->announce(text ? parse_programme(*text) : Programme{});
+  } catch (...) {
+    return false;  // A song not followed levels like a source with no title.
+  }
+}
+
+bool Watcher::follow_split(bool owner) noexcept {
+  if (split_ == nullptr) {
+    return false;
+  }
+  try {
+    // No file is no second output, which is also what quitting leaves.
+    return split_->follow(
+        read_config_file(config_dir_ + L"\\" + kSplitFileName), owner);
+  } catch (...) {
+    return false;  // `follow` keeps what it had; the next change tries again.
+  }
+}
+
+}  // namespace fluideq_engine

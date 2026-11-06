@@ -1,0 +1,1 @@
+{"heddphone_two":{"hedd:heddphone_two::oratory1990_harman_target":{"gainDb":-5.4,"bands":[{"type":"low_shelf","frequency":105,"gain_db":4.9,"q":0.71},{"type":"peak_dip","frequency":1750,"gain_db":2.6,"q":1.5},{"type":"peak_dip","frequency":4100,"gain_db":-2.4,"q":2.6},{"type":"high_shelf","frequency":10000,"gain_db":-1.2,"q":0.71}]}}}

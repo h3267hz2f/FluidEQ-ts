@@ -1,0 +1,776 @@
+#[[
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+]]
+
+cmake_minimum_required(VERSION 3.21)
+
+project(fluideq_native LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+# The same sources make the same bytes.
+#
+# The MSVC linker stamps the time of the link into every file it writes, so
+# two builds of an unchanged tree never matched: measured, two builds of the
+# FluidEQ Engine a minute apart hashed 7A481FEB… and 244A6539…. The app
+# offers the installed engine's replacement whenever its bytes differ from the
+# one the app carries (src/main/engineUpdate.ts), so with the stamp every
+# release — each built afresh — offered a Windows prompt and an audio restart
+# for an engine that had not changed. /Brepro puts a hash of the content where
+# the time was. Anything else that varies from one build to the next (a date,
+# a git revision, an absolute path) must stay out of the engine for the same
+# reason: FEQ_BUILD_REVISION goes into the DSP host alone.
+if(MSVC)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Brepro>)
+  add_link_options(/Brepro)
+endif()
+
+# Stamped into the handshake so a support report can name the host that ran.
+# Once the host can be rebuilt independently of the app, the app's own version
+# stops being an answer to "which engine was this".
+if(NOT DEFINED FEQ_CORE_VERSION)
+  set(FEQ_CORE_VERSION "0.1.0-identity")
+endif()
+if(NOT DEFINED FEQ_BUILD_REVISION)
+  set(FEQ_BUILD_REVISION "unknown")
+endif()
+
+add_library(feq_strict INTERFACE)
+if(MSVC)
+  target_compile_options(feq_strict INTERFACE /W4 /WX /permissive-)
+  # RTTI is off; exceptions are NOT.
+  #
+  # The spec asked for both, and both was wrong: the MSVC standard library is
+  # not supported with exceptions disabled, and `std::vector`'s allocation
+  # failure has nowhere to go without them. The invariant that actually matters
+  # is narrower and is enforced by hand instead — nothing inside
+  # `feq_engine_process_planar` allocates, and so nothing in it can throw. The
+  # allocating calls are `create` and `prepare`, neither of which is on the
+  # audio thread.
+  target_compile_options(feq_strict INTERFACE /GR-)
+else()
+  target_compile_options(feq_strict INTERFACE
+    -Wall -Wextra -Wpedantic -Werror -fno-rtti)
+endif()
+
+# Never global fast-math: invalid-sample repair and true-peak safety both
+# depend on IEEE behaviour, and -ffast-math tells the compiler that a NaN
+# cannot happen — which deletes the very branch that catches one.
+if(MSVC)
+  target_compile_options(feq_strict INTERFACE /fp:precise)
+else()
+  target_compile_options(feq_strict INTERFACE -ffp-contract=off)
+endif()
+
+add_library(fluideq-dsp-core STATIC
+  dsp-core/src/engine.cpp
+  dsp-core/src/biquad.cpp
+  dsp-core/src/biquad_matched.cpp
+  dsp-core/src/eq.cpp
+  dsp-core/src/dynamics.cpp
+  dsp-core/src/oversample.cpp
+  dsp-core/src/primitives.cpp
+  dsp-core/src/saturate.cpp
+  dsp-core/src/limiter.cpp
+  dsp-core/src/bass_limiter.cpp
+  dsp-core/src/post_filter_normalizer.cpp
+  dsp-core/src/live_normalizer.cpp
+  dsp-core/src/leveling_memory.cpp
+  dsp-core/src/analog_diode.cpp
+  dsp-core/src/harmonics.cpp
+  dsp-core/src/phase_align.cpp
+  dsp-core/src/exciter_guard.cpp
+  dsp-core/src/organic.cpp
+  dsp-core/src/organic_stage.cpp
+  dsp-core/src/exciter_oversample.cpp
+  dsp-core/src/exciter.cpp
+  dsp-core/src/fft.cpp
+  dsp-core/src/convolver.cpp
+  dsp-core/src/linear_phase.cpp
+  dsp-core/src/loudness.cpp
+  dsp-core/src/loudness_meter.cpp
+  dsp-core/src/crossfade.cpp
+  dsp-core/src/doorbell.cpp
+  dsp-core/src/dimension.cpp
+  dsp-core/src/room.cpp
+  dsp-core/src/room_kernels.cpp
+  dsp-core/src/room_interpolation.cpp
+  dsp-core/src/room_ambience.cpp
+  dsp-core/src/room_comparison.cpp
+  dsp-core/src/room_rate.cpp
+  dsp-core/src/bass_forge.cpp
+  dsp-core/src/bass_forge_meters.cpp
+  dsp-core/src/bass_punch.cpp
+  dsp-core/src/bass_punch_band.cpp
+  dsp-core/src/bass_punch_bloom.cpp
+  dsp-core/src/denoise.cpp
+  dsp-core/src/denoise_transfer.cpp
+  dsp-core/src/denoise_spectral.cpp
+  dsp-core/src/denoise_hum.cpp
+  dsp-core/src/denoise_live_hum.cpp
+  dsp-core/src/denoise_click.cpp
+  dsp-core/src/denoise_voice.cpp
+  dsp-core/src/deesser.cpp
+  dsp-core/src/deesser_process.cpp
+  dsp-core/src/deesser_decide.cpp
+  dsp-core/src/footsteps.cpp
+  dsp-core/src/footsteps_decide.cpp
+  dsp-core/src/meters.cpp
+  dsp-core/src/meters_deesser.cpp
+  dsp-core/src/meters_footsteps.cpp
+  dsp-core/src/meters_eq_live.cpp
+  dsp-core/src/meters_transform.cpp
+  dsp-core/src/chain.cpp
+  dsp-core/src/chain_process.cpp
+  dsp-core/src/chain_eq.cpp
+  dsp-core/src/chain_eq_delay.cpp
+  dsp-core/src/chain_eq_fade.cpp
+  dsp-core/src/chain_mono_maker.cpp
+  dsp-core/src/chain_eq_linear.cpp
+  dsp-core/src/chain_exciter.cpp
+  dsp-core/src/chain_stages.cpp
+  dsp-core/src/chain_linear.cpp
+  dsp-core/src/chain_transfer.cpp
+  dsp-core/src/chain_source.cpp
+  dsp-core/src/chain_tone.cpp
+  dsp-core/src/chain_decode.cpp
+  dsp-core/src/chain_deesser.cpp
+  dsp-core/src/chain_footsteps.cpp
+  dsp-core/src/resampler.cpp
+  dsp-core/src/player.cpp
+  dsp-core/src/player_roles.cpp
+  dsp-core/src/player_changes.cpp
+  dsp-core/src/player_render.cpp
+)
+target_include_directories(fluideq-dsp-core PUBLIC dsp-core/include)
+# The ONNX Runtime C API header, vendored. Nothing is LINKED against it: the
+# voice module loads the shared library by path at runtime, so this is a set of
+# declarations rather than a build dependency.
+target_include_directories(fluideq-dsp-core PRIVATE dsp-host/src/vendor)
+target_link_libraries(fluideq-dsp-core PRIVATE feq_strict)
+target_compile_definitions(fluideq-dsp-core
+  PUBLIC FEQ_CORE_VERSION="${FEQ_CORE_VERSION}")
+
+enable_testing()
+add_executable(fluideq-live-normalizer-test dsp-core/tests/live_normalizer_test.cpp)
+target_link_libraries(fluideq-live-normalizer-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME live-normalizer COMMAND fluideq-live-normalizer-test)
+add_executable(fluideq-song-leveling-test dsp-core/tests/song_leveling_test.cpp)
+target_link_libraries(fluideq-song-leveling-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME song-leveling COMMAND fluideq-song-leveling-test)
+
+add_executable(fluideq-dsp-core-test dsp-core/tests/engine_test.cpp)
+target_link_libraries(fluideq-dsp-core-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME dsp-core COMMAND fluideq-dsp-core-test)
+
+# The analog-matched designs against the shapes they reproduce and the
+# cookbook they replace: a treble band as drawn, never worse, always stable.
+add_executable(fluideq-biquad-matched-test dsp-core/tests/biquad_matched_test.cpp)
+target_link_libraries(fluideq-biquad-matched-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME biquad-matched COMMAND fluideq-biquad-matched-test)
+
+add_executable(fluideq-resampler-test dsp-core/tests/resampler_test.cpp)
+target_link_libraries(fluideq-resampler-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME resampler COMMAND fluideq-resampler-test)
+
+add_executable(fluideq-exciter-test dsp-core/tests/exciter_test.cpp)
+target_link_libraries(fluideq-exciter-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME exciter COMMAND fluideq-exciter-test)
+
+add_executable(fluideq-dimension-test dsp-core/tests/dimension_test.cpp)
+target_link_libraries(fluideq-dimension-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME dimension COMMAND fluideq-dimension-test)
+
+# The De-esser on a mix: the S down, the panned hi-hat kept, the same quiet
+# or loud, a ride learned as the bed, and its delay alone at rest.
+add_executable(fluideq-deesser-test dsp-core/tests/deesser_test.cpp)
+target_link_libraries(fluideq-deesser-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME deesser COMMAND fluideq-deesser-test)
+# Its three cuts, Isolate, the depth dial, surround, a handover and an edit
+# mid-S, each beside the control that would fail it.
+add_executable(fluideq-deesser-modes-test dsp-core/tests/deesser_modes_test.cpp)
+target_link_libraries(fluideq-deesser-modes-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME deesser-modes COMMAND fluideq-deesser-modes-test)
+
+# Footsteps on a match: steps up, shots, blast, rain and echoes left alone, a
+# shot inside a lift at its own peak, one lift on every side, the LFE
+# untouched, Calm's let-go, a handover, every rate — and the input to the bit
+# with nothing to do.
+add_executable(fluideq-footsteps-test dsp-core/tests/footsteps_test.cpp)
+target_link_libraries(fluideq-footsteps-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME footsteps COMMAND fluideq-footsteps-test)
+
+# Footsteps in mixes the way games play them: loud, paused, heavy in the bass
+# — where judging against fixed levels lifted a match's steps 0.4 dB.
+add_executable(fluideq-footsteps-mix-test dsp-core/tests/footsteps_mix_test.cpp)
+target_link_libraries(fluideq-footsteps-mix-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME footsteps-mix COMMAND fluideq-footsteps-mix-test)
+
+# The three-band split every multiband stage shares, held to the response of
+# the bands put back together rather than to any one of them.
+add_executable(fluideq-crossover-test dsp-core/tests/crossover_test.cpp)
+target_link_libraries(fluideq-crossover-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME crossover COMMAND fluideq-crossover-test)
+
+add_executable(fluideq-bass-forge-test dsp-core/tests/bass_forge_test.cpp)
+target_link_libraries(fluideq-bass-forge-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME bass-forge COMMAND fluideq-bass-forge-test)
+
+add_executable(fluideq-bass-punch-test dsp-core/tests/bass_punch_test.cpp)
+target_link_libraries(fluideq-bass-punch-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME bass-punch COMMAND fluideq-bass-punch-test)
+
+add_executable(fluideq-bass-mix-test dsp-core/tests/bass_mix_test.cpp)
+target_link_libraries(fluideq-bass-mix-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME bass-mix COMMAND fluideq-bass-mix-test)
+
+# Guard both bass boundaries against cancellation and unwanted upper-band cuts.
+add_executable(fluideq-bass-split-test dsp-core/tests/bass_split_test.cpp)
+target_link_libraries(fluideq-bass-split-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME bass-split COMMAND fluideq-bass-split-test)
+
+add_executable(fluideq-bass-isolate-test dsp-core/tests/bass_isolate_test.cpp)
+target_link_libraries(fluideq-bass-isolate-test
+  PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME bass-isolate COMMAND fluideq-bass-isolate-test)
+
+add_executable(fluideq-denoise-test dsp-core/tests/denoise_test.cpp)
+target_link_libraries(fluideq-denoise-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME denoise COMMAND fluideq-denoise-test)
+
+add_executable(fluideq-denoise-stage-test dsp-core/tests/denoise_stage_test.cpp)
+target_link_libraries(fluideq-denoise-stage-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME denoise-stage COMMAND fluideq-denoise-stage-test)
+
+add_executable(fluideq-denoise-bounds-test
+  dsp-core/tests/denoise_bounds_test.cpp)
+target_link_libraries(fluideq-denoise-bounds-test
+  PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME denoise-bounds COMMAND fluideq-denoise-bounds-test)
+
+add_executable(fluideq-denoise-live-test dsp-core/tests/denoise_live_test.cpp)
+target_link_libraries(fluideq-denoise-live-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME denoise-live COMMAND fluideq-denoise-live-test)
+
+add_executable(fluideq-meters-test dsp-core/tests/meters_test.cpp)
+target_link_libraries(fluideq-meters-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME meters COMMAND fluideq-meters-test)
+add_executable(fluideq-meters-eq-live-test dsp-core/tests/meters_eq_live_test.cpp)
+target_link_libraries(fluideq-meters-eq-live-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME meters-eq-live COMMAND fluideq-meters-eq-live-test)
+
+# Separate from `meters` because it asks a different question: not whether the
+# meters measure, but where in the chain each one is tapped. A tap taken at the
+# wrong point reports a real measurement of the wrong signal, which every check
+# in `meters_test` still passes.
+add_executable(fluideq-chain-meters-test dsp-core/tests/chain_meters_test.cpp)
+target_link_libraries(fluideq-chain-meters-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-meters COMMAND fluideq-chain-meters-test)
+
+add_executable(fluideq-chain-transfer-test dsp-core/tests/chain_transfer_test.cpp)
+target_link_libraries(fluideq-chain-transfer-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-transfer COMMAND fluideq-chain-transfer-test)
+add_executable(fluideq-chain-switch-test dsp-core/tests/chain_switch_test.cpp)
+target_link_libraries(fluideq-chain-switch-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-switch COMMAND fluideq-chain-switch-test)
+add_executable(fluideq-exciter-stereo-test dsp-core/tests/exciter_stereo_test.cpp)
+target_link_libraries(fluideq-exciter-stereo-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME exciter-stereo COMMAND fluideq-exciter-stereo-test)
+add_executable(fluideq-oversample-test dsp-core/tests/oversample_test.cpp)
+target_link_libraries(fluideq-oversample-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME oversample COMMAND fluideq-oversample-test)
+add_executable(fluideq-exciter-oversample-test dsp-core/tests/exciter_oversample_test.cpp)
+target_link_libraries(fluideq-exciter-oversample-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME exciter-oversample COMMAND fluideq-exciter-oversample-test)
+
+# The Master's loudness target with no track analysis behind it, which is
+# every stream the system engine plays: measured as the loudness of what
+# leaves, because that is the only thing a listener could have complained
+# about when the dial did nothing.
+add_executable(fluideq-master-live-test dsp-core/tests/master_live_test.cpp)
+target_link_libraries(fluideq-master-live-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME master-live COMMAND fluideq-master-live-test)
+
+# The chain on six channels: the front pair bit-identical to stereo, the
+# surrounds identical to the front under the same programme, one level
+# decision across all of them, and every channel leaving on the same frame.
+add_executable(fluideq-chain-surround-test dsp-core/tests/chain_surround_test.cpp)
+target_link_libraries(fluideq-chain-surround-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-surround COMMAND fluideq-chain-surround-test)
+add_executable(fluideq-chain-latency-test dsp-core/tests/chain_latency_test.cpp)
+target_link_libraries(fluideq-chain-latency-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-latency COMMAND fluideq-chain-latency-test)
+
+# A band's Dynamic switch moved while the EQ runs through its linear-phase
+# kernel: a sine at the band, held fully open, must not move at all — by one
+# chain reconfigured, and by the system engine's new chain per change.
+add_executable(fluideq-eq-dynamic-handover-test
+  dsp-core/tests/eq_dynamic_handover_test.cpp)
+target_link_libraries(fluideq-eq-dynamic-handover-test
+  PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME eq-dynamic-handover COMMAND fluideq-eq-dynamic-handover-test)
+
+# Isolate on a dynamic band: the band's own change and nothing beside it —
+# the minimum-phase step it used to run as leaked the record around it.
+add_executable(fluideq-eq-isolate-dynamic-test
+  dsp-core/tests/eq_isolate_dynamic_test.cpp)
+target_link_libraries(fluideq-eq-isolate-dynamic-test
+  PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME eq-isolate-dynamic COMMAND fluideq-eq-isolate-dynamic-test)
+
+# The room through a synthetic head whose delays are known frame counts.
+add_executable(fluideq-room-test dsp-core/tests/room_test.cpp)
+target_link_libraries(fluideq-room-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room COMMAND fluideq-room-test)
+
+# The converter a room uses on an output faster than its heads: its delay
+# exactly, its level, and blocks that are not a multiple of its factor.
+add_executable(fluideq-room-rate-test dsp-core/tests/room_rate_test.cpp)
+target_link_libraries(fluideq-room-rate-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room-rate COMMAND fluideq-room-rate-test)
+
+# The room through that converter, sample for sample the room at its head's
+# rate: both renderers, game mode, a handover, switched off and on.
+add_executable(fluideq-room-converted-test dsp-core/tests/room_converted_test.cpp)
+target_link_libraries(fluideq-room-converted-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room-converted COMMAND fluideq-room-converted-test)
+
+add_executable(fluideq-room-contract-test dsp-core/tests/room_contract_test.cpp)
+target_link_libraries(fluideq-room-contract-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room-contract COMMAND fluideq-room-contract-test)
+
+add_executable(fluideq-maximizer-tone-test dsp-core/tests/maximizer_tone_test.cpp)
+target_link_libraries(fluideq-maximizer-tone-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME maximizer-tone COMMAND fluideq-maximizer-tone-test)
+
+add_executable(fluideq-limiter-release-test dsp-core/tests/limiter_release_test.cpp)
+target_link_libraries(fluideq-limiter-release-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME limiter-release COMMAND fluideq-limiter-release-test)
+
+add_executable(fluideq-bass-limiter-test dsp-core/tests/bass_limiter_test.cpp)
+target_link_libraries(fluideq-bass-limiter-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME bass-limiter COMMAND fluideq-bass-limiter-test)
+
+add_executable(fluideq-eq-fade-test dsp-core/tests/eq_fade_test.cpp)
+target_link_libraries(fluideq-eq-fade-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME eq-fade COMMAND fluideq-eq-fade-test)
+add_executable(fluideq-chain-ears-test dsp-core/tests/chain_ears_test.cpp)
+target_link_libraries(fluideq-chain-ears-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-ears COMMAND fluideq-chain-ears-test)
+
+add_executable(fluideq-room-interpolation-test
+  dsp-core/tests/room_interpolation_test.cpp system-apo/src/room_head.cpp)
+target_link_libraries(fluideq-room-interpolation-test PRIVATE fluideq-dsp-core feq_strict)
+target_compile_definitions(fluideq-room-interpolation-test PRIVATE
+  FEQ_ROOM_HEAD_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../assets/room/heads")
+add_test(NAME room-interpolation COMMAND fluideq-room-interpolation-test)
+
+# The card's eleven rooms through the engine's room: no clipping, walls that
+# come back when and only when the room says, a louder sub that is louder.
+add_executable(fluideq-room-presets-test dsp-core/tests/room_presets_test.cpp)
+target_link_libraries(fluideq-room-presets-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room-presets COMMAND fluideq-room-presets-test)
+
+# The six featured rooms, the app's own table, through the head that ships:
+# four rates, three streams, both bufferings.
+add_executable(fluideq-room-profiles-test
+  dsp-core/tests/room_profiles_test.cpp system-apo/src/room_head.cpp)
+target_link_libraries(fluideq-room-profiles-test PRIVATE fluideq-dsp-core feq_strict)
+target_compile_definitions(fluideq-room-profiles-test PRIVATE
+  FEQ_ROOM_HEAD_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../assets/room/heads")
+add_test(NAME room-profiles COMMAND fluideq-room-profiles-test)
+
+add_executable(fluideq-preset-safety-test dsp-core/tests/preset_safety_test.cpp)
+target_link_libraries(fluideq-preset-safety-test PRIVATE fluideq-dsp-core feq_strict)
+# Every cross-family pair is owned by its first family in catalogue order;
+# Master is last, so its pairs are already covered by the other families.
+foreach(partition individual chains denoise equaliser exciter bass-forge
+                  bass-punch dimension maximizer)
+  add_test(NAME preset-safety-${partition}
+    COMMAND fluideq-preset-safety-test
+      "${CMAKE_BINARY_DIR}/preset-fixtures.txt" "${partition}")
+endforeach()
+
+add_executable(fluideq-chain-transparency-test
+  dsp-core/tests/chain_transparency_test.cpp)
+target_link_libraries(fluideq-chain-transparency-test
+  PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME chain-transparency COMMAND fluideq-chain-transparency-test)
+
+add_executable(fluideq-output-quality-test dsp-core/tests/output_quality_test.cpp)
+target_link_libraries(fluideq-output-quality-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME output-quality COMMAND fluideq-output-quality-test)
+
+# A hang is this test's failure — a ring lost is a waiter that never wakes —
+# so it gets a ceiling rather than the default of waiting for ever.
+add_executable(fluideq-doorbell-test dsp-core/tests/doorbell_test.cpp)
+target_link_libraries(fluideq-doorbell-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME doorbell COMMAND fluideq-doorbell-test)
+set_tests_properties(doorbell PROPERTIES TIMEOUT 60)
+add_executable(fluideq-player-test dsp-core/tests/player_test.cpp)
+target_link_libraries(fluideq-player-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME player COMMAND fluideq-player-test)
+
+add_executable(fluideq-player-handoff-test dsp-core/tests/player_handoff_test.cpp)
+target_link_libraries(fluideq-player-handoff-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME player-handoff COMMAND fluideq-player-handoff-test)
+
+# Held to the final output of the TypeScript engine that the native rack
+# replaced. The frozen corpus is expanded by `build-native-dsp.ts --test`.
+add_executable(fluideq-dsp-parity-test
+  dsp-core/tests/parity_test.cpp
+  dsp-core/tests/parity_fixture.cpp
+  dsp-core/tests/parity_render.cpp
+  dsp-core/tests/parity_render_chain.cpp)
+target_link_libraries(fluideq-dsp-parity-test
+  PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME dsp-parity
+  COMMAND fluideq-dsp-parity-test "${CMAKE_BINARY_DIR}/fixtures")
+
+# The system-wide engine's config resolver: Windows-only, and its own
+# subtree because everything past this task loads inside audiodg.exe rather
+# than the DSP host process below.
+if(WIN32)
+  add_subdirectory(system-apo)
+endif()
+
+# The desktop visualizer's helper, which puts a monitor's background window
+# behind Explorer's icons, and its test: after `enable_testing`, which a test
+# added before it is not registered by.
+add_subdirectory(wallpaper)
+
+add_executable(fluideq-dsp-host
+  dsp-host/src/main.cpp
+  dsp-host/src/host_audio.cpp
+  dsp-host/src/host_commands.cpp
+  dsp-host/src/host_deck_commands.cpp
+  dsp-host/src/host_device.cpp
+  dsp-host/src/host_telemetry.cpp
+  dsp-host/src/host_wire.cpp
+  dsp-host/src/decoders/pcm_decoder.cpp
+  dsp-host/src/decoders/compressed_decoder.cpp
+  dsp-host/src/decoders/vendor/vendor.cpp
+  dsp-host/src/parent_watch.cpp
+  # The room's head file, the same text the engine reads.
+  system-apo/src/room_head.cpp
+)
+target_link_libraries(fluideq-dsp-host PRIVATE fluideq-dsp-core feq_strict)
+target_include_directories(fluideq-dsp-host PRIVATE system-apo/src)
+
+# Warnings-as-errors, off for the vendored decoders and nowhere else — on
+# GCC and Clang. The diagnostic pragmas in `vendor.cpp` cover -Wall and
+# -Wextra but not -Wpedantic, so -Werror comes off for this ONE source:
+# twenty-three thousand lines of somebody else's public domain code cannot be
+# held to this project's standard without patching every release, and
+# dropping it for the whole target would take our own code with it.
+#
+# MSVC keeps /WX here. It used to get /WX- because `#pragma warning(push, 0)`
+# let one optimiser warning through, and the answer was to stop promoting it;
+# that produced D9025 ("overriding /WX with /WX-") on every build, which is a
+# warning about the fix for a warning. The file now disables the optimiser's
+# four by number, which is the mechanism that reaches them.
+set_source_files_properties(dsp-host/src/decoders/vendor/vendor.cpp
+  PROPERTIES COMPILE_OPTIONS "$<$<NOT:$<BOOL:${MSVC}>>:-Wno-error>")
+
+
+# The device backend, which is the only platform-specific code in the project.
+# Every platform gets one, and the two that have no real implementation get a
+# stub that refuses through the same channel a broken device would — a build
+# that fails to link on macOS is a tree nobody notices breaking further.
+if(WIN32)
+  target_sources(fluideq-dsp-host PRIVATE
+    dsp-host/src/platform/windows/wasapi_backend.cpp
+    # What Windows says about the outputs and the audio service, which is
+    # what a failed reopen waits on instead of a retry clock.
+    dsp-host/src/platform/windows/device_watch.cpp
+    # The version resource, which is what Task Manager's Name column reads.
+    # Without it this is one more row saying "FluidEQ" in a tree of eight, and
+    # none of them says which is holding the memory.
+    dsp-host/src/platform/windows/host.rc)
+  set_source_files_properties(dsp-host/src/platform/windows/host.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_HOST_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  # The platform decoder: AAC since Windows 7, WMA since Vista, and the MPEG-4
+  # and ASF containers around them. Microsoft licenses those codecs for the
+  # operating system, so this is the one route to m4a and wma that costs
+  # nothing to link and carries no patent question into a binary that is sold.
+  target_sources(fluideq-dsp-host PRIVATE
+    dsp-host/src/decoders/platform/windows/media_foundation_decoder.cpp)
+  # Both ship with Windows. WASAPI is a user-mode COM API: no driver, no
+  # kernel component, nothing to install and nothing to sign — and the Media
+  # Foundation libraries below are the same kind of thing.
+  # What this process costs, which only this process can cheaply see: Electron
+  # measures its own children and the host is not one of them.
+  target_sources(fluideq-dsp-host PRIVATE
+    dsp-host/src/platform/windows/process_stats_windows.cpp)
+  # Both ship with Windows. `psapi` is where `GetProcessMemoryInfo` lives; on
+  # Windows 7 and later the header redirects it into kernel32 and this import
+  # library goes unused, which costs nothing and keeps the link honest about
+  # what the code asked for.
+  # `advapi32` is the service control manager, which the device watch asks to
+  # be told when Windows Audio is running again.
+  target_link_libraries(fluideq-dsp-host PRIVATE
+    ole32 avrt mfplat mfreadwrite mfuuid propsys psapi advapi32)
+
+else()
+  target_sources(fluideq-dsp-host PRIVATE
+    dsp-host/src/platform/unsupported_backend.cpp
+    dsp-host/src/platform/unsupported_process_stats.cpp
+    dsp-host/src/decoders/platform/unsupported_media_decoder.cpp)
+  find_package(Threads REQUIRED)
+  target_link_libraries(fluideq-dsp-host PRIVATE Threads::Threads)
+endif()
+target_compile_definitions(fluideq-dsp-host PRIVATE
+  FEQ_BUILD_REVISION="${FEQ_BUILD_REVISION}")
+
+# One known place for the build to leave the host, so the development runtime
+# and the packaging step both know where to look without either of them
+# guessing at a generator's directory layout.
+#
+# `FluidEQ-DSP` rather than the CMake target's name: this is the one process in
+# the tree that is not Electron, and a machine-readable name in Task Manager is
+# a name nobody reads. Electron's own children cannot be distinguished this way
+# — they are all one binary and share one file description — so this is the
+# only row in that list that can say what it actually is.
+set_target_properties(fluideq-dsp-host PROPERTIES
+  OUTPUT_NAME "FluidEQ-DSP"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Windows process-loopback capture is separate from the DSP host because it
+# must exclude its own process tree. That places the tap before endpoint APOs:
+# the sender's EQ can still be heard locally, while the network receives the
+# unprocessed system mix and the receiver applies its own FluidEQ profile.
+if(WIN32)
+  add_executable(fluideq-remote-audio-capture
+    remote-audio-capture/src/main.cpp
+    remote-audio-capture/src/capture_args.cpp
+    remote-audio-capture/src/capture_queue.cpp
+    remote-audio-capture/src/capture_writer.cpp
+    remote-audio-capture/src/mirror_output.cpp
+    remote-audio-capture/src/mirror_control.cpp
+    remote-audio-capture/src/hold_output.cpp
+    # The second output plays through Share Audio's own playback engine.
+    remote-audio-playback/src/playback_core.cpp
+    remote-audio-playback/src/sinc_kernel.cpp)
+  target_include_directories(fluideq-remote-audio-capture PRIVATE
+    remote-audio-playback/src)
+  target_link_libraries(fluideq-remote-audio-capture PRIVATE
+    feq_strict ole32 avrt mmdevapi)
+  set_target_properties(fluideq-remote-audio-capture PROPERTIES
+    OUTPUT_NAME "FluidEQ-LAN-Capture"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
+
+add_subdirectory(remote-audio-playback)
+add_executable(fluideq-capture-queue-test
+  remote-audio-capture/tests/capture_queue_test.cpp
+  remote-audio-capture/src/capture_queue.cpp)
+target_link_libraries(fluideq-capture-queue-test PRIVATE feq_strict)
+target_include_directories(fluideq-capture-queue-test PRIVATE remote-audio-capture/src)
+add_test(NAME capture-queue COMMAND fluideq-capture-queue-test)
+if(WIN32)
+  add_executable(fluideq-capture-args-test
+    remote-audio-capture/tests/capture_args_test.cpp
+    remote-audio-capture/src/capture_args.cpp)
+  target_link_libraries(fluideq-capture-args-test PRIVATE feq_strict)
+  target_include_directories(fluideq-capture-args-test PRIVATE remote-audio-capture/src)
+  add_test(NAME capture-args COMMAND fluideq-capture-args-test)
+endif()
+
+# The Processes list's meter: private working set and CPU time for each of the
+# app's processes, which Node cannot read (process-meter/src/main.cpp). Runs
+# only while that list is open.
+if(WIN32)
+  add_executable(fluideq-process-meter
+    process-meter/src/main.cpp
+    process-meter/src/process-meter.rc)
+  target_link_libraries(fluideq-process-meter PRIVATE feq_strict psapi)
+  set_source_files_properties(process-meter/src/process-meter.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_METER_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  set_target_properties(fluideq-process-meter PROPERTIES
+    OUTPUT_NAME "FluidEQ-Meter"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
+
+# Game profiles' eyes: which program is in front, told by Windows itself
+# (foreground-watch/src/main.cpp). Runs only while there are profiles to
+# match, and exits when its input closes.
+if(WIN32)
+  add_executable(fluideq-foreground-watch
+    foreground-watch/src/main.cpp
+    foreground-watch/src/foreground-watch.rc)
+  target_link_libraries(fluideq-foreground-watch PRIVATE feq_strict psapi version dwmapi)
+  set_source_files_properties(foreground-watch/src/foreground-watch.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_WATCH_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  set_target_properties(fluideq-foreground-watch PROPERTIES
+    OUTPUT_NAME "FluidEQ-Games"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
+
+# The compact player's system volume: the level and mute of the output Windows
+# plays through, told by Windows itself (volume-watch/src/main.cpp). Runs only
+# while the player shows its slider, and exits when its input closes.
+if(WIN32)
+  add_executable(fluideq-volume-watch
+    volume-watch/src/main.cpp
+    volume-watch/src/volume-watch.rc)
+  target_link_libraries(fluideq-volume-watch PRIVATE feq_strict ole32)
+  set_source_files_properties(volume-watch/src/volume-watch.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_VOLUME_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  set_target_properties(fluideq-volume-watch PROPERTIES
+    OUTPUT_NAME "FluidEQ-Volume"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
+
+# The outputs: when an output is plugged in, pulled out, made the default or
+# has its effects changed, told by Windows itself (output-watch/src/main.cpp),
+# so the app follows a new headset with its window hidden and nothing polls.
+# Runs for as long as the app does, and exits when its input closes.
+if(WIN32)
+  add_executable(fluideq-output-watch
+    output-watch/src/main.cpp
+    output-watch/src/output-watch.rc)
+  target_link_libraries(fluideq-output-watch PRIVATE feq_strict ole32 advapi32)
+  set_source_files_properties(output-watch/src/output-watch.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_OUTPUTS_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  set_target_properties(fluideq-output-watch PROPERTIES
+    OUTPUT_NAME "FluidEQ-Outputs"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
+
+# What the rest of the machine is playing, for the transport bar: Windows'
+# media sessions, told by Windows itself through their WinRT events
+# (media-watch/src/main.cpp) where a PowerShell loop used to read them every
+# 700 ms. Runs while the window asks for it, and exits when its input closes.
+# C++/WinRT from the SDK like the lighting helper, its headers compiled as
+# external so /W4 /WX holds for this code and not for Microsoft's projection.
+if(WIN32)
+  add_executable(fluideq-media-watch
+    media-watch/src/main.cpp
+    media-watch/src/media-watch.rc)
+  target_link_libraries(fluideq-media-watch PRIVATE feq_strict WindowsApp bcrypt)
+  target_compile_options(fluideq-media-watch PRIVATE
+    /external:anglebrackets /external:W0 /bigobj)
+  set_source_files_properties(media-watch/src/media-watch.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_MEDIA_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  set_target_properties(fluideq-media-watch PROPERTIES
+    OUTPUT_NAME "FluidEQ-Media"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
+
+# The media helper's lines, held byte for byte against the app's parser. Plain
+# C++ with no Windows in it, so it runs wherever the tree builds.
+add_executable(fluideq-media-line-test media-watch/tests/media_line_test.cpp)
+target_link_libraries(fluideq-media-line-test PRIVATE feq_strict)
+target_include_directories(fluideq-media-line-test PRIVATE media-watch/src)
+add_test(NAME media-line COMMAND fluideq-media-line-test)
+
+# The lighting helper: the app's hands on Windows Dynamic Lighting, and the one
+# executable in the tree with Windows package identity (see
+# lighting-host/src/identity.h for why it needs one and how it gets it).
+#
+# C++/WinRT, from the Windows SDK itself — the headers ship in the SDK's
+# `cppwinrt` folder and link against WindowsApp.lib, so there is nothing to
+# vendor. The SDK's headers are compiled as external (warning level 0): the
+# project's /W4 /WX holds for this code, not for Microsoft's generated
+# projection.
+if(WIN32)
+  # The signing certificate's full subject, which the embedded `msix` element
+  # must repeat exactly. Read from the environment rather than passed as a
+  # -D argument: a subject is commas, spaces and sometimes quotes
+  # (O="Example, Inc."), and the build script hands its arguments to cmd.exe.
+  # Read on every configure and never cached, so an unsigned build after a
+  # signed one does not keep the release's publisher. A development name when
+  # no release is being signed.
+  if(NOT "$ENV{FLUIDEQ_SIGN_SUBJECT}" STREQUAL "")
+    set(FEQ_LIGHTING_PUBLISHER "$ENV{FLUIDEQ_SIGN_SUBJECT}")
+  else()
+    set(FEQ_LIGHTING_PUBLISHER "CN=FluidEQ Development")
+  endif()
+  set(FEQ_LIGHTING_PACKAGE_NAME "FluidEQ.DynamicLighting")
+  set(FEQ_LIGHTING_APPLICATION_ID "FluidEQLighting")
+  set(FEQ_LIGHTING_PUBLISHER_XML "${FEQ_LIGHTING_PUBLISHER}")
+  string(REPLACE "&" "&amp;" FEQ_LIGHTING_PUBLISHER_XML "${FEQ_LIGHTING_PUBLISHER_XML}")
+  string(REPLACE "<" "&lt;" FEQ_LIGHTING_PUBLISHER_XML "${FEQ_LIGHTING_PUBLISHER_XML}")
+  string(REPLACE ">" "&gt;" FEQ_LIGHTING_PUBLISHER_XML "${FEQ_LIGHTING_PUBLISHER_XML}")
+  string(REPLACE "\"" "&quot;" FEQ_LIGHTING_PUBLISHER_XML "${FEQ_LIGHTING_PUBLISHER_XML}")
+  configure_file(lighting-host/src/lighting-host.manifest.in
+    "${CMAKE_BINARY_DIR}/lighting-host.manifest" @ONLY)
+
+  add_executable(fluideq-lighting-host WIN32
+    lighting-host/src/main.cpp
+    lighting-host/src/lamp_arrays.cpp
+    lighting-host/src/razer_devices.cpp
+    lighting-host/src/identity.cpp
+    lighting-host/src/lighting_settings.cpp
+    lighting-host/src/lighting-host.rc)
+  target_link_libraries(fluideq-lighting-host PRIVATE feq_strict WindowsApp shell32)
+  target_compile_options(fluideq-lighting-host PRIVATE
+    /external:anglebrackets /external:W0 /bigobj)
+  set_source_files_properties(lighting-host/src/lighting-host.rc
+    PROPERTIES COMPILE_DEFINITIONS
+      "FEQ_LIGHTING_VERSION_STRING=\"${FEQ_CORE_VERSION}\"")
+  # Embedded, not beside the exe: Windows ignores a manifest file next to an
+  # executable that already carries one, and reads package identity only from
+  # the embedded manifest.
+  target_link_options(fluideq-lighting-host PRIVATE
+    "/MANIFEST:EMBED"
+    "/MANIFESTINPUT:${CMAKE_BINARY_DIR}/lighting-host.manifest"
+    "/ENTRY:wWinMainCRTStartup")
+  set_target_properties(fluideq-lighting-host PROPERTIES
+    # The linker is not told the manifest is an input, so without this a
+    # publisher that changed between builds would leave the old one embedded
+    # in an exe Ninja considers up to date.
+    LINK_DEPENDS "${CMAKE_BINARY_DIR}/lighting-host.manifest"
+    OUTPUT_NAME "FluidEQ-Lighting"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin"
+  )
+
+  add_executable(fluideq-lighting-wire-test lighting-host/tests/wire_test.cpp)
+  target_link_libraries(fluideq-lighting-wire-test PRIVATE feq_strict)
+  add_test(NAME lighting-wire COMMAND fluideq-lighting-wire-test)
+endif()
+
+add_executable(fluideq-room-ambience-test dsp-core/tests/room_ambience_test.cpp)
+target_link_libraries(fluideq-room-ambience-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room-ambience COMMAND fluideq-room-ambience-test)
+
+add_executable(fluideq-room-comparison-test dsp-core/tests/room_comparison_test.cpp)
+target_link_libraries(fluideq-room-comparison-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME room-comparison COMMAND fluideq-room-comparison-test)

@@ -1,0 +1,134 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/*
+ * The version resource, which here is not a nicety.
+ *
+ * This DLL loads into audiodg.exe, a process the user never launched and
+ * cannot inspect from Task Manager's process list. When system audio breaks,
+ * the first thing anyone does is look at what is loaded into it — and an
+ * unnamed DLL in that list is indistinguishable from something that has no
+ * business being there. FileDescription and CompanyName are how this one says
+ * whose it is.
+ *
+ * FEQ_CORE_VERSION is a marketing string ("0.1.0-identity"), not four
+ * numbers, so the string goes where a string belongs and the binary fields
+ * carry something else: which of the app's expectations this engine meets.
+ * The setup helper reports FILEVERSION of the installed DLL as `dllVersion`,
+ * and the app reads it before it relies on anything a later engine does.
+ *
+ *   1.0  processes audio.
+ *   1.1  also writes status-{GUID}.json for every output it runs. Before it,
+ *        a missing status was every engine's normal; after it, a missing
+ *        status while sound plays means the engine is not there.
+ *
+ *   1.2  also serves the system DSP's stage measurements to the DSP page.
+ *   1.7  also levels by song: reads fluideq-programme.txt, keeps what live
+ *        leveling learned across locks, and reports each finished song as
+ *        `lastSong` in its status. An older engine ignores the file.
+ *   1.8  also answers the display connection's process-stats request (3)
+ *        with its host process's id, working set and CPU time, for the
+ *        Processes list, and says so in its handshake (bit 2 of byte 39). An
+ *        older engine would read the request as "meters off" and never
+ *        answer, so the app asks only a connection that set the bit.
+ *   1.9  also reports carried audio.
+ *   1.10 supports the shared Game mode control and reports all processing
+ *        delay parts, including active stages that add no buffering.
+ *   1.11 supports the versioned Room trailer and comparison telemetry.
+ *   1.12 its setup helper takes the one-value slots (`efx-single`,
+ *        `mfx-single`, `sfx-single`) on the slot ladder.
+ *   1.13 builds a layer's bands analog-matched where the file says
+ *        `# FluidEQFilterDesign: MATCHED`, and the graph draws that shape
+ *        only from here on; an older engine reads the line as a comment.
+ *   1.14 reads fluideq-eq-treble.txt and fluideq-curve-treble.txt: "classic"
+ *        keeps that group on the cookbook (the EQ menu's Treble choice).
+ *   1.15 builds every layer in linear phase into one FIR with one delay, so
+ *        Your EQ and the curves both linear cost one delay, not two.
+ *   1.16 reads the preset's curve after the rack's line (the TONE trailer)
+ *        and limits through it, so a preset lands on the ceiling after its
+ *        curve has played. An older engine refuses a line longer than it
+ *        knows and bypasses the whole rack, so the app sends it none. It
+ *        also plays the rack EQ's Treble choice, from a slot every engine
+ *        decodes and none before read (the page offers it from here on,
+ *        `ENGINE_RACK_TREBLE_SINCE`), and fades every change of the rack's
+ *        EQ with each band keeping its history. And it moves Auto
+ *        normalize's level for an edit once, by what the new EQ does to the
+ *        last ten seconds of music, instead of dropping by the curve's
+ *        worst case and climbing back (`level_prediction.h`). Nothing in
+ *        the app waits on that last one: the number is here so a report
+ *        says which engine it came from.
+ *   1.17 reads fluideq-split.txt and plays a second output straight from the
+ *        main output's engine (`split_tap.h`), reporting it as `split` in
+ *        the second output's status — but only between endpoints inside one
+ *        audiodg process, so the app does not count on it yet.
+ *   1.18 shares main's processed DSP with second outputs; only their own
+ *        curves run on the copy. Reports shared DSP and local curve delay.
+ *   1.19 fans out raw input and runs an independent complete graph per
+ *        output. DSP, room head, phase and treble files are endpoint-scoped
+ *        (`ENGINE_OUTPUT_CONFIG_SINCE`). Programme levels are endpoint-scoped
+ *        too. Source-analysis v1 preserves Library scans and trusted
+ *        per-output voice restoration.
+ *   1.20 shares raw input across audiodg processes using bounded named
+ *        mappings, with writer recovery and explicit transport failures. The
+ *        first engine the app plays a second output from; an older one ignores
+ *        the split, and the app keeps its own copy of the sound for it
+ *        (`ENGINE_SPLIT_SINCE`).
+ *   1.21 reads `Channel:` and runs each band on the channels it names: a band
+ *        kept to one ear plays on that ear (`ENGINE_CHANNELS_SINCE`). Every
+ *        engine before read the line and ignored it, playing it on both.
+ *   1.22 plays a DSP rack band on the ear it names, carried in the band's
+ *        switch word (`ENGINE_RACK_EARS_SINCE`). Every engine before read the
+ *        word as on and played the band on both ears.
+ *   1.23 runs the De-esser (`deesser.h`), from the multiband compressor's
+ *        retired words every engine since 2026-09-22 decodes and ignores
+ *        (`ENGINE_DEESSER_SINCE`): an older engine plays the rack without it
+ *        rather than refusing it. It also reports the De-esser in its
+ *        stages, its delay and its readings for the page.
+ *   1.24 honors live Normalizer target and ceiling edits while holding a song,
+ *        and appends the measured post-Normalizer short-term LUFS reading.
+ *   1.25 runs Footsteps (`footsteps.h`) from a tagged trailer on the rack's
+ *        line, which an older engine refuses whole, so the app leaves the
+ *        trailer off for one (`ENGINE_FOOTSTEPS_SINCE`). It reports the stage
+ *        in its stages and its readings for the page, in a header 28 bytes
+ *        longer.
+ * ENGINE_STATUS_SINCE stays at 1.1: older status-capable engines still report
+ * their health even when the new display connection is unavailable.
+ */
+
+#include <winver.h>
+
+#ifndef FEQ_ENGINE_VERSION_STRING
+#define FEQ_ENGINE_VERSION_STRING "0.0.0"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1, 25, 0, 0
+PRODUCTVERSION 1, 25, 0, 0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Ivan Carmenates Garcia"
+      VALUE "FileDescription", "FluidEQ Engine"
+      VALUE "FileVersion", FEQ_ENGINE_VERSION_STRING
+      VALUE "InternalName", "FluidEQ-Engine"
+      VALUE "LegalCopyright", "Copyright (C) 2026 Ivan Carmenates Garcia. GPL-3.0-or-later."
+      VALUE "OriginalFilename", "FluidEQ-Engine.dll"
+      VALUE "ProductName", "FluidEQ"
+      VALUE "ProductVersion", FEQ_ENGINE_VERSION_STRING
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

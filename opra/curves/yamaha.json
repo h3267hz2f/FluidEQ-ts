@@ -1,0 +1,1 @@
+{"yh_5000se":{"yamaha:yh_5000se::oratory1990_harman_target":{"gainDb":-6.4,"bands":[{"type":"low_shelf","frequency":105,"gain_db":4.8,"q":0.71},{"type":"peak_dip","frequency":950,"gain_db":-4.2,"q":1.2},{"type":"peak_dip","frequency":2250,"gain_db":4.9,"q":1.5},{"type":"high_shelf","frequency":10000,"gain_db":-1.8,"q":0.71}]}}}

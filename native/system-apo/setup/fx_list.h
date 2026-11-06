@@ -1,0 +1,332 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * The list edit: what an output's effect registration should become once
+ * FluidEQ's effect is added to it, and what it should go back to.
+ *
+ * Pure on purpose. Every value here comes out of a registry key that belongs
+ * to somebody else's audio driver, and getting the edit wrong does not throw
+ * an error — it silently unregisters a vendor's effect for a machine whose
+ * owner then has no bass, no microphone processing, or no sound at all. So
+ * the decision is separated from the registry access entirely and is decided
+ * by a function that can be run a hundred times against fixtures taken from
+ * real machines.
+ *
+ * The shape being edited is `FxProperties` under a render endpoint. Windows
+ * has three generations of it living side by side:
+ *
+ *   - pids 1 and 2 — LFX and GFX, the pre-Windows-8.1 pair.
+ *   - pids 5, 6, 7 — SFX, MFX and EFX as a single class id each.
+ *   - pids 13, 14, 15 — the same three as an ordered list, which is the only
+ *     generation that can hold more than one effect per slot.
+ *
+ * Windows reads the newest generation that is present, so appending to the
+ * lists means first copying forward whatever the vendor registered in the
+ * older shapes. That mirroring is the part that has to be exactly right: a
+ * composite list created without the vendor's own class id in it is how an
+ * equaliser silently replaces a laptop's speaker protection.
+ */
+#ifndef FLUIDEQ_ENGINE_SETUP_FX_LIST_H
+#define FLUIDEQ_ENGINE_SETUP_FX_LIST_H
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace fluideq_engine::setup {
+
+/** SFX, MFX and EFX — the index every array in `FxValues` is subscripted by. */
+constexpr int kSfx = 0;
+constexpr int kMfx = 1;
+constexpr int kEfx = 2;
+constexpr int kSlotCount = 3;
+
+/** How many legacy values there are: pid 1 (LFX) and pid 2 (GFX). */
+constexpr int kLegacyCount = 2;
+
+/**
+ * One endpoint's effect registration, with absence distinguished from empty.
+ *
+ * The difference matters on the way back out: an empty list we created has to
+ * be deleted, an empty list the vendor left has to stay. `std::optional`
+ * carries "the value name is not in the key at all", which is not the same as
+ * a value holding an empty string.
+ */
+struct FxValues {
+  /** pids 5, 6, 7 — one class id each, REG_SZ. */
+  std::optional<std::wstring> single[kSlotCount];
+  /** pids 13, 14, 15 — ordered lists, REG_MULTI_SZ. */
+  std::optional<std::vector<std::wstring>> composite[kSlotCount];
+  /** pids 1 and 2 — LFX and GFX, REG_SZ. */
+  std::optional<std::wstring> legacy[kLegacyCount];
+  /** `{d3993a3f-…},5/,6/,7` — the signal processing modes, REG_MULTI_SZ. */
+  std::optional<std::vector<std::wstring>> modes[kSlotCount];
+  /**
+   * Whether pid 13, 14 or 15 was found as a `REG_SZ` rather than a list.
+   *
+   * Vendors do write one there, and it has to be read as a one-entry list so
+   * that its effect survives the edit — but the value type is the vendor's,
+   * not ours. Attaching beside it necessarily turns it into a `REG_MULTI_SZ`,
+   * and a detach that left it that way would hand back a value the vendor's
+   * own installer no longer recognises. This is what the backup carries so
+   * that the type goes back with the content.
+   *
+   * On the way in it describes what was read. On the way out it asks for a
+   * `REG_SZ` to be written, which only makes sense for a list of at most one
+   * entry — `write_fx_values` is where that is enforced.
+   */
+  bool composite_was_sz[kSlotCount] = {false, false, false};
+};
+
+bool operator==(const FxValues& left, const FxValues& right);
+inline bool operator!=(const FxValues& left, const FxValues& right) {
+  return !(left == right);
+}
+
+/** `legacy[]` is subscripted by these: pid 1 (LFX) and pid 2 (GFX). */
+constexpr int kLfx = 0;
+constexpr int kGfx = 1;
+
+/**
+ * Where the effect can be attached, newest first: the three modern lists,
+ * the same three as one class id each, then the two pre-8.1 values.
+ *
+ * Which of these an output's driver actually creates is not written down
+ * anywhere Windows will say, so the app tries them in this order on an
+ * output where the engine is registered and never created, and keeps the
+ * first that is heard. EFX is where an attach with no slot named goes.
+ *
+ * The middle three were the rung this ladder was missing, and a Bluetooth
+ * headset is what found it: Windows' own two default effects sat in pids 5
+ * and 6 with no list anywhere on the endpoint, the ladder walked past that
+ * whole generation — lists, then straight to pids 1 and 2 — and the engine
+ * ended up in the one value that endpoint is never read from. A generation
+ * an endpoint's own defaults are registered in is the likeliest one its
+ * driver reads.
+ */
+enum class Slot {
+  Efx,
+  Mfx,
+  Sfx,
+  EfxSingle,
+  MfxSingle,
+  SfxSingle,
+  Gfx,
+  Lfx,
+};
+
+/** Whether `slot` is one of the two pre-8.1 values rather than a list. */
+bool is_legacy_slot(Slot slot);
+
+/**
+ * Whether `slot` is one of pids 5, 6 and 7 — one class id each, the
+ * generation between the lists and the pre-8.1 pair.
+ *
+ * They are written under the same rule as the pre-8.1 pair and for the same
+ * reason: one value holds one class id, so ours can only go where nothing is
+ * registered or where Windows' own default effect is. Never over a vendor's.
+ */
+bool is_single_slot(Slot slot);
+
+/**
+ * Two class ids the same, case-insensitively over ASCII — the audio stack
+ * and its vendors write them in whatever case they like.
+ */
+bool equal_ci(std::wstring_view left, std::wstring_view right);
+
+struct FxPlan {
+  FxValues after;
+  /** False when `after` is byte-for-byte the input: nothing to write. */
+  bool changed = false;
+  /**
+   * Non-empty when the plan could not be made without touching somebody
+   * else's registration — a legacy value already holding another effect —
+   * and `after` is then the input, untouched. The one reason an attach can
+   * be refused before the registry is opened.
+   */
+  std::wstring refused;
+};
+
+/**
+ * `{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}` — the DEFAULT processing mode.
+ *
+ * An effect list, or one of pids 5 to 7, with no mode list beside it is
+ * registered for discovery only and never streamed (`fx_modes.h`). This is
+ * the mode ordinary playback runs in, and the one every mode list this
+ * program writes starts with.
+ */
+extern const wchar_t kDefaultProcessingMode[];
+
+/**
+ * The values `before` should become once `clsid` is attached to `slot`.
+ *
+ * For a list slot, four steps, in this order, and none of them ever writes
+ * pids 1, 2, 5, 6 or 7: whatever the vendor registered in the older
+ * generations is left exactly as found so that removing FluidEQ cannot leave
+ * the endpoint worse than a clean uninstall would.
+ *
+ * For a slot that is one value holding one class id — pids 1 and 2, and
+ * pids 5, 6 and 7 — ours goes in only where nothing is registered or where
+ * Windows' own default effect is (`is_windows_default_apo`): the plan is
+ * `refused` when the value names any other effect, because replacing a
+ * vendor's would switch it off, and there is no way to chain two in one
+ * value. Neither creates a list: a list is the newer generation, and an
+ * endpoint that is read from its single values may only be read from them
+ * while no list exists. Pids 5 to 7 get a processing modes value beside
+ * them where the slot has none (`modes_for_empty_slot`), exactly as a list
+ * does: without one the effect is never streamed.
+ */
+FxPlan plan_attach(const FxValues& before, std::wstring_view clsid, Slot slot);
+
+/**
+ * The values `current` should become once `clsid` is removed again.
+ *
+ * `backup` is what the endpoint looked like before the first attach, and it
+ * is the only thing that says which keys are ours to delete. A list that is
+ * empty after the removal but existed in the backup stays, empty, because
+ * that is how it was found.
+ */
+FxPlan plan_detach(const FxValues& current, const FxValues& backup,
+                   std::wstring_view clsid);
+
+/** Whether `clsid` appears in any composite list or either legacy value. */
+bool is_attached(const FxValues& values, std::wstring_view clsid);
+
+/**
+ * Which slot holds `clsid` — the first in the order Windows prefers them
+ * when it is somehow in more than one — or nothing when it is attached
+ * nowhere.
+ */
+std::optional<Slot> slot_of(const FxValues& values, std::wstring_view clsid);
+
+/**
+ * `clsid` taken out of wherever it is and put into `slot`: a detach against
+ * `backup` followed by an attach, so the vendor's lists come out of it
+ * exactly as an attach into `slot` on the original endpoint would have left
+ * them. The same as `plan_attach` when the effect is not attached at all,
+ * and no change at all when it is already in `slot`.
+ *
+ * A move into a slot that is one value — pids 1 and 2, or pids 5 to 7 —
+ * also takes away every list the first attach created (the ones not in
+ * `backup`): a driver that reads an older generation may read it only while
+ * no newer one exists, and the lists were only ever there to carry ours.
+ * Lists the vendor had are kept.
+ *
+ * This is how an output whose driver never creates an endpoint effect gets
+ * the engine somewhere it is created: Equalizer APO's own installer keeps
+ * a rule for such drivers, and a user's machine sat with the engine
+ * registered in the EFX list, enhancements on, and never once loaded.
+ */
+FxPlan plan_move(const FxValues& before, const FxValues& backup,
+                 std::wstring_view clsid, Slot slot);
+
+/**
+ * Equalizer APO's own class ids, as its Device Selector registers them.
+ *
+ * Two, because APO registers a different one depending on which slot it was
+ * put in, and a machine can carry both at once. Kept beside the plans that
+ * use them rather than in the app, which has its own copy for reading the
+ * registry (`windows-audio-devices.ps1`); the two lists must agree.
+ */
+extern const wchar_t* const kEqualizerApoClsids[];
+constexpr int kEqualizerApoClsidCount = 2;
+
+/** Whether `clsid` is one of them. */
+bool is_equalizer_apo(std::wstring_view clsid);
+
+/**
+ * Windows' own inbox effects — "WM LFX APO" and "WM GFX APO", the
+ * enhancements Windows registers on every endpoint whose driver brings none
+ * of its own. They are the one thing a one-value slot may hold that this
+ * program will replace with its own class id: they are Windows', not the
+ * sound card vendor's, the backup keeps them and the detach puts them back,
+ * and a driver that reads only an older generation leaves no other place for
+ * the engine to go. A user's RME DAC had exactly this shape and never
+ * created the engine in any list.
+ *
+ * FOUR, not two. Windows ships two pairs of these — `FX_PREMIX_CLSID` and
+ * `FX_POSTMIX_CLSID` from `wdmaudio.inf`, and a second pair registered
+ * beside them — and all four resolve to the same `WMALFXGFXDSP.dll` under
+ * the same two names. Which pair an endpoint carries varies by machine.
+ * Knowing only the first pair meant every one-value rung was refused on a
+ * machine carrying the second, with "already holds another effect" naming a
+ * class id that was Windows' own all along.
+ */
+extern const wchar_t* const kWindowsDefaultApoClsids[];
+constexpr int kWindowsDefaultApoClsidCount = 4;
+
+bool is_windows_default_apo(std::wstring_view clsid);
+
+/**
+ * Whether the endpoint's driver registered effects only the pre-8.1 way:
+ * something in pid 1 or 2, and none of the modern values at all. Such an
+ * endpoint is read the old way by Windows, whatever lists are added later.
+ */
+bool is_legacy_only(const FxValues& values);
+
+/**
+ * Whether the endpoint's driver registered effects only as pids 5, 6 or 7:
+ * something in one of them, and no composite list anywhere.
+ *
+ * Ivan's Razer Kaira Pro, over Bluetooth, is exactly this shape: Windows'
+ * own "WM LFX APO" and "WM GFX APO" in pids 5 and 6, no list at all, and an
+ * engine added to a list never once created by Windows.
+ */
+bool is_single_only(const FxValues& values);
+
+/**
+ * Where an attach with no slot named goes on an endpoint first found as
+ * `original`: GFX where the driver registered only the pre-8.1 values and
+ * that value can be taken, the newest takeable single where it registered
+ * only pids 5 to 7, MFX where Windows has combined the output with another
+ * (`combined`), EFX otherwise.
+ */
+Slot default_slot_for(const FxValues& original, bool combined);
+
+/**
+ * The values `before` should become with Equalizer APO taken out of them.
+ *
+ * Why this exists: both engines can be registered on the same output at the
+ * same time, and then what a listener hears depends on which slot each one
+ * landed in and which processing mode the stream uses — on one machine APO's
+ * entry ran and FluidEQ's never did, with both reported as attached and
+ * neither reporting a fault. Choosing an engine has to mean the other one is
+ * not in the chain.
+ *
+ * The removal is the same shape as our own detach: the composite lists are
+ * the only thing edited, and the single values (pids 5, 6, 7) and the legacy
+ * pair are left exactly as found — but they are mirrored forward first, so
+ * that the lists Windows now reads still carry whatever the machine's own
+ * audio vendor registered. Taking APO out of a list nobody reads would not
+ * disable it; creating a list without the vendor in it would disable the
+ * vendor.
+ */
+FxPlan plan_suspend_apo(const FxValues& before);
+
+/**
+ * The values `current` should become with `saved`'s registration back.
+ *
+ * `saved` is what the endpoint looked like before Equalizer APO was taken out
+ * of it, so putting it back is simply writing it again — with one exception:
+ * whatever slot FluidEQ's own effect occupies right now, it keeps. Somebody
+ * switching back to Equalizer APO has not asked for the FluidEQ Engine to be
+ * unregistered, and an engine silently detached here would need its Windows
+ * prompt again the next time they switched back.
+ */
+FxPlan plan_restore_apo(const FxValues& current, const FxValues& saved,
+                        std::wstring_view keep);
+
+/** `values` as one line of JSON — what a backup file holds. */
+std::wstring to_json(const FxValues& values);
+
+/** `text` back into values, or nothing when it is not a backup we wrote. */
+std::optional<FxValues> from_json(std::wstring_view text);
+
+}  // namespace fluideq_engine::setup
+
+#endif  // FLUIDEQ_ENGINE_SETUP_FX_LIST_H

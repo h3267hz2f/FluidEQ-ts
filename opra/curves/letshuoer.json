@@ -1,0 +1,1 @@
+{"s12_pro":{"letshuoer:s12_pro::autoeq_crinacle":{"gainDb":-4.9,"bands":[{"type":"low_shelf","frequency":105,"gain_db":0.9,"q":0.71},{"type":"peak_dip","frequency":230,"gain_db":-2.4,"q":1.0},{"type":"peak_dip","frequency":2100,"gain_db":2.2,"q":1.6},{"type":"peak_dip","frequency":6200,"gain_db":-4.2,"q":3.2},{"type":"high_shelf","frequency":10000,"gain_db":-2.1,"q":0.71}]}}}

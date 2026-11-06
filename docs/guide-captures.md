@@ -1,0 +1,54 @@
+# User guide capture sources
+
+The guide uses real FluidEQ interface captures, not generated UI artwork.
+
+- Every picture but those six was taken again from the running FluidEQ 2.0
+  development window on September 29, 2026, in English, with the window's
+  Brightness at the middle of its slider, so one set reads on a dark window
+  and on a light one:
+  - the whole-window pictures at 2560 × 1392, one pixel per CSS pixel. Online
+    Media is 1776 × 1392, with the web view laid into its rectangle, because a
+    picture of the window leaves that rectangle empty; it shows NASA's
+    channel (United States government work, with no advertising in it),
+    signed out;
+  - the pictures of one part of the window — the header, the rails, a page's
+    card, a dialog or a menu — cut from the same window at the same scale;
+  - the Compact player from its harness, which mounts the real player and its
+    stylesheets, 480 CSS pixels wide (560 for the folded strip, which gives
+    up its EQ key below 520) at two device pixels each.
+
+  The numbered boxes are each control's own rectangle, measured in the same
+  window at the same moment, and live in `src/common/helpChapters/`: a new
+  capture of any of these files needs its boxes measured again.
+
+- The six pictures release 2.1 changed — `16`, `36`, `18`, `40`, `23` and
+  `14` — are taken by one script, `scripts/help-captures/capture.ts`
+  (`pnpm docs:captures`), which mounts the real window in headless Chrome or
+  Edge with the main process simulated, sets each figure up, takes the
+  picture and measures every numbered box in the same render. It writes the
+  pictures here and the boxes to `src/common/helpChapters/captured.ts`; its
+  README says how to run it on Windows, where the window's font is the one
+  the app ships with. These six were taken that way on October 12, 2026, on
+  GitHub's Windows runner (`.github/workflows/help-captures.yml`), with the
+  window at 2560 × 1392 and Brightness 50, nobody signed in, made-up outputs
+  and the harness's own music on the live graph.
+- The Share Audio picture's connection code and network addresses are
+  blurred.
+- The karaoke pictures (`11`, `12`, `33` to `35`) are of FluidEQ's own song,
+  Everything in Tune: somebody else's songs stay out of the guide. The
+  playlist shows only that song and its count is hidden, and the player and
+  the Maker are cut to the Karaoke page, leaving out the bar at the window's
+  foot that names whatever else the computer is playing.
+- The Plus pictures (`22` to `29` and `31`) come from a window signed in as
+  FluidEQ's maker. The Admin channel and the rule above it, which only an
+  administrator sees, are hidden for them; on the leaderboard every member but
+  the one signed in has their name, handle and picture blurred. For the
+  gallery the desktop visualizer was set going on one monitor and stopped
+  after, and for Dynamic lighting the lighting was switched on and back off.
+- `02`, `07` and `10` are no longer in the guide; this repository's README
+  still shows them.
+
+The guide identifies screenshots as illustrations whose language, appearance
+and control positions may differ from the installed version. Settings visible
+in the examples are not recommended presets. New captures should be checked
+for credentials, personal information and private media before distribution.

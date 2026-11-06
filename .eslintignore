@@ -1,0 +1,38 @@
+# Logs
+logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Coverage directory used by tools like istanbul
+coverage
+.eslintcache
+
+# Dependency directory
+# https://www.npmjs.org/doc/misc/npm-faq.html#should-i-check-my-node_modules-folder-into-git
+node_modules
+
+# OSX
+.DS_Store
+
+release/app/dist
+release/build
+.erb/dll
+
+.idea
+npm-debug.log.*
+*.css.d.ts
+*.sass.d.ts
+*.scss.d.ts
+
+# Build tooling is transpiled and verified by the production build. It is not
+# part of the application TypeScript project used by ESLint.
+.erb
+
+# Vendored decoder sources. Somebody else's public domain code: it is not
+# ours to reformat, and a prettier pass on it would make every upstream update
+# a merge conflict against our own whitespace.
+native/dsp-host/src/decoders/vendor

@@ -1,0 +1,192 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * Stereo width that survives being summed to mono.
+ *
+ * The three usual ways to widen a finished mix all make it worse, and they are
+ * what most processors calling themselves 3D actually do:
+ *
+ *  - A Haas delay on one channel. It images beautifully in headphones and comb
+ *    filters the moment anything sums the two channels — phones, laptop
+ *    speakers, Bluetooth, a club PA. The damage is invisible until it is
+ *    somebody else's playback.
+ *  - Raising the sides. That does not widen the picture so much as push the
+ *    centre back, and the centre is the vocal.
+ *  - A reverb tail across the master, which trades punch for wash.
+ *
+ * The whole design here follows from one fact: mid/side is exact, and mono
+ * fold-down is the MID. So a stage that only ever touches the side signal
+ * cannot change the LEVEL of anything a mono listener hears — not
+ * approximately, exactly, at every frequency, whatever the dials are set to.
+ * That is why the crossover splits the SIDE only.
+ *
+ * The mid is not touched at all — not filtered and not turned — and neither is
+ * the side's phase, where the widths agree. The side is split by two
+ * first-order low-passes into bands that add back to exactly the side, so at
+ * unity the stage returns its input sample for sample, and where two bands'
+ * widths differ the width at the corner is a blend of the two that never goes
+ * past either, turning the side there by a few tens of degrees at most.
+ *
+ * It used to split the side with the rack's steep crossover and put the mid
+ * through the same phase turn to keep a panned source in its channel. That
+ * turn is inaudible as a tone and is not harmless: turning the whole record's
+ * phase re-creates the peaks the record's own limiter had taken off, and on a
+ * loud master it lifted them from -1 to +6.3 dBTP with every width at unity —
+ * which the Maximizer after it then had to take back down, on every beat,
+ * and that was most of the pumping every preset with Dimension had. So
+ * `(L+R)/2` now comes out as exactly what went in, and the test for that is an
+ * equality with the input rather than with a turned copy of it.
+ *
+ * Width alone still only scales what the mix already had, so the side also gets
+ * an all-pass network. That decorrelates it from the mid — the image widens
+ * because the sides stop being a louder copy of the middle — and being confined
+ * to the side, it keeps the mono guarantee above.
+ *
+ * Neither of those can widen what the record never spread: a mono recording,
+ * or a vocal and a kick panned dead centre, has no side for them to work on.
+ * So Spread also MAKES side out of the centre: the mid above the bass corner
+ * goes through a second network of its own and is added to the side, where
+ * the widths then act on it exactly as they act on the record's own. Added to
+ * the left and taken from the right, it cancels in the mono sum like any other
+ * side, and the network's instantaneous return is taken off first, because a
+ * copy of the centre with no delay in the side is a pan, not a width.
+ *
+ * The guard is the last piece. Scaling the side is safe arithmetic, but on
+ * material that is ALREADY out of phase it widens a problem: what the stereo
+ * listener gains, the mono listener loses. So the correlation is measured and
+ * the widening is pulled back toward unity as it falls. Narrowing is never
+ * guarded, because narrowing can only improve mono.
+ */
+#ifndef FLUIDEQ_DIMENSION_H
+#define FLUIDEQ_DIMENSION_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Three all-passes, at mutually prime delays.
+ *
+ * One is a comb filter wearing a different name: its phase rotation repeats and
+ * the repetition is audible as a pitched ring. Three whose delays share no
+ * factor spread that out into something heard as space instead.
+ */
+#define FEQ_DIMENSION_ALLPASSES 3
+/**
+ * The centre's network: three more all-passes at delays of their own, which
+ * make side out of what the two channels share. The lines handed to
+ * `feq_dimension_init` are both networks', the side's first.
+ */
+#define FEQ_DIMENSION_CENTRE_ALLPASSES 3
+#define FEQ_DIMENSION_LINES \
+  (FEQ_DIMENSION_ALLPASSES + FEQ_DIMENSION_CENTRE_ALLPASSES)
+
+typedef struct FeqDimensionAllPass {
+  /** Caller-owned, at least `feq_dimension_allpass_capacity` long. */
+  float* buffer;
+  uint32_t capacity;
+  uint32_t delay;
+  uint32_t cursor;
+  double gain;
+} FeqDimensionAllPass;
+
+typedef struct FeqDimensionSettings {
+  int enabled;
+  /**
+   * Bass width, 0 to 1 — it cannot go above unity, and that is deliberate.
+   *
+   * Low frequencies carry most of the energy and none of the localisation: the
+   * ear cannot place them, so width down there buys no image and costs headroom
+   * and mono compatibility. Every mastering chain that has this control has it
+   * as a narrowing one.
+   */
+  double low_width;
+  double mid_width;
+  double high_width;
+  double low_hz;
+  double high_hz;
+  /**
+   * Spread, 0 to 1: how much of the side is replaced by its decorrelated
+   * self, and how much side is made out of the centre (see the header).
+   */
+  double decorrelation;
+} FeqDimensionSettings;
+
+typedef struct FeqDimension {
+  /**
+   * The two first-order low-passes that split the SIDE, one at each corner
+   * (their integrators' state). The mid is never filtered on its way out.
+   */
+  double low_split;
+  double high_split;
+  FeqDimensionAllPass allpasses[FEQ_DIMENSION_ALLPASSES];
+  FeqDimensionAllPass centre_allpasses[FEQ_DIMENSION_CENTRE_ALLPASSES];
+  /**
+   * The Linkwitz-Riley high-pass at the low corner that feeds the centre's
+   * network, two Butterworth sections of two integrators each. It filters a
+   * copy of the mid, never the mid itself.
+   */
+  double centre_high_pass[4];
+  double low_width;
+  double mid_width;
+  double high_width;
+  double decorrelation;
+  /** Smoothed inter-channel correlation, and the guard it produces. */
+  double correlation;
+  double guard;
+  /** How far the stage is in: see `FEQ_SPLIT_FADE_MS`. */
+  double stage_mix;
+  double sample_rate;
+  /**
+   * Samples left before the all-pass network, started empty, has settled
+   * enough for its decorrelated side to be heard; -1 for "started empty,
+   * not yet counted". The network runs meanwhile and the decorrelation is
+   * held at none (`dimension.cpp`).
+   */
+  int64_t network_warm_left;
+} FeqDimension;
+
+/** Longest all-pass delay in samples at this rate, which sizes every buffer. */
+uint32_t feq_dimension_allpass_capacity(double sample_rate);
+
+void feq_dimension_init(FeqDimension* state,
+                        /* `FEQ_DIMENSION_LINES` of them. */
+                        float* const* allpass_buffers,
+                        uint32_t allpass_capacity);
+
+void feq_dimension_reset(FeqDimension* state);
+
+/** Nothing of the stage is left in the signal once this reaches zero. */
+double feq_dimension_fade(const FeqDimension* state);
+
+/**
+ * Widen in place. `left` and `right` are one block of a stereo pair.
+ *
+ * A mono chain must not call this: there is no side signal to work on and the
+ * stage has nothing to do.
+ *
+ * Called with `enabled` at zero while the fade still has something in it, it
+ * takes the stage out over `FEQ_SPLIT_FADE_MS` and holds the dials where they
+ * were: a stage on its way out is not a stage taking new settings.
+ */
+void feq_dimension_process(FeqDimension* state,
+                           float* left,
+                           float* right,
+                           uint32_t frames,
+                           const FeqDimensionSettings* settings,
+                           double sample_rate);
+
+/** How much widening the guard is allowing, 0 to 1. **Control thread.** */
+double feq_dimension_guard(const FeqDimension* state);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FLUIDEQ_DIMENSION_H */

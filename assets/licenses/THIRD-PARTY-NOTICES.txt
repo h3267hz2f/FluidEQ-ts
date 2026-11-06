@@ -1,0 +1,266 @@
+THIRD-PARTY NOTICES FOR FLUIDEQ
+===============================
+
+FluidEQ is licensed under the GNU General Public License version 3 or later;
+see LICENSE.txt. It is built on the work below, which is not, and which carries
+its own terms. Each of these licences requires that its copyright notice travel
+with the software, which is what this file is for.
+
+This file explains the main components and covers what is not an npm package.
+Every npm package installed with FluidEQ, including the ones those packages
+bring with them, is listed with its own licence text in
+THIRD-PARTY-LICENSES.txt, beside this file.
+
+Three larger components have their own files beside this one:
+
+  Equalizer APO   GPL-2.0-or-later   EqualizerAPO-LICENSE.txt
+  OPRA            CC-BY-SA-4.0       CC-BY-SA-4.0-LICENSE.txt
+                                     OPRA-ATTRIBUTION.txt
+  AutoEq          MIT                AutoEq-LICENSE.txt
+
+Equalizer APO is the audio engine; FluidEQ writes its configuration. Its
+installer ships with FluidEQ, unmodified. The corresponding source for the
+version bundled here is published alongside the FluidEQ release it shipped in,
+and `pnpm fetch-apo:source` retrieves the same archive from upstream.
+
+OPRA provides the headphone measurements behind the correction layer. Its data
+is CC BY-SA 4.0, which asks for more than a notice in a file: the application
+credits OPRA where the library is browsed, and names the author and measurement
+behind whichever curve is applied. What FluidEQ ships is adapted material — the
+published dataset reshaped for the application to read — and it stays under
+CC BY-SA 4.0. OPRA-ATTRIBUTION.txt records what was adapted and how.
+
+AutoEq provides the impulse responses behind the convolution layer, and is the
+origin of much of the data OPRA redistributes.
+
+The Room's heads are derived from the MIT KEMAR measurements: HRTF Measurements
+of a KEMAR Dummy-Head Microphone, Bill Gardner and Keith Martin, MIT Media
+Laboratory, 1994, https://sound.media.mit.edu/resources/KEMAR.html. That data
+is Copyright 1994 by the MIT Media Laboratory and is provided free with no
+restrictions on use, provided the authors are cited when the data is used in
+any research or commercial application. This application is sold, so they are
+cited: here, and in the About panel inside it. Their licence is not in this
+directory but beside the data it covers, as ../room/heads/LICENSES.md, which
+also records what was adapted — the horizontal ring of the compact set,
+diffuse-field equalised and resampled.
+
+
+Karaoke Maker and Denoise models
+--------------------------------
+@huggingface/transformers 3.7.6 (Apache-2.0)
+Copyright Hugging Face and contributors
+https://github.com/huggingface/transformers.js
+The library the lyric model runs in. The Apache License 2.0 is included as
+Apache-2.0-LICENSE.txt beside this notice.
+
+Each model below is identified by its own repository, and each licence was read
+there, not at a mirror, on 2026-09-30. Only SwiftF0 ships with FluidEQ. The
+others are downloaded on request, straight from the address given, to the
+user's own profile, and none is fetched until the control that needs it is
+pressed; FluidEQ does not redistribute them.
+
+  SwiftF0            MIT, bundled, assets/models/swift-f0.onnx
+                     Copyright (c) 2025-2026 Lars Nieradzik
+                     https://github.com/lars76/swift-f0
+                     the melody detector's fallback
+
+  Whisper            MIT, downloaded on request
+  large-v3-turbo     Copyright (c) 2022 OpenAI
+                     https://huggingface.co/openai/whisper-large-v3-turbo
+                     as exported to ONNX with word timestamps at
+                     https://huggingface.co/onnx-community/whisper-large-v3-turbo_timestamped,
+                     which states no licence of its own for the weights
+                     it converts
+                     the lyric transcriber
+
+  RMVPE              MIT, downloaded on request
+                     Copyright (c) 2023 liujing04, 源文雨, Ftps
+                     (the Retrieval-based Voice Conversion project)
+                     https://huggingface.co/lj1995/VoiceConversionWebUI
+                     the melody detector's primary model
+
+  Mel-Band RoFormer  MIT, downloaded on request
+                     Kimberley Jensen
+                     https://huggingface.co/KimberleyJSN/melbandroformer
+                     as exported to ONNX, also MIT, at
+                     https://huggingface.co/silverdaw/mel-band-roformer-vocals-onnx
+                     the voice and backing separator
+
+  DPDFNet            Apache-2.0, downloaded on request
+                     Ceva
+                     https://github.com/ceva-ip/DPDFNet
+                     the weights fetched from the sherpa-onnx project's
+                     release and checked against a pinned SHA-256
+                     the Denoise stage's Voice module
+
+The MIT permission notice below covers each MIT model. Karaoke media and lyrics
+a user imports are not supplied by any of these projects and remain subject to
+their own copyright holders' terms.
+
+SwiftF0 is, so its licence travels with it. What ships is the model committed
+in the author's own repository — swift_f0/model.onnx at commit 64700fce, byte
+for byte, 397,987 bytes, SHA-256
+7e2390db8379cd9e1e2b22828e55b45b57c8559e4c8335678c717dc245c18176 — and that
+repository places one MIT licence over everything in it, stating no separate
+terms for the weights. Its copyright line is in the MIT list below, whose
+permission notice covers this entry as well.
+
+
+LAME, through @breezystack/lamejs (LGPL-3.0)
+--------------------------------------------
+The Karaoke Maker writes an MP3 beside the WAV when it splits a song. Chromium
+decodes MP3 and cannot encode it, so that encoder is LAME — the LAME project's
+encoder, ported to JavaScript as @breezystack/lamejs 1.2.7.
+
+FluidEQ acknowledges its use of LAME. The LAME project's own site is
+https://lame.sourceforge.net, and the port is published at
+https://github.com/breezystack/lamejs.
+
+lamejs is used unmodified, as published on npm. It is licensed under the GNU
+Lesser General Public License version 3, whose full text is included as
+LGPL-3.0-LICENSE.txt beside this notice; the GNU GPL version 3 that it
+incorporates is LICENSE.txt, already in this directory. Because FluidEQ itself
+is conveyed under GPL-3.0-or-later, the combined work is conveyed under that
+licence, as LGPL-3.0 section 2 permits. The corresponding source for lamejs is
+the published npm package named above; FluidEQ's own corresponding source is
+published with the release this notice shipped in.
+
+
+Electron
+--------
+Copyright (c) Electron contributors
+Copyright (c) 2013-2020 GitHub Inc.
+MIT. Electron embeds Chromium and Node.js, whose own notices ship with the
+application as LICENSE and LICENSES.chromium.html.
+
+
+d3 (ISC)
+--------
+Copyright 2010-2023 Mike Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+
+The following are used under the MIT licence
+--------------------------------------------
+ajv                 Copyright (c) 2015-2021 Evgeny Poberezkin
+electron-debug      Copyright (c) Sindre Sorhus <sindresorhus@gmail.com>
+electron-log        Copyright (c) 2016 Alexey Prokhorov
+electron-updater    Copyright (c) 2015 Loopline Systems
+koffi               Copyright (C) 2026 Niels Martignène
+music-metadata      Copyright (c) 2026 Borewit
+onnxruntime-common  Copyright (c) Microsoft Corporation
+onnxruntime-node    Copyright (c) Microsoft Corporation
+onnxruntime-web     Copyright (c) Microsoft Corporation
+react               Copyright (c) Meta Platforms, Inc. and affiliates
+react-dom           Copyright (c) Meta Platforms, Inc. and affiliates
+regedit            Copyright (c) 2014 ironSource
+swift-f0 (weights)  Copyright (c) 2025-2026 Lars Nieradzik
+three               Copyright (c) 2010-2026 three.js authors
+uid                 Copyright (c) Luke Edwards <luke.edwards05@gmail.com>
+ws                  Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
+                    Copyright (c) 2013 Arnout Kazemier and contributors
+FidelityFX-FSR 1.0  Copyright (c) 2021 Advanced Micro Devices, Inc.
+
+three.js is the 3D engine behind visualizers that carry a 3D world: their
+models, lights, materials and shadows, with its glTF loader, room environment
+and skeleton utilities from the same package. It ships as its own file and is
+loaded only when such a visualizer is shown (src/renderer/graph/world).
+
+FidelityFX Super Resolution 1.0 is the pair of filters (EASU and RCAS) that
+bring a visualizer drawn smaller than its panel up to size. They are ported to
+the app's shading language in src/renderer/graph/sceneUpscale.ts, which
+carries the notice; the original is published by AMD at
+https://github.com/GPUOpen-Effects/FidelityFX-FSR.
+
+FXAA 3.11  Copyright (c) 2014, NVIDIA CORPORATION. All rights reserved.
+
+FXAA (Fast Approximate Anti-Aliasing) by Timothy Lottes is the "Fast" edge
+smoothing of a visualizer, ported to the app's shading language in
+src/renderer/graph/scenePost.ts from the copy of Fxaa3_11.h that Intel ships
+inside its CMAA2 sample (https://github.com/GameTechDev/CMAA2), NVIDIA's own
+header intact. It is used under the following licence:
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+ * Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+ * Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+ * Neither the name of NVIDIA CORPORATION nor the names of its
+   contributors may be used to endorse or promote products derived
+   from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+music-metadata reads the tags, cover art and durations behind the Library tab.
+koffi calls the Windows functions the window's title bar and taskbar buttons
+need. ws carries Share Audio between computers on the local network.
+The three onnxruntime packages are the inference runtime the Karaoke Maker's
+models are executed by; they are published by the ONNX Runtime project at
+https://github.com/microsoft/onnxruntime.
+
+regedit's VBS scripts ship separately from the application bundle, in the
+resources\vbs directory, and are covered by the notice above.
+
+MIT LICENSE
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------
+dr_mp3.h, dr_flac.h
+David Reid — https://github.com/mackron/dr_libs
+Choice of: Unlicense (public domain) OR MIT No Attribution.
+
+dr_mp3 is derived from minimp3 by lieff (https://github.com/lieff/minimp3),
+which is released under CC0 1.0 Universal. A derivative cannot be more
+permissive than what it came from, so that licence was checked separately.
+
+--------------------------------------------------------------------------
+stb_vorbis.c
+Sean Barrett — https://github.com/nothings/stb
+Choice of: MIT OR public domain (Unlicense).
+
+--------------------------------------------------------------------------
+The three files above decode MP3, FLAC and Ogg Vorbis in the native audio
+engine. Each carries its full licence text at the end of its own source file,
+which ships in the FluidEQ source repository. None of the three requires
+attribution; they are listed because this application is sold and somebody
+auditing what is inside it is entitled to a straight answer.

@@ -1,0 +1,128 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+#include "chain_signature.h"
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <cstdio>
+#include <string>
+
+#include "log.h"
+
+namespace fluideq_engine {
+
+namespace {
+
+/** Exact enough to compare: `%.17g` round-trips every double. */
+std::string number(double value) {
+  char text[40] = {};
+  const int written = std::snprintf(text, sizeof(text), "%.17g", value);
+  if (written <= 0) {
+    return std::string("?");
+  }
+  return std::string(text, static_cast<size_t>(written));
+}
+
+/** A file's size and last-write time, or `-` when it is not there. */
+std::string stamp_of(const std::wstring& path) {
+  if (path.empty()) {
+    return std::string("-");
+  }
+  WIN32_FILE_ATTRIBUTE_DATA data = {};
+  if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) == 0) {
+    return std::string("-");
+  }
+  char text[64] = {};
+  const int written = std::snprintf(
+      text, sizeof(text), "%lu:%lu:%lu:%lu",
+      static_cast<unsigned long>(data.nFileSizeHigh),
+      static_cast<unsigned long>(data.nFileSizeLow),
+      static_cast<unsigned long>(data.ftLastWriteTime.dwHighDateTime),
+      static_cast<unsigned long>(data.ftLastWriteTime.dwLowDateTime));
+  if (written <= 0) {
+    return std::string("-");
+  }
+  return std::string(text, static_cast<size_t>(written));
+}
+
+}  // namespace
+
+std::string signature_of(const Chain& chain) {
+  std::string out;
+  out += chain.matched ? "m1" : "m0";
+  out += "|c=" + to_utf8(chain.convolution_path);
+  out += "|cp=" + std::to_string(chain.convolution_passes);
+  out += "|s=" + stamp_of(chain.convolution_path);
+  out += "|p=" + number(chain.preamp_db);
+  out += chain.output_guard ? "|og1" : "|og0";
+  out += chain.auto_preamp ? "|ap1" : "|ap0";
+  out += "|as=" + number(chain.auto_preamp_start_db);
+  out += chain.stable_graphic ? "|sg1" : "|sg0";
+  out += chain.low_latency ? "|ll1" : "|ll0";
+  out += chain.minimum_curve_phase ? "|cmp1" : "|cmp0";
+  out += chain.minimum_eq_phase ? "|eqp1" : "|eqp0";
+  out += "|eqg=";
+  for (const auto& curve : chain.eq_graphic_curves) {
+    for (const auto& point : curve) {
+      out += number(point.frequency) + ',' + number(point.gain_db) + ';';
+    }
+    out += '/';
+  }
+  out += "|cg=";
+  for (const auto& curve : chain.comparison_curves) {
+    for (const auto& point : curve) {
+      out += number(point.frequency) + ',' + number(point.gain_db) + ';';
+    }
+    out += '/';
+  }
+  out += "|b=";
+  for (const Band& band : chain.bands) {
+    out += std::to_string(static_cast<int>(band.type));
+    out += ',' + number(band.frequency);
+    out += ',' + number(band.gain_db);
+    out += ',' + number(band.quality);
+    out += band.user_eq ? ",eq" : ",other";
+    out += band.curve_layer ? ",curve" : ",untagged";
+    out += band.matched ? ",matched" : ",cookbook";
+    // Which channels it plays on: moving a band to the other ear changes the
+    // sound and nothing else about the band.
+    if (!band.channels.all) {
+      out += ",ch" + std::to_string(band.channels.speakers) + '.' +
+             std::to_string(band.channels.indices);
+    }
+    out += ';';
+  }
+  out += "|g=";
+  // A separator per curve: the same points split differently between two
+  // curves is a different response, and must not sign the same.
+  for (const std::vector<GraphicPoint>& curve : chain.graphic_curves) {
+    for (const GraphicPoint& point : curve) {
+      out += number(point.frequency) + ',' + number(point.gain_db) + ';';
+    }
+    out += '/';
+  }
+  out += "|f=";
+  for (const std::wstring& file : chain.files_read) {
+    out += to_utf8(file) + ';';
+  }
+  out += "|i=";
+  for (const std::string& command : chain.ignored) {
+    out += command + ';';
+  }
+  // The endpoint's rack, by value rather than by file stamp. Its file is
+  // deliberately absent from `files_read`, so nothing else here would notice
+  // it changing — and it is rewritten on every slider release, which is the
+  // one file in this directory that changes while music is playing.
+  out += "|d=";
+  for (const double value : chain.dsp_values) {
+    out += number(value) + ';';
+  }
+  return out;
+}
+
+}  // namespace fluideq_engine

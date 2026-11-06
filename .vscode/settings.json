@@ -1,0 +1,43 @@
+{
+  "files.associations": {
+    ".eslintrc": "jsonc",
+    ".prettierrc": "jsonc",
+    ".eslintignore": "ignore"
+  },
+
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    "html",
+    "typescriptreact"
+  ],
+
+  "javascript.validate.enable": false,
+  "javascript.format.enable": false,
+  "typescript.format.enable": false,
+
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": false,
+  "editor.codeActionsOnSave": {
+    "source.formatDocument": "explicit",
+    "source.fixAll.eslint": "explicit"
+  },
+
+  "search.exclude": {
+    ".git": true,
+    ".eslintcache": true,
+    ".erb/dll": true,
+    "release/{build,app/dist}": true,
+    "node_modules": true,
+    "npm-debug.log.*": true,
+    "test/**/__snapshots__": true,
+    "package-lock.json": true,
+    "*.{css,sass,scss}.d.ts": true
+  },
+  "files.eol": "\n",
+  "editor.tabSize": 2,
+
+  "terminal.integrated.autoReplies": {
+    "Terminate batch job (Y/N)": "Y\r"
+  }
+}

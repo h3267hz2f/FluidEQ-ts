@@ -1,0 +1,375 @@
+import 'webpack-dev-server';
+import path from 'path';
+import fs from 'fs';
+import webpack from 'webpack';
+import HtmlWebpackPlugin from 'html-webpack-plugin';
+import chalk from 'chalk';
+import { merge } from 'webpack-merge';
+import {
+  execFileSync,
+  execSync,
+  spawn,
+  type ChildProcess,
+} from 'child_process';
+import ReactRefreshWebpackPlugin from '@pmmmwh/react-refresh-webpack-plugin';
+import baseConfig from './webpack.config.base';
+import webpackPaths from './webpack.paths';
+import { dspWorkletConfig } from './webpack.dspWorklet';
+import { rendererAddonEntries } from '../scripts/addons';
+import checkNodeEnv from '../scripts/check-node-env';
+import PUBLIC_ENV_DEFAULTS from './public-env';
+import contentSecurityPolicy from '../../src/main/contentSecurityPolicy';
+import wallpaperContentSecurityPolicy from '../../src/main/wallpaper/wallpaperPolicy';
+
+// When an ESLint server is running, we can't set the NODE_ENV so we'll check if it's
+// at the dev webpack config is not accidentally run in a production environment
+if (process.env.NODE_ENV === 'production') {
+  checkNodeEnv('development');
+}
+
+const port = process.env.PORT || 1212;
+const manifest = path.resolve(webpackPaths.dllPath, 'renderer.json');
+// Loaded as the entry, with no parent, it is not the DLL config asking.
+const requiredByDLLConfig =
+  module.parent?.filename.includes('webpack.config.renderer.dev.dll') ?? false;
+
+/**
+ * Warn if the DLL is not built
+ */
+if (
+  !requiredByDLLConfig &&
+  !(fs.existsSync(webpackPaths.dllPath) && fs.existsSync(manifest))
+) {
+  console.log(
+    chalk.black.bgYellow.bold(
+      'The DLL files are missing. Sit back while we build them for you with "npm run build-dll"',
+    ),
+  );
+  execSync('pnpm postinstall');
+}
+
+/** The dev session's own processes: the preload builder and the main process. */
+const devChildren: ChildProcess[] = [];
+let devShuttingDown = false;
+
+/**
+ * Run a CLI on its own node process. Not `pnpm <script>`: pnpm and every
+ * `node_modules/.bin` entry are `.cmd` shims on Windows, and Ctrl+C inside a
+ * batch file stops cmd.exe to ask "Terminate batch job (Y/N)?".
+ */
+const spawnNode = (bin: string, args: string[], env: NodeJS.ProcessEnv) => {
+  const child = spawn(process.execPath, [require.resolve(bin), ...args], {
+    stdio: 'inherit',
+    env: { ...process.env, ...env },
+  });
+  devChildren.push(child);
+  return child;
+};
+
+/** One Ctrl+C takes the whole dev session down, orphaning nothing. */
+const shutdownDevSession = () => {
+  if (devShuttingDown) return;
+  devShuttingDown = true;
+
+  devChildren.forEach((child) => {
+    if (!child.pid || child.exitCode !== null) return;
+    try {
+      if (process.platform === 'win32') {
+        // Electron is a grandchild of electronmon; /T reaches it.
+        execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+          stdio: 'ignore',
+        });
+      } else {
+        child.kill('SIGKILL');
+      }
+    } catch {
+      // Already gone.
+    }
+  });
+
+  process.exit(0);
+};
+
+const configuration: webpack.Configuration = {
+  devtool: 'inline-source-map',
+
+  mode: 'development',
+
+  // Coalesce a burst of editor saves into one completed compilation. The
+  // renderer then receives a single HMR update instead of several reloads.
+  watchOptions: {
+    aggregateTimeout: 250,
+    // Also every embedded worktree: Claude sessions and the IDE both park
+    // whole checkouts (with their own node_modules) inside the repo, and a
+    // stale one with a locked file once killed the entire dev process with
+    // an unhandled EPERM from the watcher's scan.
+    ignored: /node_modules|[\\/]\.claude[\\/]|[\\/]\.gigaide[\\/]/,
+  },
+
+  target: ['web', 'electron-renderer'],
+
+  resolve: {
+    conditionNames: ['browser', 'import', 'module', 'default'],
+    alias: {
+      '@fluideq/whisper-wasm': path.resolve(
+        webpackPaths.rootPath,
+        'node_modules/@huggingface/transformers/dist/ort-wasm-simd-threaded.jsep.wasm',
+      ),
+      '@fluideq/whisper-runtime': path.resolve(
+        webpackPaths.rootPath,
+        'node_modules/@huggingface/transformers/dist/ort-wasm-simd-threaded.jsep.mjs',
+      ),
+    },
+  },
+
+  entry: {
+    // webpack-dev-server injects its client and hot runtime for this web
+    // target. Listing them here as well created two websocket clients in the
+    // same renderer: one announced HMR enabled, the duplicate announced it
+    // disabled, and both waited for updates for the lifetime of the window.
+    // Add-ons from this checkout's own `addons/` folder first, so each has
+    // registered with `renderer/addons.ts` before the app renders. The
+    // release config builds index.tsx alone.
+    renderer: [
+      ...rendererAddonEntries(),
+      path.join(webpackPaths.srcRendererPath, 'index.tsx'),
+    ],
+    wallpaper: path.join(webpackPaths.srcRendererPath, 'wallpaper/index.tsx'),
+    'karaoke-whisper-worker': path.join(
+      webpackPaths.srcRendererPath,
+      'karaoke/whisper.worker.ts',
+    ),
+  },
+
+  output: {
+    path: webpackPaths.distRendererPath,
+    publicPath: '/',
+    filename: '[name].dev.js',
+    library: {
+      type: 'umd',
+    },
+  },
+
+  module: {
+    rules: [
+      {
+        test: /\.s?css$/,
+        use: [
+          'style-loader',
+          {
+            loader: 'css-loader',
+            options: {
+              modules: true,
+              sourceMap: true,
+              importLoaders: 1,
+            },
+          },
+          'sass-loader',
+        ],
+        include: /\.module\.s?(c|a)ss$/,
+      },
+      {
+        test: /\.s?css$/,
+        use: ['style-loader', 'css-loader', 'sass-loader'],
+        exclude: /\.module\.s?(c|a)ss$/,
+      },
+      // Fonts
+      {
+        test: /\.(woff|woff2|eot|ttf|otf)$/i,
+        type: 'asset/resource',
+      },
+      // Images
+      {
+        test: /\.(png|svg|jpg|jpeg|gif)$/i,
+        type: 'asset/resource',
+      },
+      // Emitted separately so AudioWorklet.addModule receives executable JS
+      // in development exactly as it does in the packaged renderer.
+      {
+        test: /\.worklet$/i,
+        type: 'asset/resource',
+        generator: { filename: '[name].js' },
+      },
+      {
+        test: /\.(json|bin)$/i,
+        resourceQuery: /url/,
+        type: 'asset/resource',
+        generator: { filename: 'karaoke-models/basic-pitch/[name][ext]' },
+      },
+      {
+        // ONNX Runtime dynamically imports the JS bootstrap before it opens
+        // the WASM binary. They must be emitted together under stable names,
+        // so these cannot be content-hashed.
+        //
+        // Both Karaoke workers land here — the speech model reaches ONNX
+        // through @huggingface/transformers, the separation worker imports
+        // onnxruntime-web directly — and that is only safe because the two
+        // resolve to one version. `onnxruntime-web` is pinned in package.json
+        // to the exact build transformers depends on, rather than to a range.
+        // Two versions ship these same basenames with different content, and
+        // webpack fails the build outright: "Multiple chunks emit assets to
+        // the same filename". One copy also keeps a second ORT runtime out of
+        // the bundle.
+        test: /ort-wasm-simd-threaded\.jsep\.(?:mjs|wasm)$/i,
+        type: 'asset/resource',
+        generator: { filename: 'karaoke-models/whisper/[name][ext]' },
+      },
+    ],
+  },
+  plugins: [
+    ...(requiredByDLLConfig
+      ? []
+      : [
+          new webpack.DllReferencePlugin({
+            context: webpackPaths.dllPath,
+            manifest: require(manifest),
+            sourceType: 'var',
+          }),
+        ]),
+
+    new webpack.NoEmitOnErrorsPlugin(),
+
+    /**
+     * Create global constants which can be configured at compile time.
+     *
+     * Useful for allowing different behaviour between development builds and
+     * release builds
+     *
+     * NODE_ENV should be production so that modules do not perform certain
+     * development checks
+     *
+     * By default, use 'development' as NODE_ENV. This can be overriden with
+     * 'staging', for example, by changing the ENV variables in the npm scripts
+     */
+    new webpack.EnvironmentPlugin({
+      NODE_ENV: 'development',
+      ...PUBLIC_ENV_DEFAULTS,
+    }),
+
+    new webpack.LoaderOptionsPlugin({
+      debug: true,
+    }),
+
+    new ReactRefreshWebpackPlugin({ overlay: false }),
+
+    new HtmlWebpackPlugin({
+      filename: 'wallpaper.html',
+      template: path.join(webpackPaths.srcRendererPath, 'wallpaper/index.ejs'),
+      chunks: ['wallpaper'],
+      // The same policy the header carries (wallpaperPolicy.ts).
+      csp: wallpaperContentSecurityPolicy(true),
+    }),
+
+    new HtmlWebpackPlugin({
+      filename: path.join('index.html'),
+      template: path.join(webpackPaths.srcRendererPath, 'index.ejs'),
+      minify: {
+        collapseWhitespace: true,
+        removeAttributeQuotes: true,
+        removeComments: true,
+      },
+      isBrowser: false,
+      env: process.env.NODE_ENV,
+      isDevelopment: process.env.NODE_ENV !== 'production',
+      nodeModules: webpackPaths.appNodeModulesPath,
+      chunks: ['renderer'],
+      // The same policy the header carries, so development runs the rules a
+      // packaged build does (see contentSecurityPolicy.ts).
+      csp: contentSecurityPolicy(true),
+    }),
+  ],
+
+  node: {
+    __dirname: false,
+    __filename: false,
+  },
+
+  devServer: {
+    port,
+    compress: true,
+    hot: true,
+    // React Fast Refresh/HMR updates the existing window in place. A full
+    // live-reload would throw away the UI state on every source save.
+    liveReload: false,
+    client: {
+      overlay: false,
+    },
+    headers: { 'Access-Control-Allow-Origin': '*' },
+    static: {
+      publicPath: '/',
+    },
+    historyApiFallback: {
+      verbose: true,
+    },
+    // Ctrl+C is handled below instead: the built-in handler asks for a second
+    // one before it lets go, and the point is to leave nothing running.
+    setupExitSignals: false,
+    setupMiddlewares(middlewares) {
+      // Prepended so it beats webpack-cli's own graceful-shutdown handler.
+      (['SIGINT', 'SIGTERM', 'SIGBREAK'] as NodeJS.Signals[]).forEach(
+        (signal) => process.prependListener(signal, shutdownDevSession),
+      );
+
+      console.log('Starting preload.js builder...');
+      spawnNode(
+        'webpack-cli/bin/cli.js',
+        ['--config', path.join(__dirname, 'webpack.config.preload.dev.cjs')],
+        { NODE_ENV: 'development', TS_NODE_TRANSPILE_ONLY: 'true' },
+      )
+        .on('close', () => {
+          if (!devShuttingDown) shutdownDevSession();
+        })
+        .on('error', (spawnError) => console.error(spawnError));
+      return middlewares;
+    },
+    /**
+     * The main process, once the server is listening and not before.
+     *
+     * It used to start from `setupMiddlewares` above, which runs before the
+     * server has bound its port, and then poll the port every 100 ms for up to
+     * two minutes before loading the window (`waitForRenderer`, gone). From
+     * here the address answers the moment main asks: the server is listening,
+     * and webpack-dev-middleware holds each request until the bundle it asks
+     * for is built. The bundle still compiles alongside main's own start-up,
+     * as before — the server listens a moment after the compile begins.
+     */
+    onListening() {
+      console.log('Starting Main Process...');
+      spawnNode('electronmon/bin/cli.js', ['dev-main.cjs', '--no-sandbox'], {
+        NODE_ENV: 'development',
+        FLUIDEQ_EXIT_DEV_SESSION_ON_QUIT: '1',
+      })
+        .on('close', () => {
+          if (devShuttingDown) return;
+          shutdownDevSession();
+        })
+        .on('error', (spawnError) => console.error(spawnError));
+    },
+  },
+};
+
+/**
+ * Two compilers, and the second one is not a convenience.
+ *
+ * `webpack-dev-server` injects its own client and react-refresh into every
+ * entry of a compiler it considers a web target, and it decides that PER
+ * COMPILER — `Server.addAdditionalEntries` calls `Server.isWebTarget`, which
+ * reads `compiler.options.target`. There is no per-entry opt-out. An
+ * AudioWorklet scope has no `self`, so an injected client throws before
+ * `registerProcessor` runs and the node fails to construct two steps later.
+ *
+ * The worklet therefore gets its own compiler with a target the server does
+ * not count as web. `webpack serve` handles an array and serves the output of
+ * both from memory, so nothing about the workflow changes.
+ */
+/**
+ * The renderer's own config, named because two other files reach into it.
+ *
+ * `webpack.config.eslint.ts` uses it whole and `webpack.config.renderer.dev.dll.ts`
+ * takes its `module` rules. Both used to read `.default`, which is now the
+ * array below — and `.default.module` on an array is `undefined`, so the DLL
+ * would have been built with no loader rules at all and said nothing about it.
+ */
+export const rendererDevConfig = merge(baseConfig, configuration);
+
+export default [rendererDevConfig, dspWorkletConfig(true)];

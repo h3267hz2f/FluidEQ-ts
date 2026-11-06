@@ -1,0 +1,79 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * The Organic stage, ported from `organic.ts`.
+ *
+ * One focused band through the shared harmonic generator, run at the
+ * oversampled rate and returning harmonics only — the foundation is restored by
+ * the caller after downsampling, because this stage is summed in parallel
+ * rather than replacing the signal.
+ */
+#ifndef FLUIDEQ_ORGANIC_H
+#define FLUIDEQ_ORGANIC_H
+
+#include <stdint.h>
+
+#include "fluideq/analog_diode.h"
+#include "fluideq/harmonics.h"
+#include "fluideq/exciter_oversample.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define FEQ_ORGANIC_MAX_OVERSAMPLE 4
+
+typedef struct FeqOrganic {
+  FeqExciterOversampler oversampler;
+  /**
+   * `FeqExciterOversampling`, and the block's ramp the harmonics go through
+   * (from `switch_from` to `switch_to`), set by the caller to what the
+   * Exciter's bands run at, so the two change together inside the same fade.
+   */
+  int quality;
+  double switch_from;
+  double switch_to;
+  /** Scratch at `frames * FEQ_ORGANIC_MAX_OVERSAMPLE`, caller-owned. */
+  float* wide;
+  float* wide_dry;
+  double depth;
+  double even_weight;
+  FeqExciterTransient transient;
+  FeqHarmonicState harmonics;
+} FeqOrganic;
+
+void feq_organic_init(FeqOrganic* state, float* wide, float* wide_dry);
+
+void feq_organic_reset_transient(FeqOrganic* state);
+
+double feq_organic_depth(double amount);
+double feq_organic_even_weight(double amount);
+
+/** The gain of the foundation this stage subtracts before summing. */
+double feq_organic_foundation_gain(void);
+
+/**
+ * Process a block in place and return the depth actually reached.
+ *
+ * Depth and the even weight are smoothed at the OVERSAMPLED rate, not the block
+ * rate: at 4x that is four times as many steps per block, and a port that
+ * smoothed at the session rate would glide four times too fast.
+ *
+ * `middle` is the oversampler's own scratch, `frames * 2` floats.
+ */
+double feq_organic_block(FeqOrganic* state,
+                         float* target,
+                         uint32_t frames,
+                         double amount,
+                         double sample_rate,
+                         float* middle);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FLUIDEQ_ORGANIC_H */

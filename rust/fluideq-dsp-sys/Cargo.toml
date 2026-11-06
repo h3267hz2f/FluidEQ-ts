@@ -1,0 +1,20 @@
+[package]
+name = "fluideq-dsp-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Zero-overhead Rust FFI bindings and static build bridge for FluidEQ native C++ dsp-core"
+links = "fluideq_dsp_core"
+
+[features]
+default = []
+# Enables compiling and statically linking /native/dsp-core C++ sources via `cc`
+link-cpp-core = ["dep:cc"]
+
+[dependencies]
+serde = { workspace = true }
+
+[build-dependencies]
+cc = { version = "1.1", optional = true }
+

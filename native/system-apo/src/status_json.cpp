@@ -1,0 +1,151 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+// `status_json` on its own, with no Windows header anywhere near it, so the
+// test that pins its shape links nothing but this.
+
+#include <charconv>
+#include <cstdio>
+#include <string>
+
+#include "status_file.h"
+
+namespace fluideq_engine {
+
+namespace {
+
+/** A JSON string literal, quotes included. */
+std::string quoted(const std::string& text) {
+  std::string out = "\"";
+  for (const char character : text) {
+    const auto byte = static_cast<unsigned char>(character);
+    if (character == '"' || character == '\\') {
+      out += '\\';
+      out += character;
+    } else if (byte < 0x20) {
+      char escaped[8] = {};
+      std::snprintf(escaped, sizeof(escaped), "\\u%04x", byte);
+      out += escaped;
+    } else {
+      out += character;
+    }
+  }
+  out += '"';
+  return out;
+}
+
+/**
+ * The endpoint id narrowed to ASCII. It is a GUID in braces, which is ASCII
+ * by construction; anything else is replaced rather than guessed at.
+ */
+std::string narrow_id(const std::wstring& id) {
+  std::string out;
+  out.reserve(id.size());
+  for (const wchar_t character : id) {
+    const bool plain = character >= 0x20 && character < 0x7f;
+    out.push_back(plain ? static_cast<char>(character) : '?');
+  }
+  return out;
+}
+
+/**
+ * Two decimals, from `std::to_chars`: locale-free by definition, where
+ * `snprintf` would write "-11,84" inside a process whose locale says so and
+ * the app would read no level at all.
+ */
+std::string decimal(double value) {
+  char text[32] = {};
+  const auto written =
+      std::to_chars(text, text + sizeof(text), value, std::chars_format::fixed, 2);
+  return written.ec == std::errc() ? std::string(text, written.ptr) : "0";
+}
+
+}  // namespace
+
+std::string status_json(const EngineStatus& status, unsigned long pid,
+                        const std::string& at) {
+  std::string problems = "[";
+  for (size_t index = 0; index < status.problems.size(); ++index) {
+    if (index > 0) {
+      problems += ',';
+    }
+    problems += quoted(status.problems[index]);
+  }
+  problems += ']';
+  // Only when there is one: an output that has finished no named song says
+  // nothing, rather than a song with no id the app would have to reject.
+  std::string last_song;
+  if (status.last_song) {
+    last_song = ",\"lastSong\":{\"id\":" + quoted(status.last_song->id) +
+                ",\"level\":" + decimal(status.last_song->level_lufs) +
+                ",\"peak\":" + decimal(status.last_song->peak_db) +
+                ",\"seconds\":" + decimal(status.last_song->seconds) + "}";
+  }
+  std::string parts = "{";
+  for (size_t index = 0; index < status.latency_parts.size(); ++index) {
+    if (index > 0) {
+      parts += ',';
+    }
+    parts += quoted(status.latency_parts[index].first) + ':' +
+             std::to_string(status.latency_parts[index].second);
+  }
+  parts += '}';
+  std::string active = "[";
+  for (size_t index = 0; index < status.latency_active.size(); ++index) {
+    if (index > 0) active += ',';
+    active += quoted(status.latency_active[index]);
+  }
+  active += ']';
+  // Only on a second output fed by the engine, like `lastSong`.
+  std::string split;
+  if (status.split) {
+    split = ",\"split\":{\"from\":" + quoted(narrow_id(status.split->from)) +
+            ",\"state\":" + quoted(status.split->state) +
+            ",\"lagMs\":" + decimal(status.split->lag_ms) +
+            ",\"sourceDspMs\":" + decimal(status.split->source_dsp_ms) +
+            ",\"outputEqMs\":" + decimal(status.split->output_eq_ms) +
+            ",\"underruns\":" + std::to_string(status.split->underruns) + "}";
+  }
+  // Only once a block has been timed, like `lastSong`.
+  std::string load;
+  if (status.load) {
+    load = ",\"load\":{\"blocks\":" + std::to_string(status.load->blocks) +
+           ",\"overHalf\":" + std::to_string(status.load->over_half) +
+           ",\"slowestMs\":" + decimal(status.load->slowest_ms) +
+           ",\"periodMs\":" + decimal(status.load->period_ms) + "}";
+  }
+  std::string source_analysis;
+  if (status.source_analysis) {
+    const auto& source = *status.source_analysis;
+    source_analysis = ",\"sourceAnalysis\":{\"version\":" + std::to_string(source.version) +
+        ",\"kind\":" + quoted(source.kind) + ",\"owner\":" + quoted(source.owner) +
+        ",\"source\":" + quoted(source.source) +
+        ",\"epoch\":" + std::to_string(source.epoch) +
+        ",\"revision\":" + std::to_string(source.revision) +
+        ",\"ready\":" + (source.ready ? "true" : "false") +
+        ",\"voiceReady\":" + (source.voice_ready ? "true" : "false") + "}";
+  }
+  return std::string("{\"version\":1,\"endpoint\":") +
+         quoted(narrow_id(status.endpoint)) +
+         ",\"pid\":" + std::to_string(pid) +
+         ",\"locked\":" + (status.locked ? "true" : "false") +
+         ",\"processing\":" + (status.processing ? "true" : "false") +
+         ",\"carried\":" + (status.carried ? "true" : "false") +
+         ",\"owner\":" + (status.owner ? "true" : "false") +
+         ",\"reason\":" + quoted(status.reason) +
+         ",\"problems\":" + problems + last_song +
+         ",\"channels\":" + std::to_string(status.channels) +
+         ",\"room\":" + quoted(status.room) +
+         ",\"rate\":" + std::to_string(status.rate) +
+         ",\"latency\":" + std::to_string(status.latency) +
+         ",\"latencyParts\":" + parts +
+         ",\"latencyActive\":" + active +
+         ",\"gameMode\":" + (status.game_mode ? "true" : "false") + load + split +
+         source_analysis +
+         ",\"at\":" + quoted(at) + "}\r\n";
+}
+
+}  // namespace fluideq_engine

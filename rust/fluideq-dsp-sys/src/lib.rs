@@ -1,0 +1,2247 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+//! Zero-overhead FFI bindings to `/native/dsp-core/include/fluideq/*.h`
+//! (`dsp.h`, `chain.h`, `biquad.h`, `eq.h`, `denoise.h`, `deesser.h`, `footsteps.h`,
+//! `bass_forge.h`, `bass_punch.h`, `dimension.h`, `room.h`, `live_normalizer.h`, `meters.h`).
+//!
+//! When built with `--features link-cpp-core`, this crate links directly against
+//! the compiled C++ `dsp-core` static library (`libfluideq_dsp_core.a`).
+//! When built without a C++ toolchain, it provides ABI-compatible struct layouts,
+//! defaults matching `feq_chain_settings_defaults`, and fallback handles so
+//! `cargo test` runs cleanly in any environment.
+
+#![allow(non_camel_case_types)]
+
+use serde::{Deserialize, Serialize};
+use std::os::raw::{c_char, c_double, c_float, c_int};
+
+pub const FEQ_ABI_VERSION: u32 = 1;
+pub const FEQ_CHAIN_PARAM_LEAD: usize = 158;
+pub const FEQ_CHAIN_BAND_PARAMS: usize = 7;
+pub const FEQ_CHAIN_MAX_EQ_BANDS: usize = 64;
+pub const FEQ_CHAIN_EXCITER_BANDS: usize = 3;
+pub const FEQ_CHAIN_CHANNELS: usize = 2;
+pub const FEQ_CHAIN_MAX_CHANNELS: usize = 8;
+pub const FEQ_CHAIN_MAX_TONE_BANDS: usize = 48;
+
+pub const FEQ_CHAIN_DEESSER_SIGNATURE: f64 = 4207.0;
+pub const FEQ_CHAIN_DEESSER_FIELDS: f64 = 12.0;
+pub const FEQ_CHAIN_TONE_TAG: f64 = 1414483525.0; // 'TONE'
+pub const FEQ_CHAIN_TONE_VERSION: f64 = 1.0;
+pub const FEQ_CHAIN_ROOM_TAG: f64 = 1380929357.0; // 'ROOM'
+pub const FEQ_CHAIN_ROOM_VERSION: f64 = 1.0;
+pub const FEQ_CHAIN_ROOM_FIELDS: f64 = 8.0;
+pub const FEQ_CHAIN_FOOTSTEPS_TAG: f64 = 1179602772.0; // 'FOOT'
+pub const FEQ_CHAIN_FOOTSTEPS_VERSION: f64 = 1.0;
+pub const FEQ_CHAIN_FOOTSTEPS_FIELDS: f64 = 4.0;
+
+pub const FEQ_DENOISE_BANDS: usize = 24;
+pub const FEQ_DENOISE_PROFILE_BANDS: usize = 40;
+pub const FEQ_DENOISE_MAX_HUM_PARTIALS: usize = 10;
+pub const FEQ_DEESSER_MAX_BANDS: usize = 12;
+pub const FEQ_FOOTSTEPS_BANDS: usize = 3;
+pub const FEQ_BASS_FORGE_BANDS: usize = 8;
+pub const FEQ_ROOM_SPEAKERS: usize = 7;
+pub const FEQ_ROOM_MUTE_SLOTS: usize = 8;
+pub const FEQ_ROOM_DIRECTIONS: usize = 24;
+pub const FEQ_ROOM_MAX_HEAD_TAPS: usize = 512;
+pub const FEQ_ROOM_MUTED: i32 = 1;
+pub const FEQ_ROOM_HUSHED: i32 = 2;
+
+pub const FEQ_ROOM_REPORT_TAG: u32 = 0x524d_0100;
+pub const FEQ_ROOM_REPORT_ACTIVE: u32 = 1;
+pub const FEQ_ROOM_REPORT_ORIGINAL: u32 = 2;
+pub const FEQ_ROOM_REPORT_MATCH: u32 = 4;
+pub const FEQ_ROOM_REPORT_FOLD_DOWN: u32 = 8;
+pub const FEQ_ROOM_REPORT_PROTECTED: u32 = 16;
+pub const FEQ_ROOM_REPORT_SOURCE_BYPASS: u32 = 32;
+
+pub const FEQ_STAGE_DENOISE: u32 = 1 << 0;
+pub const FEQ_STAGE_DEESSER: u32 = 1 << 1;
+pub const FEQ_STAGE_EXCITER: u32 = 1 << 2;
+pub const FEQ_STAGE_EQ: u32 = 1 << 3;
+pub const FEQ_STAGE_BASS_FORGE: u32 = 1 << 4;
+pub const FEQ_STAGE_BASS_PUNCH: u32 = 1 << 5;
+pub const FEQ_STAGE_DIMENSION: u32 = 1 << 6;
+pub const FEQ_STAGE_ROOM: u32 = 1 << 7;
+pub const FEQ_STAGE_MAXIMIZER: u32 = 1 << 8;
+pub const FEQ_STAGE_MASTER: u32 = 1 << 9;
+pub const FEQ_STAGE_NORMALIZER: u32 = 1 << 10;
+pub const FEQ_STAGE_TONE: u32 = 1 << 11;
+pub const FEQ_STAGE_FOOTSTEPS: u32 = 1 << 12;
+
+pub const FEQ_METER_WINDOW: usize = 2048;
+pub const FEQ_METER_BINS: usize = 1024;
+pub const FEQ_METER_DETAIL_WINDOW: usize = 16384;
+pub const FEQ_METER_DETAIL_BINS: usize = 2048;
+pub const FEQ_METER_SCOPE_PAIRS: usize = 256;
+pub const FEQ_METER_MAX_BANDS: usize = 64;
+pub const FEQ_METER_EXCITER_BANDS: usize = 3;
+pub const FEQ_METER_BASS_FORGE_BANDS: usize = 8;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqStatus {
+    FEQ_OK = 0,
+    FEQ_ERR_INVALID_ARGUMENT = 1,
+    FEQ_ERR_OUT_OF_MEMORY = 2,
+    FEQ_ERR_UNSUPPORTED = 3,
+    FEQ_ERR_UNKNOWN_PARAMETER = 4,
+    FEQ_ERR_NOT_PREPARED = 5,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqResetReason {
+    FEQ_RESET_STREAM_START = 0,
+    FEQ_RESET_SEEK = 1,
+    FEQ_RESET_DEVICE_CHANGE = 2,
+    FEQ_RESET_PANIC = 3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqChainResetReason {
+    FEQ_CHAIN_RESET_COLD = 0,
+    FEQ_CHAIN_RESET_SEEK = 1,
+    FEQ_CHAIN_RESET_SOURCE_CHANGE = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqFilterType {
+    FEQ_FILTER_PK = 0,
+    FEQ_FILTER_NO = 1,
+    FEQ_FILTER_LSC = 2,
+    FEQ_FILTER_HSC = 3,
+    FEQ_FILTER_LPQ = 4,
+    FEQ_FILTER_HPQ = 5,
+    FEQ_FILTER_BP = 6,
+}
+
+impl FeqFilterType {
+    pub fn from_wire(code: i32) -> Self {
+        match code {
+            1 => Self::FEQ_FILTER_NO,
+            2 => Self::FEQ_FILTER_LSC,
+            3 => Self::FEQ_FILTER_HSC,
+            4 => Self::FEQ_FILTER_LPQ,
+            5 => Self::FEQ_FILTER_HPQ,
+            6 => Self::FEQ_FILTER_BP,
+            _ => Self::FEQ_FILTER_PK,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqEqModel {
+    FEQ_EQ_MODEL_CLEAN = 0,
+    FEQ_EQ_MODEL_PROPORTIONAL = 1,
+    FEQ_EQ_MODEL_WIDE = 2,
+    FEQ_EQ_MODEL_ASYMMETRIC = 3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqEqEngine {
+    FEQ_EQ_SERIAL = 0,
+    FEQ_EQ_PARALLEL = 1,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqStereoMode {
+    FEQ_STEREO_STEREO = 0,
+    FEQ_STEREO_MID = 1,
+    FEQ_STEREO_SIDE = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqPhaseMode {
+    FEQ_PHASE_MINIMUM = 0,
+    FEQ_PHASE_LINEAR = 1,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqNormalizerMode {
+    FEQ_NORMALIZER_OFF = 0,
+    FEQ_NORMALIZER_GUARD = 1,
+    FEQ_NORMALIZER_LEVELER = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqDenoiseProfileSource {
+    FEQ_DENOISE_PROFILE_SCANNED = 0,
+    FEQ_DENOISE_PROFILE_CAPTURED = 1,
+    FEQ_DENOISE_PROFILE_ADAPTIVE = 2,
+}
+
+impl FeqDenoiseProfileSource {
+    pub const FEQ_DENOISE_PROFILE_AUTO: Self = Self::FEQ_DENOISE_PROFILE_SCANNED;
+    pub const FEQ_DENOISE_PROFILE_FROZEN: Self = Self::FEQ_DENOISE_PROFILE_CAPTURED;
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqDenoiseHumMode {
+    FEQ_DENOISE_HUM_AUTO = 0,
+    FEQ_DENOISE_HUM_50 = 1,
+    FEQ_DENOISE_HUM_60 = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqDenoiseVoiceMode {
+    FEQ_DENOISE_VOICE_KEEP_VOICE = 0,
+    FEQ_DENOISE_VOICE_REMOVE_VOICE = 1,
+    FEQ_DENOISE_VOICE_NEURAL = 2,
+}
+
+impl FeqDenoiseVoiceMode {
+    pub const FEQ_DENOISE_VOICE_LIGHT: Self = Self::FEQ_DENOISE_VOICE_KEEP_VOICE;
+    pub const FEQ_DENOISE_VOICE_STANDARD: Self = Self::FEQ_DENOISE_VOICE_REMOVE_VOICE;
+    pub const FEQ_DENOISE_VOICE_DEEP: Self = Self::FEQ_DENOISE_VOICE_NEURAL;
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqDeEsserMode {
+    FEQ_DEESSER_SPLIT_BAND = 0,
+    FEQ_DEESSER_WIDEBAND = 1,
+    FEQ_DEESSER_SPECTRAL = 2,
+}
+
+impl FeqDeEsserMode {
+    pub const FEQ_DEESSER_SPLIT: Self = Self::FEQ_DEESSER_SPLIT_BAND;
+    pub const FEQ_DEESSER_WIDE: Self = Self::FEQ_DEESSER_WIDEBAND;
+    pub const FEQ_DEESSER_FOLLOW: Self = Self::FEQ_DEESSER_SPECTRAL;
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqRoomPreset {
+    FEQ_ROOM_STUDIO = 0,
+    FEQ_ROOM_STAGE = 1,
+    FEQ_ROOM_CINEMA = 2,
+    FEQ_ROOM_ARENA = 3,
+    FEQ_ROOM_CLUB = 4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqRoomHead {
+    FEQ_ROOM_HEAD_SMALL = 0,
+    FEQ_ROOM_HEAD_MEDIUM = 1,
+    FEQ_ROOM_HEAD_LARGE = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqMeterStage {
+    FEQ_METER_STAGE_EXCITER = 0,
+    FEQ_METER_STAGE_EQ = 1,
+    FEQ_METER_STAGE_MASTER = 2,
+    FEQ_METER_STAGE_DENOISE = 3,
+    FEQ_METER_STAGE_COUNT = 4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqBiquadCoefficients {
+    pub b0: c_double,
+    pub b1: c_double,
+    pub b2: c_double,
+    pub a1: c_double,
+    pub a2: c_double,
+}
+
+impl Default for FeqBiquadCoefficients {
+    fn default() -> Self {
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct FeqBiquadState {
+    pub x1: c_double,
+    pub x2: c_double,
+    pub y1: c_double,
+    pub y2: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FeqConfigV1 {
+    pub abi_version: u32,
+    pub settings_revision: u32,
+    pub parameter_count: u32,
+    pub parameter_values: *const c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct FeqTelemetryV1 {
+    pub abi_version: u32,
+    pub sequence: u64,
+    pub frames_processed: u64,
+    pub applied_revision: u32,
+    pub latency_frames: u32,
+    pub peak: [c_float; 2],
+    pub callback_p50_us: c_double,
+    pub callback_p99_us: c_double,
+    pub xruns: u64,
+    pub drops: u64,
+    pub repaired_samples: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeqDiagnosticV1 {
+    pub abi_version: u32,
+    pub sequence: u64,
+    pub code: u32,
+    pub detail: u32,
+    pub at_frame: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqSongLevel {
+    pub valid: c_int,
+    pub integrated_lufs: c_double,
+    pub short_term_lufs: c_double,
+    pub true_peak_dbtp: c_double,
+    pub frames: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct FeqMasterTelemetry {
+    pub auto_headroom_reduction_db: c_double,
+    pub auto_headroom_true_peak_db: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct FeqChainLatencyParts {
+    pub eq: u32,
+    pub restoration: u32,
+    pub deesser: u32,
+    pub leveler: u32,
+    pub room: u32,
+    pub bass_punch: u32,
+    pub maximizer: u32,
+    pub headroom: u32,
+}
+
+// ============================================================================
+// 11-Stage DSP Rack C-ABI Settings & Report Structs
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqNormalizerSettings {
+    pub mode: c_int,
+    pub ceiling_db: c_double,
+    pub target_lufs: c_double,
+}
+
+impl Default for FeqNormalizerSettings {
+    fn default() -> Self {
+        Self {
+            mode: FeqNormalizerMode::FEQ_NORMALIZER_OFF as c_int,
+            ceiling_db: -1.0,
+            target_lufs: -14.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDenoiseHissSettings {
+    pub enabled: c_int,
+    pub amount: c_double,
+    pub floor_db: c_double,
+    pub sensitivity_db: c_double,
+    pub smoothing: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDenoiseHumSettings {
+    pub enabled: c_int,
+    pub mode: c_int,
+    pub harmonics: c_double,
+    pub depth_db: c_double,
+    pub quality: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDenoiseClickSettings {
+    pub enabled: c_int,
+    pub sensitivity: c_double,
+    pub max_repair_samples: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDenoiseVoiceSettings {
+    pub enabled: c_int,
+    pub mode: c_int,
+    pub amount: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDenoiseSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub profile_source: c_int,
+    pub hiss: FeqDenoiseHissSettings,
+    pub hum: FeqDenoiseHumSettings,
+    pub click: FeqDenoiseClickSettings,
+    pub voice: FeqDenoiseVoiceSettings,
+}
+
+impl Default for FeqDenoiseSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            profile_source: FeqDenoiseProfileSource::FEQ_DENOISE_PROFILE_SCANNED as c_int,
+            hiss: FeqDenoiseHissSettings {
+                enabled: 1,
+                amount: 0.5,
+                floor_db: -18.0,
+                sensitivity_db: 3.0,
+                smoothing: 0.7,
+            },
+            hum: FeqDenoiseHumSettings {
+                enabled: 1,
+                mode: FeqDenoiseHumMode::FEQ_DENOISE_HUM_AUTO as c_int,
+                harmonics: 6.0,
+                depth_db: 24.0,
+                quality: 30.0,
+            },
+            click: FeqDenoiseClickSettings {
+                enabled: 1,
+                sensitivity: 0.5,
+                max_repair_samples: 32.0,
+            },
+            voice: FeqDenoiseVoiceSettings {
+                enabled: 0,
+                mode: FeqDenoiseVoiceMode::FEQ_DENOISE_VOICE_KEEP_VOICE as c_int,
+                amount: 1.0,
+            },
+        }
+    }
+}
+
+mod denoise_profile_bands_f64_serde {
+    use super::FEQ_DENOISE_PROFILE_BANDS;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::os::raw::c_double;
+
+    pub fn serialize<S>(
+        bands: &[c_double; FEQ_DENOISE_PROFILE_BANDS],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bands.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<[c_double; FEQ_DENOISE_PROFILE_BANDS], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec = Vec::<c_double>::deserialize(deserializer)?;
+        let mut out = [0.0; FEQ_DENOISE_PROFILE_BANDS];
+        for (i, item) in vec.into_iter().take(FEQ_DENOISE_PROFILE_BANDS).enumerate() {
+            out[i] = item;
+        }
+        Ok(out)
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqNoiseProfile {
+    #[serde(with = "denoise_profile_bands_f64_serde")]
+    pub bands_db: [c_double; FEQ_DENOISE_PROFILE_BANDS],
+    pub floor_dbfs: c_double,
+    pub hum_hz: c_double,
+    pub hum_partial_hz: [c_double; FEQ_DENOISE_MAX_HUM_PARTIALS],
+    pub hum_partial_excess_db: [c_double; FEQ_DENOISE_MAX_HUM_PARTIALS],
+    pub hum_partial_count: u32,
+}
+
+impl Default for FeqNoiseProfile {
+    fn default() -> Self {
+        Self {
+            bands_db: [0.0; FEQ_DENOISE_PROFILE_BANDS],
+            floor_dbfs: 0.0,
+            hum_hz: 0.0,
+            hum_partial_hz: [0.0; FEQ_DENOISE_MAX_HUM_PARTIALS],
+            hum_partial_excess_db: [0.0; FEQ_DENOISE_MAX_HUM_PARTIALS],
+            hum_partial_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDenoiseReport {
+    pub reduction_db: c_double,
+    pub noise_floor_db: c_double,
+    pub clicks_repaired: u32,
+    pub voice_underruns: u32,
+    pub profile_ready: c_int,
+    pub voice_model_loaded: c_int,
+    #[serde(with = "denoise_profile_bands_f64_serde")]
+    pub floor_bands_db: [c_double; FEQ_DENOISE_PROFILE_BANDS],
+    #[serde(with = "denoise_profile_bands_f64_serde")]
+    pub hiss_reduction_bands_db: [c_double; FEQ_DENOISE_PROFILE_BANDS],
+}
+
+impl Default for FeqDenoiseReport {
+    fn default() -> Self {
+        Self {
+            reduction_db: 0.0,
+            noise_floor_db: -90.0,
+            clicks_repaired: 0,
+            voice_underruns: 0,
+            profile_ready: 0,
+            voice_model_loaded: 0,
+            floor_bands_db: [-90.0; FEQ_DENOISE_PROFILE_BANDS],
+            hiss_reduction_bands_db: [0.0; FEQ_DENOISE_PROFILE_BANDS],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqDeEsserSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub sensitivity: c_double,
+    pub low_hz: c_double,
+    pub high_hz: c_double,
+    pub range_db: c_double,
+    pub width_oct: c_double,
+    pub mode: c_int,
+    pub attack_ms: c_double,
+    pub release_ms: c_double,
+    pub centre_only: c_int,
+    pub keep_cymbals: c_double,
+}
+
+impl Default for FeqDeEsserSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            sensitivity: 0.55,
+            low_hz: 4500.0,
+            high_hz: 11000.0,
+            range_db: 6.0,
+            width_oct: 0.67,
+            mode: FeqDeEsserMode::FEQ_DEESSER_SPECTRAL as c_int,
+            attack_ms: 1.0,
+            release_ms: 60.0,
+            centre_only: 1,
+            keep_cymbals: 0.7,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqDeEsserReport {
+    pub reduction_db: c_float,
+    pub frequency_hz: c_float,
+    pub confidence: c_float,
+    pub sibilance_db: c_float,
+    pub centre: c_float,
+    pub shape: c_float,
+    pub onset: c_float,
+    pub band_count: u32,
+    pub band_hz: [c_float; FEQ_DEESSER_MAX_BANDS],
+    pub band_level_db: [c_float; FEQ_DEESSER_MAX_BANDS],
+    pub band_threshold_db: [c_float; FEQ_DEESSER_MAX_BANDS],
+    pub band_cut_db: [c_float; FEQ_DEESSER_MAX_BANDS],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqFootstepsSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub lift: c_double,
+    pub calm: c_double,
+}
+
+impl Default for FeqFootstepsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            lift: 0.85,
+            calm: 0.5,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqFootstepsReport {
+    pub level_db: c_float,
+    pub cue_db: c_float,
+    pub bed_db: c_float,
+    pub lift_db: [c_float; FEQ_FOOTSTEPS_BANDS],
+    pub calm_db: c_float,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainExciterBand {
+    pub enabled: c_int,
+    pub freq_hz: c_double,
+    pub range: c_double,
+    pub drive: c_double,
+    pub mix: c_double,
+    pub texture: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainExciterSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub stereo: c_int,
+    pub align_enabled: c_int,
+    pub align_amount: c_double,
+    pub organic_enabled: c_int,
+    pub organic_amount: c_double,
+    pub organic_focus_hz: c_double,
+    pub organic_range: c_double,
+    pub bands: [FeqChainExciterBand; FEQ_CHAIN_EXCITER_BANDS],
+    pub oversampling: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainToneBand {
+    pub filter_type: FeqFilterType,
+    pub frequency: c_double,
+    pub gain_db: c_double,
+    pub quality: c_double,
+}
+
+impl Default for FeqChainToneBand {
+    fn default() -> Self {
+        Self {
+            filter_type: FeqFilterType::FEQ_FILTER_PK,
+            frequency: 0.0,
+            gain_db: 0.0,
+            quality: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainToneSettings {
+    pub band_count: u32,
+    pub matched: c_int,
+    #[serde(with = "tone_bands_serde")]
+    pub bands: [FeqChainToneBand; FEQ_CHAIN_MAX_TONE_BANDS],
+}
+
+impl Default for FeqChainToneSettings {
+    fn default() -> Self {
+        Self {
+            band_count: 0,
+            matched: 0,
+            bands: [FeqChainToneBand::default(); FEQ_CHAIN_MAX_TONE_BANDS],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainEqBand {
+    pub enabled: c_int,
+    pub dynamic: c_int,
+    pub filter_type: FeqFilterType,
+    pub frequency: c_double,
+    pub gain_db: c_double,
+    pub quality: c_double,
+    pub threshold_db: c_double,
+    pub ear: c_int,
+}
+
+impl Default for FeqChainEqBand {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            dynamic: 0,
+            filter_type: FeqFilterType::FEQ_FILTER_PK,
+            frequency: 0.0,
+            gain_db: 0.0,
+            quality: 0.0,
+            threshold_db: 0.0,
+            ear: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainEqSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub model: c_int,
+    pub model_amount: c_double,
+    pub engine: c_int,
+    pub phase: c_int,
+    pub stereo: c_int,
+    pub mono_below_hz: c_double,
+    pub oversample: u32,
+    pub subsonic_hz: c_double,
+    pub fuzz_amount: c_double,
+    pub matched: c_int,
+    pub band_count: u32,
+    #[serde(with = "eq_bands_serde")]
+    pub bands: [FeqChainEqBand; FEQ_CHAIN_MAX_EQ_BANDS],
+}
+
+impl Default for FeqChainEqSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            model: FeqEqModel::FEQ_EQ_MODEL_CLEAN as c_int,
+            model_amount: 1.0,
+            engine: FeqEqEngine::FEQ_EQ_SERIAL as c_int,
+            phase: FeqPhaseMode::FEQ_PHASE_MINIMUM as c_int,
+            stereo: FeqStereoMode::FEQ_STEREO_STEREO as c_int,
+            mono_below_hz: 0.0,
+            oversample: 1,
+            subsonic_hz: 0.0,
+            fuzz_amount: 0.0,
+            matched: 0,
+            band_count: 0,
+            bands: [FeqChainEqBand::default(); FEQ_CHAIN_MAX_EQ_BANDS],
+        }
+    }
+}
+
+/// Standalone Bass Forge stage settings (`/native/dsp-core/include/fluideq/bass_forge.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqBassForgeSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub split_hz: c_double,
+    pub meters: c_int,
+    pub drive_db: c_double,
+    pub sub_amount: c_double,
+    pub presence_amount: c_double,
+    pub texture: c_double,
+    pub mix: c_double,
+}
+
+impl Default for FeqBassForgeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            split_hz: 90.0,
+            meters: 0,
+            drive_db: 0.0,
+            sub_amount: 0.0,
+            presence_amount: 0.0,
+            texture: 0.8,
+            mix: 0.0,
+        }
+    }
+}
+
+/// Inline Bass Forge settings inside `FeqChainSettings` (`/native/dsp-core/include/fluideq/chain.h` lines 298–317).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainBassForgeSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub split_hz: c_double,
+    pub drive_db: c_double,
+    pub sub_amount: c_double,
+    pub presence_amount: c_double,
+    pub texture: c_double,
+    pub mix: c_double,
+}
+
+impl Default for FeqChainBassForgeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            split_hz: 90.0,
+            drive_db: 0.0,
+            sub_amount: 0.0,
+            presence_amount: 0.0,
+            texture: 0.8,
+            mix: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqBassPunchSettings {
+    pub enabled: c_int,
+    pub isolate: c_int,
+    pub split_hz: c_double,
+    pub attack: c_double,
+    pub sustain: c_double,
+    pub bloom_amount: c_double,
+    pub bloom_decay_ms: c_double,
+    pub duck: c_double,
+    pub mix: c_double,
+}
+
+impl Default for FeqBassPunchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            split_hz: 110.0,
+            attack: 0.0,
+            sustain: 0.0,
+            bloom_amount: 0.0,
+            bloom_decay_ms: 120.0,
+            duck: 0.0,
+            mix: 1.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqDimensionSettings {
+    pub enabled: c_int,
+    pub low_width: c_double,
+    pub mid_width: c_double,
+    pub high_width: c_double,
+    pub low_hz: c_double,
+    pub high_hz: c_double,
+    pub decorrelation: c_double,
+}
+
+/// Standalone Room stage settings (`/native/dsp-core/include/fluideq/room.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqRoomSettings {
+    pub size_m: c_double,
+    pub walls: c_double,
+    pub distance_m: c_double,
+    pub centre_db: c_double,
+    pub sub_db: c_double,
+    pub head_scale: c_double,
+    pub renderer_version: c_int,
+    pub early_reflection_db: c_double,
+    pub ambience_mix: c_double,
+    pub ambience_decay_s: c_double,
+    pub ambience_damping_hz: c_double,
+    pub preserve_position: c_int,
+    pub compare_original: c_int,
+    pub source_already_spatial: c_int,
+    pub angle_deg: [c_double; FEQ_ROOM_SPEAKERS],
+    pub level_db: [c_double; FEQ_ROOM_SPEAKERS],
+    pub bass_management: c_int,
+    pub crossover_hz: c_double,
+    pub music_upmix: c_int,
+    pub upmix_amount: c_double,
+    pub speaker_distance_m: [c_double; FEQ_ROOM_SPEAKERS],
+    pub mute: [c_int; FEQ_ROOM_MUTE_SLOTS],
+}
+
+impl Default for FeqRoomSettings {
+    fn default() -> Self {
+        Self {
+            size_m: 4.2,
+            walls: 0.55,
+            distance_m: 1.8,
+            centre_db: 0.0,
+            sub_db: 0.0,
+            head_scale: 1.0,
+            renderer_version: 1,
+            early_reflection_db: 0.0,
+            ambience_mix: 0.0,
+            ambience_decay_s: 0.5,
+            ambience_damping_hz: 6000.0,
+            preserve_position: 0,
+            compare_original: 0,
+            source_already_spatial: 0,
+            angle_deg: [-30.0, 30.0, 0.0, -100.0, 100.0, -140.0, 140.0],
+            level_db: [0.0; FEQ_ROOM_SPEAKERS],
+            bass_management: 1,
+            crossover_hz: 80.0,
+            music_upmix: 0,
+            upmix_amount: 0.6,
+            speaker_distance_m: [0.0; FEQ_ROOM_SPEAKERS],
+            mute: [0; FEQ_ROOM_MUTE_SLOTS],
+        }
+    }
+}
+
+/// Inline Room settings inside `FeqChainSettings` (`/native/dsp-core/include/fluideq/chain.h` lines 253–296).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainRoomSettings {
+    pub enabled: c_int,
+    pub preset: c_int,
+    pub size_m: c_double,
+    pub walls: c_double,
+    pub distance_m: c_double,
+    pub centre_db: c_double,
+    pub sub_db: c_double,
+    pub head: c_int,
+    pub renderer_version: c_int,
+    pub early_reflection_db: c_double,
+    pub ambience_mix: c_double,
+    pub ambience_decay_s: c_double,
+    pub ambience_damping_hz: c_double,
+    pub preserve_position: c_int,
+    pub compare_original: c_int,
+    pub source_already_spatial: c_int,
+    pub angle_deg: [c_double; FEQ_ROOM_SPEAKERS],
+    pub level_db: [c_double; FEQ_ROOM_SPEAKERS],
+    pub bass_management: c_int,
+    pub crossover_hz: c_double,
+    pub music_upmix: c_int,
+    pub upmix_amount: c_double,
+    pub speaker_distance_m: [c_double; FEQ_ROOM_SPEAKERS],
+    pub mute: [c_int; FEQ_ROOM_MUTE_SLOTS],
+}
+
+impl Default for FeqChainRoomSettings {
+    fn default() -> Self {
+        let room = FeqRoomSettings::default();
+        Self {
+            enabled: 0,
+            preset: 1,
+            size_m: room.size_m,
+            walls: room.walls,
+            distance_m: room.distance_m,
+            centre_db: 0.0,
+            sub_db: 0.0,
+            head: 1,
+            renderer_version: room.renderer_version,
+            early_reflection_db: room.early_reflection_db,
+            ambience_mix: room.ambience_mix,
+            ambience_decay_s: room.ambience_decay_s,
+            ambience_damping_hz: room.ambience_damping_hz,
+            preserve_position: room.preserve_position,
+            compare_original: room.compare_original,
+            source_already_spatial: room.source_already_spatial,
+            angle_deg: room.angle_deg,
+            level_db: room.level_db,
+            bass_management: room.bass_management,
+            crossover_hz: room.crossover_hz,
+            music_upmix: room.music_upmix,
+            upmix_amount: room.upmix_amount,
+            speaker_distance_m: room.speaker_distance_m,
+            mute: room.mute,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqRoomReport {
+    pub flags: u32,
+    pub reference_gain_db: c_float,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FeqChainSourceAnalysis {
+    pub version: u32,
+    pub library: c_int,
+    pub source_id: u64,
+    pub epoch: u64,
+    pub revision: u64,
+    pub has_level: c_int,
+    pub integrated_lufs: c_double,
+    pub true_peak_dbtp: c_double,
+    pub noise: *const FeqNoiseProfile,
+    pub voice_model_path: *const c_char,
+    pub voice_runtime_path: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeqChainSourceStatus {
+    pub ready: c_int,
+    pub voice_ready: c_int,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainMaximizerSettings {
+    pub enabled: c_int,
+    pub drive_db: c_double,
+    pub ceiling_db: c_double,
+    pub look_ahead_ms: c_double,
+    pub release_ms: c_double,
+}
+
+impl Default for FeqChainMaximizerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            drive_db: 0.0,
+            ceiling_db: -0.1,
+            look_ahead_ms: 5.0,
+            release_ms: 150.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainMasterSettings {
+    pub enabled: c_int,
+    pub output_trim_db: c_double,
+    pub loudness_maximize: c_int,
+    pub loudness_target_lufs: c_double,
+    pub ceiling_db: c_double,
+    pub release_ms: c_double,
+    pub peak_limiting_db: c_double,
+    pub matched_bypass: c_int,
+}
+
+impl Default for FeqChainMasterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            output_trim_db: 0.0,
+            loudness_maximize: 0,
+            loudness_target_lufs: -14.0,
+            ceiling_db: -1.0,
+            release_ms: 2000.0,
+            peak_limiting_db: 0.0,
+            matched_bypass: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqChainSettings {
+    pub enabled: c_int,
+    pub normalizer: FeqNormalizerSettings,
+    pub denoise: FeqDenoiseSettings,
+    pub deesser: FeqDeEsserSettings,
+    pub exciter: FeqChainExciterSettings,
+    pub eq: FeqChainEqSettings,
+    pub footsteps: FeqFootstepsSettings,
+    pub dimension: FeqDimensionSettings,
+    pub room: FeqChainRoomSettings,
+    pub bass_forge: FeqChainBassForgeSettings,
+    pub bass_punch: FeqBassPunchSettings,
+    pub maximizer: FeqChainMaximizerSettings,
+    pub tone: FeqChainToneSettings,
+    pub master: FeqChainMasterSettings,
+    pub surround_all_channels: c_int,
+    pub low_latency: c_int,
+}
+
+impl Default for FeqChainSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 1,
+            normalizer: FeqNormalizerSettings::default(),
+            denoise: FeqDenoiseSettings::default(),
+            deesser: FeqDeEsserSettings::default(),
+            exciter: FeqChainExciterSettings::default(),
+            eq: FeqChainEqSettings::default(),
+            footsteps: FeqFootstepsSettings::default(),
+            dimension: FeqDimensionSettings::default(),
+            room: FeqChainRoomSettings::default(),
+            bass_forge: FeqChainBassForgeSettings::default(),
+            bass_punch: FeqBassPunchSettings::default(),
+            maximizer: FeqChainMaximizerSettings::default(),
+            tone: FeqChainToneSettings::default(),
+            master: FeqChainMasterSettings::default(),
+            surround_all_channels: 1,
+            low_latency: 0,
+        }
+    }
+}
+
+mod tone_bands_serde {
+    use super::{FeqChainToneBand, FEQ_CHAIN_MAX_TONE_BANDS};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        bands: &[FeqChainToneBand; FEQ_CHAIN_MAX_TONE_BANDS],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bands.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<[FeqChainToneBand; FEQ_CHAIN_MAX_TONE_BANDS], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec = Vec::<FeqChainToneBand>::deserialize(deserializer)?;
+        let mut out = [FeqChainToneBand::default(); FEQ_CHAIN_MAX_TONE_BANDS];
+        for (i, item) in vec.into_iter().take(FEQ_CHAIN_MAX_TONE_BANDS).enumerate() {
+            out[i] = item;
+        }
+        Ok(out)
+    }
+}
+
+mod eq_bands_serde {
+    use super::{FeqChainEqBand, FEQ_CHAIN_MAX_EQ_BANDS};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        bands: &[FeqChainEqBand; FEQ_CHAIN_MAX_EQ_BANDS],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bands.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<[FeqChainEqBand; FEQ_CHAIN_MAX_EQ_BANDS], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec = Vec::<FeqChainEqBand>::deserialize(deserializer)?;
+        let mut out = [FeqChainEqBand::default(); FEQ_CHAIN_MAX_EQ_BANDS];
+        for (i, item) in vec.into_iter().take(FEQ_CHAIN_MAX_EQ_BANDS).enumerate() {
+            out[i] = item;
+        }
+        Ok(out)
+    }
+}
+
+pub const FEQ_LINEAR_PHASE_KERNEL_SIZE: usize = 16384;
+pub const FEQ_LINEAR_PHASE_KERNEL_LATENCY: usize = FEQ_LINEAR_PHASE_KERNEL_SIZE / 2;
+pub const FEQ_CROSSFADE_TABLE_POINTS: usize = 64;
+pub const FEQ_PLAYER_DECKS: usize = 2;
+pub const FEQ_PLAYER_DECODE_CHUNK: u32 = 4096;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqCrossfadeCurve {
+    FEQ_CROSSFADE_EQUAL_POWER = 0,
+    FEQ_CROSSFADE_SMOOTH = 1,
+    FEQ_CROSSFADE_LINEAR = 2,
+    FEQ_CROSSFADE_CUSTOM = 3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqDeckState {
+    FEQ_DECK_EMPTY = 0,
+    FEQ_DECK_READY = 1,
+    FEQ_DECK_ENDED = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeqCrossfadeTable {
+    pub outgoing: [c_float; FEQ_CROSSFADE_TABLE_POINTS],
+    pub incoming: [c_float; FEQ_CROSSFADE_TABLE_POINTS],
+}
+
+impl Default for FeqCrossfadeTable {
+    fn default() -> Self {
+        Self {
+            outgoing: [1.0; FEQ_CROSSFADE_TABLE_POINTS],
+            incoming: [0.0; FEQ_CROSSFADE_TABLE_POINTS],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqLinearPhaseBand {
+    pub enabled: c_int,
+    pub dynamic: c_int,
+    pub filter_type: FeqFilterType,
+    pub frequency: c_double,
+    pub gain_db: c_double,
+    pub quality: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FeqLinearPhaseRack {
+    pub bands: *const FeqLinearPhaseBand,
+    pub band_count: u32,
+    pub engine: FeqEqEngine,
+    pub model: FeqEqModel,
+    pub model_amount: c_double,
+    pub matched: c_int,
+    pub subsonic_hz: c_double,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqDecoderInfo {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub total_frames: u64,
+}
+
+#[repr(C)]
+pub struct FeqDecoderOps {
+    pub user: *mut std::ffi::c_void,
+    pub open: Option<
+        unsafe extern "C" fn(
+            user: *mut std::ffi::c_void,
+            path: *const c_char,
+            info: *mut FeqDecoderInfo,
+        ) -> *mut std::ffi::c_void,
+    >,
+    pub close: Option<unsafe extern "C" fn(user: *mut std::ffi::c_void, handle: *mut std::ffi::c_void)>,
+    pub read: Option<
+        unsafe extern "C" fn(
+            user: *mut std::ffi::c_void,
+            handle: *mut std::ffi::c_void,
+            channels: *const *mut c_float,
+            frames: u32,
+        ) -> u32,
+    >,
+    pub seek: Option<
+        unsafe extern "C" fn(
+            user: *mut std::ffi::c_void,
+            handle: *mut std::ffi::c_void,
+            frame: u64,
+        ) -> c_int,
+    >,
+}
+
+/// Opaque pointers to C++ `dsp-core` engine, chain, convolver, player, leveling memory, and lock-free meter tap ring.
+#[repr(C)]
+pub struct FeqEngine {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqChain {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqMeters {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqLevelingMemory {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqConvolverKernel {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqConvolver {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqDft {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct FeqPlayer {
+    _private: [u8; 0],
+}
+
+#[cfg(feature = "link-cpp-core")]
+extern "C" {
+    pub fn feq_core_version() -> *const c_char;
+    pub fn feq_core_abi_version() -> u32;
+
+    // Engine API (`dsp.h`)
+    pub fn feq_engine_create(
+        sample_rate: u32,
+        channels: u32,
+        maximum_block_frames: u32,
+    ) -> *mut FeqEngine;
+    pub fn feq_engine_destroy(engine: *mut FeqEngine);
+    pub fn feq_engine_prepare_config(
+        engine: *mut FeqEngine,
+        config: *const FeqConfigV1,
+    ) -> FeqStatus;
+    pub fn feq_engine_commit_prepared_config(engine: *mut FeqEngine) -> FeqStatus;
+    pub fn feq_engine_set_parameter(
+        engine: *mut FeqEngine,
+        parameter_id: u32,
+        index: i32,
+        value: c_double,
+        settings_revision: u32,
+    ) -> FeqStatus;
+    pub fn feq_engine_reset(engine: *mut FeqEngine, reason: FeqResetReason);
+    pub fn feq_engine_process_planar(
+        engine: *mut FeqEngine,
+        input: *const *const c_float,
+        output: *const *mut c_float,
+        frames: u32,
+    );
+    pub fn feq_engine_latency_frames(engine: *const FeqEngine) -> u32;
+    pub fn feq_engine_reports_published(engine: *const FeqEngine) -> u64;
+    pub fn feq_engine_try_read_telemetry(
+        engine: *mut FeqEngine,
+        out: *mut FeqTelemetryV1,
+    ) -> bool;
+    pub fn feq_engine_try_read_diagnostic(
+        engine: *mut FeqEngine,
+        out: *mut FeqDiagnosticV1,
+    ) -> bool;
+
+    // Leveling Memory API (`leveling_memory.h`)
+    pub fn feq_leveling_memory_create() -> *mut FeqLevelingMemory;
+    pub fn feq_leveling_memory_destroy(memory: *mut FeqLevelingMemory);
+    pub fn feq_leveling_memory_begin_song(memory: *mut FeqLevelingMemory, song_id: u64);
+    pub fn feq_leveling_memory_read_song(
+        memory: *const FeqLevelingMemory,
+        song_id: u64,
+        out: *mut FeqSongLevel,
+    ) -> c_int;
+
+    // Full 11-Stage Chain API (`chain.h`)
+    pub fn feq_chain_create(
+        sample_rate: c_double,
+        channels: u32,
+        maximum_block_frames: u32,
+    ) -> *mut FeqChain;
+    pub fn feq_chain_destroy(chain: *mut FeqChain);
+    pub fn feq_chain_settings_defaults(settings: *mut FeqChainSettings);
+    pub fn feq_chain_settings_decode(
+        values: *const c_double,
+        count: u32,
+        out: *mut FeqChainSettings,
+    ) -> c_int;
+    pub fn feq_chain_configure(chain: *mut FeqChain, settings: *const FeqChainSettings);
+    pub fn feq_chain_transfer_state(prepared: *mut FeqChain, previous: *mut FeqChain) -> c_int;
+    pub fn feq_chain_set_lfe_channel(chain: *mut FeqChain, lfe_channel: c_int);
+    pub fn feq_chain_set_room_head(
+        chain: *mut FeqChain,
+        left: *const c_float,
+        right: *const c_float,
+        directions: u32,
+        taps: u32,
+        doubling: c_int,
+    );
+    pub fn feq_chain_set_room_layout(chain: *mut FeqChain, speaker: *const c_int);
+    pub fn feq_chain_room_active(chain: *const FeqChain) -> c_int;
+    pub fn feq_chain_set_eq_kernel(
+        chain: *mut FeqChain,
+        kernel: *const c_float,
+        length: u32,
+    );
+    pub fn feq_chain_set_track_level_gains(
+        chain: *mut FeqChain,
+        input_gain_db: c_double,
+        master_loudness_gain_db: c_double,
+        snap: c_int,
+    );
+    pub fn feq_chain_set_noise_profile(chain: *mut FeqChain, profile: *const FeqNoiseProfile);
+    pub fn feq_chain_load_voice_model(
+        chain: *mut FeqChain,
+        model_path: *const c_char,
+        runtime_path: *const c_char,
+    ) -> c_int;
+    pub fn feq_chain_set_source_analysis(
+        chain: *mut FeqChain,
+        analysis: *const FeqChainSourceAnalysis,
+    ) -> FeqChainSourceStatus;
+    pub fn feq_chain_wake_workers(chain: *mut FeqChain);
+    pub fn feq_chain_denoise_report(chain: *const FeqChain, out: *mut FeqDenoiseReport);
+    pub fn feq_chain_reset(chain: *mut FeqChain, reason: FeqChainResetReason);
+    pub fn feq_chain_reset_room(chain: *mut FeqChain);
+    pub fn feq_chain_process(
+        chain: *mut FeqChain,
+        channels: *const *mut c_float,
+        frames: u32,
+    );
+    pub fn feq_chain_latency_frames(chain: *const FeqChain) -> u32;
+    pub fn feq_chain_latency_parts(chain: *const FeqChain, out: *mut FeqChainLatencyParts);
+    pub fn feq_chain_active_stages(chain: *const FeqChain) -> u32;
+    pub fn feq_chain_processed_stages(chain: *const FeqChain) -> u32;
+    pub fn feq_chain_set_meters(chain: *mut FeqChain, meters: *mut FeqMeters);
+    pub fn feq_chain_enable_live_normalizer(chain: *mut FeqChain) -> c_int;
+    pub fn feq_chain_attach_leveling_memory(
+        chain: *mut FeqChain,
+        memory: *mut FeqLevelingMemory,
+    );
+    pub fn feq_chain_notify_input_silence(chain: *mut FeqChain, frames: u32);
+
+    // Room head rate selection (`room.h`)
+    pub fn feq_room_head_rate(stream_rate: c_double, doubling: *mut c_int) -> c_double;
+
+    // Biquad API (`biquad.h`)
+    pub fn feq_biquad_coefficients(
+        filter_type: FeqFilterType,
+        frequency: c_double,
+        gain_db: c_double,
+        quality: c_double,
+        sample_rate: c_double,
+    ) -> FeqBiquadCoefficients;
+
+    pub fn feq_biquad_coefficients_matched(
+        filter_type: FeqFilterType,
+        frequency: c_double,
+        gain_db: c_double,
+        quality: c_double,
+        sample_rate: c_double,
+    ) -> FeqBiquadCoefficients;
+
+    pub fn feq_biquad_coefficients_designed(
+        filter_type: FeqFilterType,
+        frequency: c_double,
+        gain_db: c_double,
+        quality: c_double,
+        sample_rate: c_double,
+        model: FeqEqModel,
+        amount: c_double,
+        matched: c_int,
+    ) -> FeqBiquadCoefficients;
+
+    pub fn feq_biquad_reset(state: *mut FeqBiquadState);
+    pub fn feq_biquad_process(
+        state: *mut FeqBiquadState,
+        buffer: *mut c_float,
+        frames: u32,
+        coefficients: *const FeqBiquadCoefficients,
+    );
+
+    // Convolver & FFT API (`convolver.h`)
+    pub fn feq_fft_in_place(
+        real: *mut c_double,
+        imaginary: *mut c_double,
+        size: u32,
+        inverse: c_int,
+    );
+    pub fn feq_dft_create(size: u32) -> *mut FeqDft;
+    pub fn feq_dft_destroy(plan: *mut FeqDft);
+    pub fn feq_dft_in_place(
+        plan: *mut FeqDft,
+        real: *mut c_double,
+        imaginary: *mut c_double,
+        inverse: c_int,
+    );
+    pub fn feq_convolver_latency() -> u32;
+    pub fn feq_convolver_reset(state: *mut FeqConvolver);
+    pub fn feq_convolver_warmup() -> u32;
+    pub fn feq_convolver_kernel_warmup(kernel: *const FeqConvolverKernel) -> u64;
+    pub fn feq_convolver_head_taps() -> u32;
+    pub fn feq_convolver_head_prepare(
+        kernel: *const c_float,
+        length: u32,
+        head: *mut c_float,
+    );
+    pub fn feq_convolver_head_run(
+        head: *const c_float,
+        input: *const c_float,
+        out: *mut c_float,
+        frames: u32,
+    );
+    pub fn feq_convolver_kernel_create(
+        kernel: *const c_float,
+        length: u32,
+    ) -> *mut FeqConvolverKernel;
+    pub fn feq_convolver_kernel_destroy(kernel: *mut FeqConvolverKernel);
+    pub fn feq_convolver_create(kernel: *const FeqConvolverKernel) -> *mut FeqConvolver;
+    pub fn feq_convolver_destroy(state: *mut FeqConvolver);
+    pub fn feq_convolve(state: *mut FeqConvolver, buffer: *mut c_float, frames: u32);
+    pub fn feq_convolver_transfer(
+        state: *mut FeqConvolver,
+        previous: *const FeqConvolver,
+        transition_frames: u32,
+    ) -> c_int;
+    pub fn feq_convolve_blend(
+        active: *mut FeqConvolver,
+        next: *mut FeqConvolver,
+        buffer: *mut c_float,
+        scratch: *mut c_float,
+        frames: u32,
+        blend: c_double,
+        step: c_double,
+        difference: *mut c_float,
+    ) -> c_double;
+    pub fn feq_convolver_kernel_add_change(
+        kernel: *mut FeqConvolverKernel,
+        taps: *const c_float,
+        length: u32,
+    ) -> c_int;
+    pub fn feq_convolver_read_change(
+        state: *const FeqConvolver,
+        change: u32,
+        out: *mut c_float,
+        frames: u32,
+    );
+
+    // Linear-Phase Kernel Synthesis API (`linear_phase.h`)
+    pub fn feq_linear_phase_latency() -> u32;
+    pub fn feq_build_linear_phase_kernel(
+        rack: *const FeqLinearPhaseRack,
+        sample_rate: c_double,
+        kernel: *mut c_float,
+    );
+    pub fn feq_build_linear_phase_change_kernel(
+        rack: *const FeqLinearPhaseRack,
+        band: u32,
+        sample_rate: c_double,
+        kernel: *mut c_float,
+    );
+
+    // Crossfader & Dual-Deck Player API (`crossfade.h` & `player.h`)
+    pub fn feq_crossfade_gain(
+        curve: FeqCrossfadeCurve,
+        progress: c_double,
+        incoming: c_int,
+    ) -> c_double;
+    pub fn feq_crossfade_table_gain(
+        table: *const FeqCrossfadeTable,
+        progress: c_double,
+        incoming: c_int,
+    ) -> c_double;
+    pub fn feq_player_create(
+        output_rate: c_double,
+        channels: u32,
+        maximum_block_frames: u32,
+        read_ahead_frames: u32,
+        ops: *const FeqDecoderOps,
+    ) -> *mut FeqPlayer;
+    pub fn feq_player_destroy(player: *mut FeqPlayer);
+    pub fn feq_player_load(player: *mut FeqPlayer, deck: u32, path: *const c_char) -> c_int;
+    pub fn feq_player_unload(player: *mut FeqPlayer, deck: u32);
+    pub fn feq_player_seek(player: *mut FeqPlayer, deck: u32, seconds: c_double) -> c_int;
+    pub fn feq_player_pump(player: *mut FeqPlayer) -> u32;
+    pub fn feq_player_frames_taken(player: *const FeqPlayer) -> u64;
+    pub fn feq_player_set_playing(player: *mut FeqPlayer, playing: c_int);
+    pub fn feq_player_is_playing(player: *const FeqPlayer) -> c_int;
+    pub fn feq_player_select(player: *mut FeqPlayer, deck: u32);
+    pub fn feq_player_active_deck(player: *const FeqPlayer) -> u32;
+    pub fn feq_player_reported_deck(player: *const FeqPlayer) -> u32;
+    pub fn feq_player_deck_audible(player: *const FeqPlayer, deck: u32) -> c_int;
+    pub fn feq_player_fading(player: *const FeqPlayer) -> c_int;
+    pub fn feq_player_handoff_deck(player: *const FeqPlayer) -> u32;
+    pub fn feq_player_start_crossfade(
+        player: *mut FeqPlayer,
+        to_deck: u32,
+        duration_ms: c_double,
+        curve: FeqCrossfadeCurve,
+    );
+    pub fn feq_player_set_crossfade_table(
+        player: *mut FeqPlayer,
+        table: *const FeqCrossfadeTable,
+    );
+    pub fn feq_player_crossfade_progress(player: *const FeqPlayer) -> c_double;
+    pub fn feq_player_position_seconds(player: *const FeqPlayer, deck: u32) -> c_double;
+    pub fn feq_player_duration_seconds(player: *const FeqPlayer, deck: u32) -> c_double;
+    pub fn feq_player_deck_state(player: *const FeqPlayer, deck: u32) -> c_int;
+    pub fn feq_player_deck_primed(player: *const FeqPlayer, deck: u32) -> c_int;
+    pub fn feq_player_render(
+        player: *mut FeqPlayer,
+        channels: *const *mut c_float,
+        frames: u32,
+    );
+
+    // Meters API (`meters.h`)
+    pub fn feq_meters_create(channels: u32) -> *mut FeqMeters;
+    pub fn feq_meters_destroy(meters: *mut FeqMeters);
+    pub fn feq_meters_set_enabled(meters: *mut FeqMeters, enabled: c_int);
+    pub fn feq_meters_enabled(meters: *const FeqMeters) -> c_int;
+    pub fn feq_meters_set_sample_rate(meters: *mut FeqMeters, sample_rate: c_double);
+    pub fn feq_meters_read_spectrum(
+        meters: *mut FeqMeters,
+        stage: u32,
+        out_db: *mut c_float,
+        bins: u32,
+    ) -> c_int;
+    pub fn feq_meters_read_eq_detail(
+        meters: *mut FeqMeters,
+        out_db: *mut c_float,
+        bins: u32,
+    ) -> c_int;
+    pub fn feq_meters_read_scope(
+        meters: *mut FeqMeters,
+        out_pairs: *mut c_float,
+        pairs: u32,
+        out_correlation: *mut c_double,
+        out_peaks: *mut c_float,
+    ) -> c_int;
+    pub fn feq_meters_read_loudness(meters: *mut FeqMeters, out_loudness: *mut c_float);
+    pub fn feq_meters_read_dimension(meters: *mut FeqMeters, out_guard: *mut c_float);
+    pub fn feq_meters_read_maximizer(meters: *mut FeqMeters, out_reduction_db: *mut c_float);
+    pub fn feq_meters_read_master(meters: *mut FeqMeters, out: *mut FeqMasterTelemetry);
+    pub fn feq_meters_read_normalizer(
+        meters: *mut FeqMeters,
+        out_input_peaks: *mut c_float,
+        out_output_peaks: *mut c_float,
+        out_applied_gain_db: *mut c_float,
+    );
+    pub fn feq_meters_read_bass_forge(
+        meters: *mut FeqMeters,
+        out_input_db: *mut c_float,
+        out_output_db: *mut c_float,
+    );
+    pub fn feq_meters_read_bass_punch(
+        meters: *mut FeqMeters,
+        out_transient_db: *mut c_float,
+        out_sustain_db: *mut c_float,
+        out_duck_db: *mut c_float,
+    );
+    pub fn feq_meters_read_deesser(meters: *mut FeqMeters, out: *mut FeqDeEsserReport);
+    pub fn feq_meters_read_footsteps(meters: *mut FeqMeters, out: *mut FeqFootstepsReport);
+    pub fn feq_meters_read_exciter(
+        meters: *mut FeqMeters,
+        out_bands: *mut c_float,
+        out_organic: *mut c_float,
+    );
+    pub fn feq_meters_read_bands(
+        meters: *mut FeqMeters,
+        out_amounts: *mut c_float,
+        out_levels: *mut c_float,
+        capacity: u32,
+    ) -> u32;
+    pub fn feq_meters_read_live_input(meters: *mut FeqMeters, values: *mut c_float);
+    pub fn feq_meters_read_denoise(meters: *const FeqMeters, report: *mut FeqDenoiseReport);
+    pub fn feq_meters_read_room(meters: *const FeqMeters, report: *mut FeqRoomReport);
+}
+
+/// Safe RAII handle around the native C++ `FeqMeters` tap ring.
+/// Automatically disables FFT spectrum windowing when entering Cold-Residency Standby.
+pub struct NativeMetersHandle {
+    enabled: bool,
+    sample_rate: f64,
+    #[cfg(feature = "link-cpp-core")]
+    raw: *mut FeqMeters,
+}
+
+unsafe impl Send for NativeMetersHandle {}
+unsafe impl Sync for NativeMetersHandle {}
+
+impl NativeMetersHandle {
+    pub fn new(channels: u32, sample_rate: f64) -> Self {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            let raw = feq_meters_create(channels);
+            if !raw.is_null() {
+                feq_meters_set_sample_rate(raw, sample_rate);
+                feq_meters_set_enabled(raw, 1);
+            }
+            return Self {
+                enabled: true,
+                sample_rate,
+                raw,
+            };
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = channels;
+            Self {
+                enabled: true,
+                sample_rate,
+            }
+        }
+    }
+
+    /// Enables or disables `FeqMeters` capture on the C++ audio thread.
+    /// When `enabled == false` (e.g., during Cold-Residency Standby or window minimize),
+    /// `feq_meters_capture` returns on its first branch and performs zero windowing/FFT work.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_meters_set_enabled(self.raw, if enabled { 1 } else { 0 });
+            }
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    /// Reads the `FEQ_METER_BINS` (1024) spectrum bins in dB for `stage` if a new window was published.
+    pub fn read_spectrum(&mut self, stage: FeqMeterStage, out_db: &mut [f32]) -> bool {
+        if !self.enabled || out_db.len() < FEQ_METER_BINS {
+            return false;
+        }
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                return feq_meters_read_spectrum(
+                    self.raw,
+                    stage as u32,
+                    out_db.as_mut_ptr(),
+                    FEQ_METER_BINS as u32,
+                ) != 0;
+            }
+            false
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = stage;
+            false
+        }
+    }
+
+    /// Reads `[momentary_lufs, short_term_lufs, integrated_lufs, range_lu]`.
+    pub fn read_loudness(&mut self) -> [f32; 4] {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let mut out = [-14.0_f32; 4];
+                feq_meters_read_loudness(self.raw, out.as_mut_ptr());
+                return out;
+            }
+        }
+        [-14.2, -14.0, -13.8, 6.4]
+    }
+
+    /// Reads Master Auto-Headroom telemetry (`auto_headroom_reduction_db`, `auto_headroom_true_peak_db`).
+    pub fn read_master_telemetry(&mut self) -> FeqMasterTelemetry {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let mut out = FeqMasterTelemetry::default();
+                feq_meters_read_master(self.raw, &mut out as *mut FeqMasterTelemetry);
+                return out;
+            }
+        }
+        FeqMasterTelemetry::default()
+    }
+
+    #[cfg(feature = "link-cpp-core")]
+    pub fn as_mut_ptr(&mut self) -> *mut FeqMeters {
+        self.raw
+    }
+}
+
+impl Drop for NativeMetersHandle {
+    fn drop(&mut self) {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_meters_destroy(self.raw);
+                self.raw = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+/// Safe RAII handle around the native C++ `FeqChain` 11-stage processor.
+pub struct NativeChainHandle {
+    sample_rate: u32,
+    channels: u32,
+    maximum_block_frames: u32,
+    head_loaded: bool,
+    voice_model_loaded: bool,
+    eq_kernel_len: u32,
+    #[cfg(feature = "link-cpp-core")]
+    raw: *mut FeqChain,
+}
+
+unsafe impl Send for NativeChainHandle {}
+unsafe impl Sync for NativeChainHandle {}
+
+impl NativeChainHandle {
+    pub fn new(sample_rate: u32, channels: u32, maximum_block_frames: u32) -> Self {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            let raw = feq_chain_create(sample_rate as c_double, channels, maximum_block_frames);
+            return Self {
+                sample_rate,
+                channels,
+                maximum_block_frames,
+                head_loaded: false,
+                voice_model_loaded: false,
+                eq_kernel_len: 0,
+                raw,
+            };
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            Self {
+                sample_rate,
+                channels,
+                maximum_block_frames,
+                head_loaded: false,
+                voice_model_loaded: false,
+                eq_kernel_len: 0,
+            }
+        }
+    }
+
+    pub fn configure(&mut self, settings: &FeqChainSettings) -> bool {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_chain_configure(self.raw, settings as *const FeqChainSettings);
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = settings;
+            true
+        }
+    }
+
+    pub fn set_room_head(
+        &mut self,
+        left: &[f32],
+        right: &[f32],
+        directions: u32,
+        taps: u32,
+        doubling: i32,
+    ) -> bool {
+        let expected_len = (directions as usize) * (taps as usize);
+        if left.len() < expected_len || right.len() < expected_len {
+            return false;
+        }
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_chain_set_room_head(
+                    self.raw,
+                    left.as_ptr(),
+                    right.as_ptr(),
+                    directions,
+                    taps,
+                    doubling,
+                );
+                self.head_loaded = true;
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = doubling;
+            self.head_loaded = true;
+            true
+        }
+    }
+
+    /// Installs a linear-phase / convolution FIR kernel into the EQ stage (`feq_chain_set_eq_kernel`).
+    pub fn set_eq_kernel(&mut self, left: &[f32], right: &[f32]) -> bool {
+        let len = left.len().min(right.len());
+        if len == 0 {
+            self.eq_kernel_len = 0;
+            #[cfg(feature = "link-cpp-core")]
+            unsafe {
+                if !self.raw.is_null() {
+                    feq_chain_set_eq_kernel(self.raw, std::ptr::null(), 0);
+                    return true;
+                }
+            }
+            return true;
+        }
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_chain_set_eq_kernel(self.raw, left.as_ptr(), len as u32);
+                self.eq_kernel_len = len as u32;
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            self.eq_kernel_len = len as u32;
+            true
+        }
+    }
+
+    /// Loads the DPDFNet neural voice denoise model and `onnxruntime` shared library into `FeqChain`.
+    pub fn load_voice_model(&mut self, model_path: &str, runtime_path: &str) -> bool {
+        if model_path.is_empty() || runtime_path.is_empty() {
+            return false;
+        }
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let Ok(c_model) = std::ffi::CString::new(model_path) else {
+                    return false;
+                };
+                let Ok(c_runtime) = std::ffi::CString::new(runtime_path) else {
+                    return false;
+                };
+                let ok = feq_chain_load_voice_model(
+                    self.raw,
+                    c_model.as_ptr(),
+                    c_runtime.as_ptr(),
+                ) != 0;
+                self.voice_model_loaded = ok;
+                return ok;
+            }
+            false
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            self.voice_model_loaded = true;
+            true
+        }
+    }
+
+    /// Unloads the neural voice denoise model and retires the background ORT worker session
+    /// by passing null pointers to `feq_chain_load_voice_model` (`chain.h` line 464).
+    pub fn unload_voice_model(&mut self) {
+        self.voice_model_loaded = false;
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let _ = feq_chain_load_voice_model(
+                    self.raw,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+            }
+        }
+    }
+
+    pub fn is_voice_model_loaded(&self) -> bool {
+        self.voice_model_loaded
+    }
+
+    pub fn is_head_loaded(&self) -> bool {
+        self.head_loaded
+    }
+
+    pub fn eq_kernel_len(&self) -> u32 {
+        self.eq_kernel_len
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+
+    pub fn maximum_block_frames(&self) -> u32 {
+        self.maximum_block_frames
+    }
+}
+
+impl Drop for NativeChainHandle {
+    fn drop(&mut self) {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_chain_destroy(self.raw);
+                self.raw = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 16. `dsp-host` Binary Wire Protocol (`wire.h`, `FEQ_WIRE_PROTOCOL_VERSION = 8`)
+// ============================================================================
+
+pub const FEQ_WIRE_PROTOCOL_VERSION: u32 = 8;
+pub const FEQ_DECK_HANDOFF: u32 = 2;
+pub const FEQ_DECK_SPARE: u32 = 3;
+
+pub const FEQ_MAGIC_HANDSHAKE: u32 = 0x4851_4546; // 'FEQH'
+pub const FEQ_MAGIC_COMMAND: u32 = 0x4351_4546;   // 'FEQC'
+pub const FEQ_MAGIC_ACK: u32 = 0x4151_4546;       // 'FEQA'
+pub const FEQ_MAGIC_TELEMETRY: u32 = 0x5451_4546; // 'FEQT'
+pub const FEQ_MAGIC_ANALYSIS: u32 = 0x4E51_4546;  // 'FEQN'
+pub const FEQ_MAGIC_STATS: u32 = 0x5351_4546;     // 'FEQS'
+
+pub const FEQ_DENOISE_PROFILE_WIRE: usize =
+    FEQ_DENOISE_PROFILE_BANDS + 3 + FEQ_DENOISE_MAX_HUM_PARTIALS * 2;
+
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqWireCommand {
+    FEQ_CMD_HELLO = 1,
+    FEQ_CMD_START = 2,
+    FEQ_CMD_STOP = 3,
+    FEQ_CMD_SET_PARAMETER = 4,
+    FEQ_CMD_APPLY_SNAPSHOT = 5,
+    FEQ_CMD_RUN_OFFLINE_BLOCKS = 6,
+    FEQ_CMD_SHUTDOWN = 7,
+    FEQ_CMD_SET_DIAGNOSTIC_SIGNAL = 8,
+    FEQ_CMD_APPLY_CHAIN = 9,
+    FEQ_CMD_LOAD_DECK = 10,
+    FEQ_CMD_UNLOAD_DECK = 11,
+    FEQ_CMD_SET_PLAYING = 12,
+    FEQ_CMD_SEEK_DECK = 13,
+    FEQ_CMD_SELECT_DECK = 14,
+    FEQ_CMD_CROSSFADE = 15,
+    FEQ_CMD_SET_TRACK_GAINS = 16,
+    FEQ_CMD_RENDER_TO_FILE = 17,
+    FEQ_CMD_SET_ANALYSIS = 18,
+    FEQ_CMD_SET_VOLUME = 19,
+    FEQ_CMD_SET_CROSSFADE_TABLE = 20,
+    FEQ_CMD_SET_NOISE_PROFILE = 21,
+    FEQ_CMD_LOAD_VOICE_MODEL = 22,
+    FEQ_CMD_SET_RAW_SHARING = 23,
+}
+
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeqWireStatus {
+    FEQ_WIRE_APPLIED = 0,
+    FEQ_WIRE_REJECTED = 1,
+    FEQ_WIRE_UNSUPPORTED = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FeqWireHandshake {
+    pub magic: u32,
+    pub protocol_version: u32,
+    pub parameter_schema_version: u32,
+    pub abi_version: u32,
+    pub parameter_count: u32,
+    pub analysis_frame_bytes: u32,
+    pub core_version: [c_char; 24],
+    pub architecture: [c_char; 16],
+    pub build_revision: [c_char; 24],
+    pub backend: [c_char; 16],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqWireCommandFrame {
+    pub magic: u32,
+    pub protocol_version: u16,
+    pub command: u16,
+    pub request_id: u32,
+    pub settings_revision: u32,
+    pub parameter_id: u32,
+    pub parameter_index: i32,
+    pub value: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqWireAckFrame {
+    pub magic: u32,
+    pub protocol_version: u16,
+    pub status: u16,
+    pub request_id: u32,
+    pub accepted_revision: u32,
+    pub applied_at_sample_frame: u64,
+    pub sanitized_value: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FeqWireTelemetryFrame {
+    pub magic: u32,
+    pub applied_revision: u32,
+    pub sequence: u64,
+    pub frames_processed: u64,
+    pub latency_frames: u32,
+    pub device_generation: u32,
+    pub peak_left: f32,
+    pub peak_right: f32,
+    pub callback_p50_us: f64,
+    pub callback_p99_us: f64,
+    pub xruns: u64,
+    pub drops: u64,
+    pub repaired_samples: u64,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub active_deck: u32,
+    pub deck_state: u32,
+    pub deck_position_seconds: f64,
+    pub deck_duration_seconds: f64,
+    pub processing_frames: u32,
+    pub processing_parts: [u32; 8],
+    pub processing_active: u32,
+    pub processing_endpoint: [c_char; 40],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqWireStatsFrame {
+    pub magic: u32,
+    pub reserved: u32,
+    pub working_set_bytes: u64,
+    pub cpu_seconds: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FeqWireAnalysisFrame {
+    pub magic: u32,
+    pub sequence: u32,
+    pub stage_mask: u32,
+    pub bins: u32,
+    pub pairs: u32,
+    pub bands: u32,
+    pub correlation: f64,
+    pub peak_left: f32,
+    pub peak_right: f32,
+    pub exciter_bands: [f32; 3],
+    pub exciter_organic: f32,
+    pub maximizer_reduction_db: f32,
+    pub dimension_guard: f32,
+    pub auto_headroom_reduction_db: f32,
+    pub auto_headroom_true_peak_db: f32,
+    pub safety_reduction_db: f32,
+    pub safety_true_peak_db: f32,
+    pub dc_correction_db: f32,
+    pub eq_detail_window: u32,
+    pub eq_detail_bins: u32,
+    pub safety_enabled: u32,
+    pub normalizer_input_peaks: [f32; 2],
+    pub normalizer_output_peaks: [f32; 2],
+    pub normalizer_applied_gain_db: f32,
+    pub reserved_tail: u32,
+    pub loudness_momentary_lufs: f32,
+    pub loudness_short_term_lufs: f32,
+    pub loudness_integrated_lufs: f32,
+    pub loudness_range_lu: f32,
+    pub denoise_reduction_db: f32,
+    pub denoise_noise_floor_db: f32,
+    pub denoise_clicks_repaired: u32,
+    pub denoise_voice_underruns: u32,
+    pub denoise_profile_ready: u32,
+    pub denoise_voice_model_loaded: u32,
+    pub denoise_floor_bands: [f32; FEQ_DENOISE_PROFILE_BANDS],
+    pub bass_forge_input_db: [f32; FEQ_BASS_FORGE_BANDS],
+    pub bass_forge_output_db: [f32; FEQ_BASS_FORGE_BANDS],
+    pub bass_punch_transient_db: f32,
+    pub bass_punch_sustain_db: f32,
+    pub bass_punch_duck_db: f32,
+    pub bass_reserved_tail: f32,
+    pub denoise_hiss_reduction_bands: [f32; FEQ_DENOISE_PROFILE_BANDS],
+    pub deesser_reduction_db: f32,
+    pub deesser_frequency_hz: f32,
+    pub deesser_confidence: f32,
+    pub deesser_centre: f32,
+    pub deesser_shape: f32,
+    pub deesser_onset: f32,
+    pub deesser_sibilance_db: f32,
+    pub deesser_band_count: u32,
+    pub deesser_band_hz: [f32; FEQ_DEESSER_MAX_BANDS],
+    pub deesser_band_level_db: [f32; FEQ_DEESSER_MAX_BANDS],
+    pub deesser_band_threshold_db: [f32; FEQ_DEESSER_MAX_BANDS],
+    pub deesser_band_cut_db: [f32; FEQ_DEESSER_MAX_BANDS],
+    pub footsteps_level_db: f32,
+    pub footsteps_cue_db: f32,
+    pub footsteps_bed_db: f32,
+    pub footsteps_lift_db: [f32; FEQ_FOOTSTEPS_BANDS],
+    pub footsteps_calm_db: f32,
+    pub footsteps_reserved_tail: f32,
+}
+
+impl Default for FeqWireAnalysisFrame {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+/// Exact port of `feq_wire_deesser_report` in `/native/dsp-host/src/wire.h`.
+pub fn feq_wire_deesser_report(frame: &mut FeqWireAnalysisFrame, report: &FeqDeEsserReport) {
+    frame.deesser_reduction_db = report.reduction_db;
+    frame.deesser_frequency_hz = report.frequency_hz;
+    frame.deesser_confidence = report.confidence;
+    frame.deesser_centre = report.centre;
+    frame.deesser_shape = report.shape;
+    frame.deesser_onset = report.onset;
+    frame.deesser_sibilance_db = report.sibilance_db;
+    frame.deesser_band_count = report.band_count;
+    for band in 0..FEQ_DEESSER_MAX_BANDS {
+        frame.deesser_band_hz[band] = report.band_hz[band];
+        frame.deesser_band_level_db[band] = report.band_level_db[band];
+        frame.deesser_band_threshold_db[band] = report.band_threshold_db[band];
+        frame.deesser_band_cut_db[band] = report.band_cut_db[band];
+    }
+}
+
+/// Exact port of `feq_wire_footsteps_report` in `/native/dsp-host/src/wire.h`.
+pub fn feq_wire_footsteps_report(frame: &mut FeqWireAnalysisFrame, report: &FeqFootstepsReport) {
+    frame.footsteps_level_db = report.level_db;
+    frame.footsteps_cue_db = report.cue_db;
+    frame.footsteps_bed_db = report.bed_db;
+    for band in 0..FEQ_FOOTSTEPS_BANDS {
+        frame.footsteps_lift_db[band] = report.lift_db[band];
+    }
+    frame.footsteps_calm_db = report.calm_db;
+}
+
+/// Exact port of `feq_wire_room_report` in `/native/dsp-host/src/wire.h`.
+pub fn feq_wire_room_report(frame: &mut FeqWireAnalysisFrame, room: &FeqRoomReport) {
+    frame.reserved_tail = room.flags;
+    frame.bass_reserved_tail = room.reference_gain_db;
+}
+
+const _: () = assert!(std::mem::size_of::<FeqWireHandshake>() == 104);
+const _: () = assert!(std::mem::size_of::<FeqWireCommandFrame>() == 32);
+const _: () = assert!(std::mem::size_of::<FeqWireAckFrame>() == 32);
+const _: () = assert!(std::mem::size_of::<FeqWireTelemetryFrame>() == 192);
+const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_frames) == 112);
+const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_parts) == 116);
+const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_active) == 148);
+const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_endpoint) == 152);
+const _: () = assert!(std::mem::size_of::<FeqWireStatsFrame>() == 24);
+const _: () = assert!(std::mem::size_of::<FeqWireAnalysisFrame>() == 816);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, eq_detail_window) == 84);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, eq_detail_bins) == 88);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, reserved_tail) == 116);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, bass_reserved_tail) == 396);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, deesser_reduction_db) == 560);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, footsteps_level_db) == 784);
+
+
+

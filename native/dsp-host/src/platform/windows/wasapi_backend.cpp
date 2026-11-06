@@ -1,0 +1,529 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * Shared-mode WASAPI render, which is to say: an ordinary application.
+ *
+ * Nothing here is privileged and nothing is installed. WASAPI is a user-mode
+ * COM API that ships with Windows, `ole32` and `avrt` are already on every
+ * machine, and this process opens the default endpoint exactly the way any
+ * media player does. Equalizer APO lives further down, inside the endpoint's
+ * own processing chain, so audio written here passes through it afterwards —
+ * the same relationship the Web Audio path already has, unchanged.
+ *
+ * Exclusive mode is deliberately not used. It would take the endpoint away
+ * from every other application on the machine, which for a system equaliser
+ * is precisely backwards.
+ */
+
+#include "../../audio_backend.h"
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <audioclient.h>
+#include <avrt.h>
+#include <mmdeviceapi.h>
+#include <wrl/client.h>
+
+#include "device_watch.h"
+
+using Microsoft::WRL::ComPtr;
+
+namespace {
+
+/**
+ * The failure, and the code the system gave for it.
+ *
+ * "the output device refused to activate" says which call failed; `0x8889000A`
+ * says the device is already in exclusive use by another application, and
+ * `0x88890004` says it was unplugged. Those are different problems with
+ * different answers, and without the code a support report cannot tell them
+ * apart — the message alone sends everybody down the same wrong path.
+ *
+ * Hex because every Microsoft page documenting an `AUDCLNT_E_` value writes it
+ * that way, so the number can be pasted into a search and found.
+ */
+std::string with_code(const char* what, HRESULT result) {
+  char buffer[160];
+  std::snprintf(buffer, sizeof(buffer), "%s (0x%08lX)", what,
+                static_cast<unsigned long>(result));
+  return std::string(buffer);
+}
+
+/**
+ * How much buffer to ask the engine for, in 100-nanosecond units.
+ *
+ * Shared mode treats this as a hint and the endpoint's own period usually
+ * wins, so it is not a latency setting so much as a floor. Thirty milliseconds
+ * is generous on purpose: this backend has no decoder feeding it yet, and a
+ * bring-up that also fights for the smallest possible buffer is a bring-up
+ * where an underrun could be either problem.
+ */
+constexpr REFERENCE_TIME kRequestedBufferDuration = 300000;
+
+/** Does this mix format carry 32-bit floats, which is all this path writes? */
+bool is_float32(const WAVEFORMATEX* format) {
+  if (format == nullptr) {
+    return false;
+  }
+  if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+    return format->wBitsPerSample == 32;
+  }
+  if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+    const auto* extensible =
+        reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+    return format->wBitsPerSample == 32 &&
+           extensible->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+  }
+  return false;
+}
+
+class WasapiBackend final : public IAudioOutputBackend {
+ public:
+  explicit WasapiBackend(const FeqBackendHooks& hooks) : hooks_(hooks) {}
+
+  ~WasapiBackend() override { close(); }
+
+  bool open(FeqBackendFormat& negotiated, std::string& error) override {
+    if (is_open()) {
+      negotiated = format_;
+      return true;
+    }
+    // Cleared per attempt, not per process: a machine can gain an endpoint
+    // between two opens — plugging in a USB DAC is exactly that — and a latched
+    // answer would keep reporting the silence it found the first time.
+    endpoint_absent_ = false;
+    if (!prepare(error)) {
+      teardown();
+      return false;
+    }
+    negotiated = format_;
+    open_.store(true, std::memory_order_release);
+    watch_.endpoint_open();
+    return true;
+  }
+
+  bool endpoint_absent() const override { return endpoint_absent_; }
+
+  bool start(std::string& error) override {
+    if (!is_open()) {
+      error = "the device was not opened";
+      return false;
+    }
+    if (is_running()) {
+      return true;
+    }
+    stop_.store(false, std::memory_order_release);
+    running_.store(true, std::memory_order_release);
+    thread_ = std::thread([this] { run(); });
+    return true;
+  }
+
+  void close() override {
+    // Nobody wants a device, or a reopen is about to say so itself.
+    watch_.endpoint_closed();
+    const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
+    if (!open_.exchange(false, std::memory_order_acq_rel) && !was_running) {
+      teardown();
+      return;
+    }
+    stop_.store(true, std::memory_order_release);
+    if (event_ != nullptr) {
+      // Wake the thread rather than wait out its timeout. A stop that takes a
+      // full period to be noticed is a stop somebody can hear as a tail.
+      SetEvent(event_);
+    }
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    teardown();
+  }
+
+  bool is_open() const override { return open_.load(std::memory_order_acquire); }
+
+  bool is_running() const override {
+    return running_.load(std::memory_order_acquire);
+  }
+
+  FeqBackendStats stats() const override {
+    FeqBackendStats copy;
+    copy.underruns = underruns_.load(std::memory_order_relaxed);
+    copy.periods = periods_.load(std::memory_order_relaxed);
+    copy.buffer_frames = buffer_frames_;
+    return copy;
+  }
+
+  /**
+   * Has the endpoint this stream is writing to stopped being the right one?
+   *
+   * Set by the device watch (`device_watch.h`), and by the render loop when it
+   * stops for any reason other than being asked to — a device that was removed
+   * fails its next call and the loop exits, which was previously silent.
+   */
+  bool needs_reopen() const override {
+    return reopen_.load(std::memory_order_acquire);
+  }
+
+  void clear_reopen() override {
+    reopen_.store(false, std::memory_order_release);
+  }
+
+  void await_endpoint() override { watch_.await_endpoint(); }
+
+  const char* name() const override { return "wasapi-shared"; }
+  std::string endpoint_guid() const override { return endpoint_guid_; }
+
+ private:
+  /**
+   * Pretend this machine has no endpoint, so the silent-machine path can be
+   * tested on a machine that has one.
+   *
+   * `smoke-native-dsp.ts` uses it as the positive control for its own skip: a
+   * branch that only ever runs on a build agent is a branch nobody has run,
+   * and the whole point of the skip is that it must not be reachable by
+   * accident. Deliberately not a build flag — the binary under test has to be
+   * the binary that ships, or the control proves something about a different
+   * program.
+   */
+  static bool forced_absent() {
+    size_t length = 0;
+    char value[8] = {};
+    if (getenv_s(&length, value, sizeof(value),
+                 "FLUIDEQ_DSP_NO_ENDPOINT") != 0) {
+      return false;
+    }
+    return length > 0 && value[0] == '1';
+  }
+
+  bool prepare(std::string& error) {
+    // Apartment-agnostic on this thread; the render thread initialises its
+    // own, because COM is per-thread and the interfaces are used from both.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (com == RPC_E_CHANGED_MODE) {
+      // Somebody already chose an apartment for this thread. That is fine —
+      // it just means this call must not be the one that uninitialises it.
+      owns_com_ = false;
+    } else if (SUCCEEDED(com)) {
+      owns_com_ = true;
+    } else {
+      error = "CoInitializeEx failed";
+      return false;
+    }
+
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    const HRESULT created = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        IID_PPV_ARGS(&enumerator));
+    if (FAILED(created)) {
+      error = with_code("no audio endpoint enumerator", created);
+      return false;
+    }
+    const HRESULT endpoint =
+        forced_absent()
+            ? HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
+            : enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device_);
+    if (FAILED(endpoint)) {
+      /**
+       * `E_NOTFOUND` here means the machine has no render endpoint at all —
+       * a build agent, a server, a session with the audio service stopped.
+       * Every other failure is a device that exists and would not open, which
+       * is a defect. `endpoint_absent` carries that distinction out.
+       */
+      endpoint_absent_ = endpoint == HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+      error = with_code("no default output device", endpoint);
+      return false;
+    }
+    endpoint_guid_.clear();
+    LPWSTR device_id = nullptr;
+    if (SUCCEEDED(device_->GetId(&device_id)) && device_id != nullptr) {
+      const std::wstring id(device_id);
+      CoTaskMemFree(device_id);
+      const auto start = id.rfind(L'{');
+      if (start != std::wstring::npos && id.size() - start == 38) {
+        for (size_t at = start; at < id.size(); ++at) {
+          if (id[at] > 127) { endpoint_guid_.clear(); break; }
+          endpoint_guid_.push_back(static_cast<char>(id[at]));
+        }
+      }
+    }
+    const HRESULT activated = device_->Activate(
+        __uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_);
+    if (FAILED(activated)) {
+      error = with_code("the output device refused to activate", activated);
+      return false;
+    }
+
+    WAVEFORMATEX* mix = nullptr;
+    if (FAILED(client_->GetMixFormat(&mix)) || mix == nullptr) {
+      error = "the output device reported no mix format";
+      return false;
+    }
+    const bool floats = is_float32(mix);
+    const uint32_t rate = mix->nSamplesPerSec;
+    const uint32_t channels = mix->nChannels;
+
+    HRESULT initialised = E_FAIL;
+    if (floats) {
+      initialised = client_->Initialize(
+          AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+          kRequestedBufferDuration, 0, mix, nullptr);
+    }
+    CoTaskMemFree(mix);
+    if (!floats) {
+      // Refused with a reason rather than converted silently. Every shared-mode
+      // endpoint on a supported Windows mixes in float; one that does not is a
+      // machine worth hearing about instead of quietly serving worse audio.
+      error = "the output device does not mix in 32-bit float";
+      return false;
+    }
+    if (FAILED(initialised)) {
+      error =
+          with_code("the output device refused the shared-mode format",
+                    initialised);
+      return false;
+    }
+
+    if (FAILED(client_->GetBufferSize(&buffer_frames_))) {
+      error = "the output device reported no buffer size";
+      return false;
+    }
+    event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event_ == nullptr) {
+      error = "no render event could be created";
+      return false;
+    }
+    if (FAILED(client_->SetEventHandle(event_))) {
+      error = "the output device refused the render event";
+      return false;
+    }
+    if (FAILED(client_->GetService(IID_PPV_ARGS(&render_client_)))) {
+      error = "the output device exposed no render client";
+      return false;
+    }
+    // The stream's own session says when it is cut off (`StreamWatch`). A
+    // session that will not take the registration still plays; a cut then
+    // shows itself as a failed call, or as a change of output.
+    if (SUCCEEDED(client_->GetService(IID_PPV_ARGS(&session_))) &&
+        FAILED(session_->RegisterAudioSessionNotification(&stream_watch_))) {
+      session_.Reset();
+    }
+
+    format_.sample_rate = rate;
+    format_.channels = channels;
+    format_.max_block_frames = buffer_frames_;
+
+    // Every buffer the render thread touches, allocated once, here. The engine
+    // is planar and the device is interleaved, so the deinterleave scratch is
+    // part of the contract rather than an optimisation.
+    const uint32_t engine_channels = channels < 2 ? channels : 2;
+    planar_.assign(engine_channels,
+                   std::vector<float>(buffer_frames_, 0.0f));
+    planar_pointers_.clear();
+    for (auto& channel : planar_) {
+      planar_pointers_.push_back(channel.data());
+    }
+    return true;
+  }
+
+  void teardown() {
+    if (session_) {
+      session_->UnregisterAudioSessionNotification(&stream_watch_);
+      session_.Reset();
+    }
+    render_client_.Reset();
+    client_.Reset();
+    device_.Reset();
+    if (event_ != nullptr) {
+      CloseHandle(event_);
+      event_ = nullptr;
+    }
+    if (owns_com_) {
+      CoUninitialize();
+      owns_com_ = false;
+    }
+  }
+
+  /** The real-time thread. Everything it needs already exists. */
+  void run() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    /**
+     * Pro Audio, through MMCSS, and not `SetThreadPriority`.
+     *
+     * A raw priority bump makes the thread compete harder; MMCSS tells the
+     * scheduler what kind of work this is, so it is given a guaranteed slice
+     * and is exempted from the throttling that applies to ordinary busy
+     * threads. Failing to register is survivable and is not treated as fatal —
+     * it costs headroom, not correctness.
+     */
+    DWORD task_index = 0;
+    HANDLE task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
+
+    if (FAILED(client_->Start())) {
+      // A stream that would not start is a dead one, the same as a stream
+      // that stopped being asked for: Windows audio restarting underneath it
+      // is how this happens, and nothing else would ever reopen it. Returning
+      // quietly used to leave playback silent while the host went on
+      // reporting a stream that was running.
+      want_reopen();
+      if (task != nullptr) {
+        AvRevertMmThreadCharacteristics(task);
+      }
+      CoUninitialize();
+      return;
+    }
+
+    const uint32_t engine_channels =
+        static_cast<uint32_t>(planar_pointers_.size());
+    const uint32_t device_channels = format_.channels;
+
+    while (!stop_.load(std::memory_order_acquire)) {
+      // Until the device asks for its next period, however long that is. It
+      // was two seconds, after which the stream was called dead: a guess, and
+      // a stream that is cut off says so (`StreamWatch`), which raises the
+      // reopen, whose `close` wakes this wait.
+      const DWORD waited = WaitForSingleObject(event_, INFINITE);
+      if (stop_.load(std::memory_order_acquire)) {
+        break;
+      }
+      if (waited != WAIT_OBJECT_0) {
+        // The wait itself failed: the event is gone, and so is the stream.
+        want_reopen();
+        break;
+      }
+
+      UINT32 padding = 0;
+      if (FAILED(client_->GetCurrentPadding(&padding))) {
+        // The device went away underneath the stream. Silent before this: the
+        // loop simply left and nothing above was told.
+        want_reopen();
+        break;
+      }
+      const UINT32 available = buffer_frames_ - padding;
+      if (available == 0) {
+        continue;
+      }
+
+      /**
+       * An underrun, as closely as shared mode will admit to one.
+       *
+       * WASAPI does not report a glitch on the render path, so this is the
+       * proxy: the endpoint had drained completely by the time we were woken,
+       * which means anything it played in that gap was silence we did not
+       * write. Counted from the second period onward — the first is empty by
+       * definition, and counting it would report one underrun on every start.
+       */
+      if (padding == 0 && periods_.load(std::memory_order_relaxed) > 0) {
+        underruns_.fetch_add(1, std::memory_order_relaxed);
+      }
+
+      BYTE* raw = nullptr;
+      if (FAILED(render_client_->GetBuffer(available, &raw))) {
+        want_reopen();
+        break;
+      }
+      auto* interleaved = reinterpret_cast<float*>(raw);
+
+      for (uint32_t channel = 0; channel < engine_channels; ++channel) {
+        std::memset(planar_[channel].data(), 0,
+                    static_cast<size_t>(available) * sizeof(float));
+      }
+      hooks_.render(hooks_.context, planar_pointers_.data(), available);
+
+      // Interleave into whatever width the endpoint has. A stereo programme on
+      // a 5.1 endpoint fills the front pair and leaves the rest silent, which
+      // is what every other stereo application on the machine does.
+      for (uint32_t frame = 0; frame < available; ++frame) {
+        float* out = interleaved + static_cast<size_t>(frame) * device_channels;
+        for (uint32_t channel = 0; channel < device_channels; ++channel) {
+          out[channel] = channel < engine_channels
+                             ? planar_[channel][frame]
+                             : 0.0f;
+        }
+      }
+
+      if (FAILED(render_client_->ReleaseBuffer(available, 0))) {
+        // Same as a failed GetBuffer above: the device has gone.
+        want_reopen();
+        break;
+      }
+      periods_.fetch_add(1, std::memory_order_relaxed);
+      // The period is the device's now. What its block armed is rung here,
+      // before the wait for the next one — never inside the callback.
+      if (hooks_.period_done != nullptr) {
+        hooks_.period_done(hooks_.context);
+      }
+    }
+
+    client_->Stop();
+    client_->Reset();
+    if (task != nullptr) {
+      AvRevertMmThreadCharacteristics(task);
+    }
+    CoUninitialize();
+  }
+
+  /** Raise `needs_reopen` and wake whoever acts on it. Any thread. */
+  void want_reopen() {
+    reopen_.store(true, std::memory_order_release);
+    if (hooks_.reopen_wanted != nullptr) {
+      hooks_.reopen_wanted(hooks_.context);
+    }
+  }
+
+  static void reopen_from_watch(void* self) {
+    static_cast<WasapiBackend*>(self)->want_reopen();
+  }
+
+  FeqBackendHooks hooks_;
+
+  ComPtr<IMMDevice> device_;
+  ComPtr<IAudioClient> client_;
+  ComPtr<IAudioRenderClient> render_client_;
+  ComPtr<IAudioSessionControl> session_;
+  StreamWatch stream_watch_{&WasapiBackend::reopen_from_watch, this};
+  HANDLE event_ = nullptr;
+  UINT32 buffer_frames_ = 0;
+  bool owns_com_ = false;
+  /** Read only on the control thread, between `open` and its ack. */
+  bool endpoint_absent_ = false;
+  std::string endpoint_guid_;
+
+  FeqBackendFormat format_;
+  std::vector<std::vector<float>> planar_;
+  std::vector<float*> planar_pointers_;
+
+  std::thread thread_;
+  std::atomic<bool> open_{false};
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_{false};
+  std::atomic<uint64_t> underruns_{0};
+  /** Raised when the endpoint should be reopened; read by the control side. */
+  std::atomic<bool> reopen_{false};
+  std::atomic<uint64_t> periods_{0};
+  /**
+   * Declared last: built after everything it can call back into, and
+   * destroyed — its thread joined, its registration gone — before any of it.
+   */
+  DeviceWatch watch_{&WasapiBackend::reopen_from_watch, this};
+};
+
+}  // namespace
+
+std::unique_ptr<IAudioOutputBackend> create_audio_backend(
+    const FeqBackendHooks& hooks) {
+  return std::make_unique<WasapiBackend>(hooks);
+}

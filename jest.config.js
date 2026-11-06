@@ -1,0 +1,103 @@
+const path = require('path');
+
+// `music-metadata` (the media library's tag reader, src/main/library/libraryMetadata.ts)
+// pulls in `file-type` as a transitive dependency, and `file-type` is ESM-only
+// in a way ts-jest cannot resolve. pnpm's strict isolation gives a transitive
+// dependency no top-level node_modules symlink, so there is no
+// version-independent path to it — resolve it live instead of hardcoding
+// node_modules/.pnpm/file-type@21.3.4/..., which broke the whole suite with
+// "Cannot find module 'file-type'" on every pnpm update that bumped the
+// pinned version. `file-type`'s own package.json restricts its export map to
+// ".", "./core" and "./node" (no "./package.json"), and it has no top-level
+// symlink for a bare `require.resolve('file-type', ...)` to start from either,
+// so resolution is anchored through music-metadata's own dependency path.
+const musicMetadataEntry = require.resolve('music-metadata');
+const fileTypeEntry = require.resolve('file-type', {
+  paths: [path.dirname(musicMetadataEntry)],
+});
+
+module.exports = {
+  moduleDirectories: ['src', 'node_modules', 'release/app/node_modules'],
+  moduleFileExtensions: ['js', 'jsx', 'ts', 'tsx', 'json'],
+  moduleNameMapper: {
+    // Jest runs in Node even when jsdom supplies a DOM. Resolving the browser
+    // logger here waits for an Electron preload bridge that no unit test owns.
+    '^electron-log$': '<rootDir>/.erb/mocks/testLogger.js',
+    '^electron-log/renderer$': '<rootDir>/.erb/mocks/testLogger.js',
+    '\\.(jpg|jpeg|png|gif|eot|otf|webp|svg|ttf|woff|woff2|mp4|webm|wav|mp3|m4a|aac|oga|worklet)$':
+      '<rootDir>/.erb/mocks/fileMock.js',
+    '^@fluideq/whisper-wasm$': '<rootDir>/.erb/mocks/fileMock.js',
+    '^@fluideq/whisper-runtime$': '<rootDir>/.erb/mocks/fileMock.js',
+    '\\.(css|less|sass|scss)$': 'identity-obj-proxy',
+    // MUST stay anchored: the unanchored "d3" matched the substring inside
+    // "id3v1"/"id3v2" and silently redirected music-metadata's ID3 parser to
+    // the D3 charting library instead of leaving it unmapped.
+    '^d3$': '<rootDir>/node_modules/d3/dist/d3.min.js',
+    '^music-metadata$': '<rootDir>/node_modules/music-metadata/lib/index.js',
+    '^file-type$': fileTypeEntry,
+    // The ES module build itself, transpiled below: `three.cjs` only
+    // requires it, and warns on every run that it is deprecated.
+    '^three$': '<rootDir>/node_modules/three/build/three.module.js',
+  },
+  setupFiles: [
+    './.erb/scripts/check-build-exists.ts',
+    './.erb/scripts/jest-setup.ts',
+  ],
+  // A case that prints an error or a warning it did not hold fails: the CI
+  // log once carried 451 such blocks while every suite passed.
+  setupFilesAfterEnv: ['./.erb/scripts/jest-console-guard.ts'],
+  // Every test runs here, INCLUDING the sixty-two that open with a licence
+  // comment and then declare `@jest-environment node` underneath it. Jest
+  // reads the first comment in a file and no other, so those declarations are
+  // inert and always have been: main-process code is being tested against
+  // browser globals.
+  //
+  // Moving them was tried on 2026-09-18 and taken back out. Jest's node
+  // environment gives the sandbox a different `ArrayBuffer` from the one
+  // backing typed arrays in it, so `new Float32Array(n).buffer instanceof
+  // ArrayBuffer` is FALSE there — which is nothing to do with this app, and
+  // real Electron main answers true. Thirteen tests across the LAN audio
+  // transport failed on exactly that, all of them for the environment's
+  // reason rather than the code's. jsdom happens to keep one realm, so the
+  // tests that pass here pass for an honest reason even though the
+  // environment is the wrong one on paper.
+  //
+  // So: a pragma under a licence header is a lie, but correcting it needs
+  // each file looked at rather than a sweep. Anything genuinely needing node
+  // has to put the pragma in the FIRST comment and then be run and read.
+  testEnvironment: 'jsdom',
+  testEnvironmentOptions: {
+    url: 'http://localhost/',
+  },
+  // The pnpm store that installs made inside the checkout is no source either:
+  // an install's unpacking folders there (`v11/tmp/_tmp_*`) are outside any
+  // node_modules, so their package.json files joined the module map, and two
+  // copies of `electron` left by one evening's reinstalls failed every suite
+  // that mocks it (2026-10-06).
+  testPathIgnorePatterns: [
+    'release/app/dist',
+    '<rootDir>/.claude/',
+    '<rootDir>/.gigaide/',
+    '<rootDir>/.pnpm-store/',
+  ],
+  modulePathIgnorePatterns: [
+    '<rootDir>/.claude/',
+    '<rootDir>/.gigaide/',
+    '<rootDir>/.pnpm-store/',
+  ],
+  transform: {
+    '\\.(ts|tsx|js|jsx)$': 'ts-jest',
+  },
+  testMatch: ['**/__tests__/unit_tests/**/*.ts?(x)'],
+  transformIgnorePatterns: [
+    // Eight of these nine packages are individually load-bearing: each ships
+    // ESM that music-metadata's parse chain needs transpiled rather than left
+    // for Node's `require` to choke on. `win-guid` is the ninth — forward
+    // provisioning for WMA/ASF tag parsing that no test exercises yet.
+    // `three` is the tenth: its CommonJS entry only requires the ES module
+    // build, so a test that builds a real 3D world (`worldHiddenWork.test.ts`)
+    // needs it transpiled too; a test that mocks `three` never loads it.
+    '/node_modules/(?!.*(uuid|music-metadata|file-type|strtok3|token-types|media-typer|uint8array-extras|win-guid|@borewit|@tokenizer|three))',
+    '\\.pnp\\.[^\\/]+$',
+  ],
+};

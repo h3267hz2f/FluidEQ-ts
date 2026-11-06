@@ -1,0 +1,455 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * Getting a new `Graph` from the file system onto the audio thread, and the
+ * old one off it again without either thread waiting for the other.
+ *
+ * The audio thread may not allocate, free, lock or block, and the thread that
+ * builds a graph does all four. So the handover is one atomic pointer each
+ * way and nothing else: the watcher stores a finished graph in `pending`, the
+ * audio thread takes it at a block boundary, and the watcher — the only
+ * thread that ever calls `delete` — frees the previous one once it can prove
+ * the audio thread cannot still be inside it.
+ *
+ * That proof is what `GraphSlot` exists for, and it rests on one invariant:
+ * a graph leaves `pending_` exactly once, by an atomic exchange, so exactly
+ * one thread ever holds it. The audio thread's exchange and the watcher's are
+ * the same operation on the same pointer, and only one of them can win.
+ */
+#ifndef FLUIDEQ_ENGINE_WATCHER_H
+#define FLUIDEQ_ENGINE_WATCHER_H
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "fluideq_engine/config.h"
+#include "fluideq_engine/graph.h"
+#include "graph_reclaim.h"
+#include "log.h"
+#include "owner_link.h"
+#include "status_file.h"
+#include "analysis_link.h"
+#include "input_history.h"
+#include "level_mailbox.h"
+#include "level_prediction.h"
+#include "leveling_board.h"
+#include "room_head.h"
+#include "split_tap.h"
+#include "source_analysis.h"
+
+namespace fluideq_engine {
+
+/**
+ * The two-pointer handover between the watcher thread and the audio thread.
+ *
+ * Owns nothing: every graph it points at belongs to the `Watcher`, which is
+ * the only thread allowed to destroy one.
+ */
+class GraphSlot {
+ public:
+  /**
+   * Audio thread, at the start of a block. Copies biquad histories into
+   * preallocated storage here, when the previous graph is no longer being
+   * processed. No allocation, destruction, lock or operating system call.
+   *
+   * THE INVARIANT: a graph is taken OUT of `pending_` by the exchange before
+   * it is published into `active_`, so exactly one thread ever holds a graph
+   * that came out of the slot. That is what makes `publish`'s reasoning true
+   * — a non-null result there is proof this thread never got it.
+   *
+   * Reading `pending_` first and clearing it afterwards is the shape that
+   * looks safer and is not: the watcher's own exchange could take the same
+   * graph back out in between and destroy it as unadopted, while this thread
+   * was already about to run it.
+   */
+  Graph* adopt() noexcept {
+    Graph* next = pending_.exchange(nullptr, std::memory_order_acq_rel);
+    if (next != nullptr) {
+      next->adopt_state(active_.load(std::memory_order_relaxed));
+      active_.store(next, std::memory_order_release);
+    }
+    return active_.load(std::memory_order_relaxed);
+  }
+
+  /**
+   * Audio thread, at the end of a block. This counter is the grace period:
+   * it is the only evidence the watcher has that a block which could have
+   * been holding an old graph has finished.
+   */
+  void finish_block() noexcept {
+    blocks_.fetch_add(1, std::memory_order_release);
+  }
+
+  /**
+   * Watcher thread: what the audio thread is running now, for state
+   * carry-over.
+   *
+   * It cannot return a destroyed graph. A graph is only ever destroyed once
+   * two blocks have completed after the publish that superseded it, and the
+   * second of those two started after that publish — so its `adopt` stored
+   * the newer graph into `active_` before its `finish_block`. The watcher
+   * reads that counter with acquire, so observing the count that permits the
+   * free also makes the newer `active_` visible, and read-read coherence
+   * stops any later load here from seeing the older pointer again.
+   */
+  Graph* active() const noexcept {
+    return active_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * The latest published graph's added delay, cached here rather than read
+   * back off the graph.
+   *
+   * `GetLatency` is called from whichever thread Windows feels like, and the
+   * graph it would have to ask belongs to the watcher, which may destroy it
+   * at any moment. A number copied out at publish time cannot dangle.
+   */
+  void set_latency(uint32_t frames) noexcept {
+    latency_.store(frames, std::memory_order_relaxed);
+  }
+  uint32_t latency() const noexcept {
+    return latency_.load(std::memory_order_relaxed);
+  }
+
+  uint64_t blocks() const noexcept {
+    return blocks_.load(std::memory_order_acquire);
+  }
+
+  /**
+   * Watcher thread. Returns the graph this one replaced in `pending` — a
+   * non-null result is proof, from the atomic exchange itself, that the audio
+   * thread never took it and it can be destroyed at once.
+   */
+  Graph* publish(Graph* graph) noexcept {
+    return pending_.exchange(graph, std::memory_order_acq_rel);
+  }
+
+  /** After the watcher has stopped and the audio thread is gone. */
+  void clear() noexcept {
+    pending_.store(nullptr, std::memory_order_relaxed);
+    active_.store(nullptr, std::memory_order_relaxed);
+  }
+
+ private:
+  std::atomic<Graph*> pending_{nullptr};
+  std::atomic<Graph*> active_{nullptr};
+  std::atomic<uint64_t> blocks_{0};
+  std::atomic<uint32_t> latency_{0};
+};
+
+/**
+ * The thread that reads the configuration directory and builds graphs.
+ *
+ * One per locked endpoint. It waits on a change notification and a stop
+ * event and nothing else — no timeout, no poll, no sleep — so a machine with
+ * a static configuration pays exactly nothing for having the effect
+ * installed.
+ */
+class Watcher {
+ public:
+  /**
+   * `split` receives optional sharing built on this watcher's thread, never
+   * during main's initial graph setup. Null disables sharing for this host.
+   */
+  Watcher(GraphSlot& slot, Log& log, Endpoint endpoint, std::wstring config_dir,
+          uint32_t sample_rate, uint32_t channels, uint32_t max_frames,
+          unsigned long channel_mask = 0,
+          std::atomic<SplitTap*>* split = nullptr, bool default_mode = true);
+  ~Watcher();
+
+  Watcher(const Watcher&) = delete;
+  Watcher& operator=(const Watcher&) = delete;
+
+  /**
+   * Resolve, build and publish the first graph on the calling thread.
+   *
+   * `LockForProcess` calls this before starting the thread: audio must not
+   * start unprocessed and then jump to processed a moment later, which is
+   * heard as the volume changing by itself right after a device switch.
+   */
+  void load_initial();
+
+  /** Starts the thread. False if it could not be created; audio still runs. */
+  bool start();
+
+  /** Signals, joins, and destroys every graph. Safe to call more than once. */
+  void stop() noexcept;
+
+  /**
+   * Ask for the graph to be rebuilt after a pipeline flush. Any thread.
+   *
+   * This is how `IAudioProcessingObject::Reset` is served. Its contract says
+   * only that it "is not real-time compliant and must not be called from a
+   * real-time processing thread" — which names the caller's thread and says
+   * nothing about the audio thread being idle meanwhile. So `Reset` may not
+   * zero a biquad history, a convolver's overlap or the rack's chain in
+   * place: every one of those is memory the audio thread can be inside at
+   * that instant, and writing it from another thread is the race this whole
+   * two-pointer handover exists to avoid.
+   *
+   * So the reset goes through the same rebuild every configuration change
+   * does, handed over the same way, landing a block or two after the call
+   * returns — which is what a flush of the audio pipeline can afford; the
+   * alternative lands sooner and corrupts state.
+   *
+   * And it KEEPS what is already in flight. A fresh graph with nothing
+   * carried was the obvious reading of `Reset` and the wrong one here: this
+   * is an endpoint effect, so it processes the output's mix, and Windows
+   * flushes that pipeline whenever any stream on the machine starts, stops or
+   * changes format — while the music that was already playing carries on
+   * through it. With the room on, every channel is folded through its
+   * convolution, so emptying it put 512 frames of silence into the middle of
+   * whatever was playing each time anything opened a sound. Because an
+   * unchanged configuration then short-circuits, the ordinary flush now costs
+   * a directory read rather than a graph.
+   */
+  void request_reset() noexcept;
+
+  /**
+   * The audio thread saying sound has reached this instance, so the status
+   * file can carry it — `EngineStatus::carried`.
+   *
+   * Called at most once per lock, from `APOProcess`, and guarded there by a
+   * flag so nothing happens on any block after the first with sound in it.
+   * This bounded status wake reaches the operating system: without it the
+   * app can never learn that audio
+   * has come — the status file is rewritten only when the engine is asked to
+   * do something different, and a machine playing music while its engine is
+   * passed over is asked for nothing at all. One `SetEvent` on an auto-reset
+   * event, once, against a block of ten milliseconds. Split changes, graph
+   * adoption and armed voice workers have their own bounded wake contracts.
+   */
+  void say_it_carried() noexcept;
+
+  /**
+   * The audio thread saying a block took a larger share of its time than any
+   * before, by a step of `timing_step` — so the status and the log can say
+   * so (`block_timing.h`). The same one `SetEvent`, a handful of times in a
+   * stream at most.
+   */
+  void say_it_was_slow() noexcept;
+
+  /**
+   * The audio thread saying the second output it plays needs this thread:
+   * a kernel for a main output's new rate, or a status that changed —
+   * started, stopped, fell behind. The same one `SetEvent` as
+   * `say_it_carried`, on the same terms: only when something changed, which
+   * is a handful of times in a song, never once a block.
+   */
+  void split_wake() noexcept;
+  /** Callback tail: a prepared source snapshot actually became active. */
+  void graph_adopted() noexcept;
+
+ private:
+  static unsigned __stdcall thread_entry(void* self);
+  void run();
+  /**
+   * Resolve the config and publish a graph if anything actually changed.
+   *
+   * Every rebuild carries the running graph's state into its successor —
+   * histories, delay lines and the convolvers' pipelines — so a band drag has
+   * no click and a flush of the audio pipeline has no hole. There is no
+   * variant that does not: one existed for `Reset`, and what it produced is
+   * written up on `request_reset`.
+   */
+  void reload();
+  /** `reload` up to and including the publish: everything but the level. */
+  void load_chain();
+  /**
+   * Whether `stop()` has already been asked for.
+   *
+   * Not a wait and not a poll: the event is either set or it is not at the
+   * instant this is called, and a zero timeout asks exactly that. `reload()`
+   * consults it between its phases because `stop()` joins this thread with no
+   * timeout, so a rebuild left running is time `UnlockForProcess` spends
+   * blocked — and a rebuild is a directory of files read plus a 4097-tap FIR
+   * designed.
+   */
+  bool stop_requested() const noexcept;
+  /**
+   * Whether the configuration directory has changed since the watch was
+   * last re-armed: asked, like `stop_requested`, with a zero wait. A level
+   * being worked out gives way to it, because a newer edit makes that level
+   * worthless and is about to be heard.
+   */
+  bool change_pending() const noexcept;
+  void publish(std::unique_ptr<Graph> graph);
+  /**
+   * An edit's level (`level_mailbox.h`): whether `graph` will be sent one,
+   * decided before it is published; what is owed once it is; and working it
+   * out after, on the music just heard (`level_prediction.h`), until nothing
+   * is owed. A prediction that fails is logged and sent as nothing to go on:
+   * the level is then found the old way, never held back.
+   */
+  void open_level_prediction();
+  bool plan_level(const Chain& chain, Graph& graph);
+  void owe_level(const Chain& chain, bool owed);
+  void settle_level();
+  void accept_level(const Chain& chain, uint64_t heard_frames);
+  void reclaim();
+  void log_chain(const Chain& chain, const Graph& graph, bool owner_present);
+  /** No link means the link could not run: then FluidEQ counts as present. */
+  bool owner_present() const noexcept;
+  /**
+   * Tell the app what this output is doing — `status_file.h`. `locked` is
+   * false only from `stop()`. Never throws; a file that cannot be written
+   * is logged once and otherwise changes nothing about the audio.
+   */
+  void report_status(bool locked) noexcept;
+  /**
+   * One log line when the output's slowest block has climbed a step of
+   * `timing_step` since the last — the moment a report needs, written as it
+   * happens rather than only when the stream ends.
+   */
+  void log_timing() noexcept;
+  /**
+   * Tell the output's leveling which song is playing — `programme.h`. True
+   * when that finished a named song, which the status file then carries for
+   * the app to remember. Never throws.
+   */
+  bool follow_programme() noexcept;
+  /**
+   * Tell this instance which second output it plays or feeds — `split_file.h`.
+   * True when the status should say so. Never throws.
+   */
+  bool follow_split(bool owner) noexcept;
+  SourceAnalysis read_source(bool owner);
+
+  GraphSlot& slot_;
+  Log& log_;
+  const Endpoint endpoint_;
+  const std::wstring config_dir_;
+  const uint32_t sample_rate_;
+  const uint32_t channels_;
+  const uint32_t max_frames_;
+  /**
+   * The stream's channel mask (0 for a plain format); every graph this
+   * builds is told, and reads the subwoofer feed and the room's speakers
+   * from it.
+   */
+  const unsigned long channel_mask_;
+  std::atomic<SplitTap*>* const split_slot_;
+  const bool default_mode_;
+  std::unique_ptr<SplitTap> split_;
+  std::unique_ptr<AnalysisLink> analysis_;
+  // The voice model, hashed once and then held open (`read_source`): every
+  // reload of every output re-read and re-hashed its ten megabytes before
+  // the "nothing changed" check, so each drag step paid for it. Held without
+  // write or delete sharing, the file cannot change while it is held. Null
+  // until a model passes; `voice_refused_` is the size and write time of
+  // one that did not, so the same file is not hashed again.
+  std::shared_ptr<void> voice_guard_;
+  std::optional<std::pair<uint64_t, uint64_t>> voice_refused_;
+  // The output's, shared with every instance locked on it and kept across
+  // locks (`leveling_board.h`). Null only if it could not be allocated, and
+  // then leveling forgets with each chain, as it always used to.
+  std::shared_ptr<Leveling> leveling_;
+  // The music as it reaches the EQ, and what replays it through each new EQ
+  // as that EQ starts to play. Null if either could not be allocated: every
+  // edit's level is then found the old way.
+  std::shared_ptr<InputHistory> history_;
+  std::unique_ptr<LevelPredictor> predictor_;
+  // Where each published graph's level is sent, and the number the last one
+  // was published under (0 is never one).
+  LevelMailbox level_mailbox_;
+  uint32_t generation_ = 0;
+  // The level still to be worked out: the newest graph's, whose chain is
+  // judged against the one the predictor last accepted.
+  struct OwedLevel {
+    Chain chain;
+    uint32_t generation = 0;
+    // The history's frame count at its publish.
+    uint64_t published_at = 0;
+  };
+  std::optional<OwedLevel> owed_level_;
+  // The history's frame count at the first publish since the predictor last
+  // accepted a chain: from there the measured peaks are not that chain's.
+  uint64_t others_from_ = UINT64_MAX;
+  // The change notification `run()` waits on, while it watches the
+  // configuration directory itself; null otherwise (`change_pending`).
+  HANDLE change_armed_ = nullptr;
+  // The room's head as last read and parsed. A head is 600 kB of text and
+  // took 8.5 ms to parse, on every edit, for a file that changes only with
+  // the head size.
+  std::optional<std::string> room_head_text_;
+  std::optional<RoomHead> room_head_;
+  // Counts every change of `room_head_`, which is re-parsed in place, so its
+  // address cannot say whether it is the head a rack was built through.
+  uint64_t room_head_generation_ = 0;
+  // The graph published last, whose rack the next may keep running
+  // (`Graph`'s `rack_from`), and the head generation it was built through.
+  // Owned in `owned_`, which never frees the newest graph.
+  const Graph* rack_source_ = nullptr;
+  uint64_t rack_source_head_ = 0;
+
+  // Watcher-thread state (plus `load_initial`, which runs before the thread
+  // exists — never both at once).
+  std::vector<OwnedGraph> owned_;
+  std::string signature_;
+  bool have_signature_ = false;
+  std::vector<std::string> logged_ignored_;
+  std::string passthrough_reason_;
+  // False until the first chain is logged, so the first one always says
+  // which of the two states it is in rather than only saying so on a change.
+  bool have_passthrough_reason_ = false;
+
+  // What the last published graph does, for the status file.
+  bool last_processing_ = false;
+  bool last_owner_ = true;
+  std::vector<std::string> graph_problems_;
+  /** The last graph's `room_state()`, for the status. */
+  std::string room_state_ = "off";
+  /** The last graph's delay, stage by stage, and game mode, for the status. */
+  uint32_t latency_ = 0;
+  std::vector<std::pair<std::string, unsigned>> latency_parts_;
+  std::vector<std::string> latency_active_;
+  bool game_mode_ = false;
+  Graph::SourceReport source_report_;
+  bool source_invalid_ = false;
+  bool source_prepare_failed_ = false;
+  // The watcher's own problems: a reload that threw (the previous graph
+  // keeps running) until one works again, and a directory it cannot watch.
+  bool reload_failed_ = false;
+  bool unwatched_ = false;
+  // This instance's place among the output's in the status file.
+  StatusShare status_;
+  bool status_failure_logged_ = false;
+  // The step of the slowest block the log last said — `log_timing`.
+  uint32_t timing_step_logged_ = 0;
+
+  HANDLE stop_event_ = nullptr;
+  // Auto-reset: one wake per request, and a request that arrives while a
+  // rebuild is already running is served by the next wait rather than lost.
+  HANDLE reset_event_ = nullptr;
+  // Auto-reset: the audio thread asking for the status to be written again
+  // — `say_it_carried`, `say_it_was_slow`, `graph_adopted`.
+  HANDLE status_event_ = nullptr;
+  // Auto-reset, set by the audio thread when the second output it plays
+  // changes state — `split_wake`. Null where there is no split part.
+  HANDLE split_event_ = nullptr;
+  HANDLE thread_ = nullptr;
+
+  // Whether FluidEQ is running — see `owner_link.h`. Without it the engine
+  // passes every endpoint through untouched, whatever the files say: a
+  // configuration nobody is left running to take off again must not go on
+  // shaping somebody's audio.
+  std::shared_ptr<OwnerLink> owner_;
+  // Auto-reset, set by the link each time FluidEQ comes or goes.
+  HANDLE owner_event_ = nullptr;
+};
+
+}  // namespace fluideq_engine
+
+#endif  // FLUIDEQ_ENGINE_WATCHER_H

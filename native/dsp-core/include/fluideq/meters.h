@@ -1,0 +1,459 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * What the panel draws, measured where the audio actually is.
+ *
+ * The displays in the DSP panel — the spectrum behind the EQ curve, the
+ * exciter's own band, the master graph, the goniometer and the phase needle —
+ * were fed by `AnalyserNode`s hanging off the Web Audio graph. That worked for
+ * exactly as long as the Web Audio graph was the thing making the sound. Once
+ * the native engine became audible the elements are muted, no signal reaches
+ * those nodes, and every one of those displays reads silence while the music
+ * plays. Reported from a listening session as "I hear it but the graph is not
+ * moving", which is precisely what it is.
+ *
+ * The fix is not to keep the TypeScript chain running so the meters have
+ * something to look at — that is the double CPU cost `standDown` exists to
+ * avoid, and it would draw a picture of a chain nobody is listening to. The
+ * engine doing the work has to report what it did.
+ *
+ * ## What runs where, and why it matters
+ *
+ * `feq_meters_capture` is called from the audio callback and does the least
+ * possible: a windowed copy and a few running sums. It allocates nothing, takes
+ * no lock and computes no transform. A 2048-point FFT costs tens of
+ * microseconds and there are three of them; on a device with a 10 ms period
+ * that is affordable right up until it is not, and a meter that can cause a
+ * dropout is a worse bug than a meter that does not move.
+ *
+ * So the transform happens in `feq_meters_read_spectrum`, which the host calls
+ * from its control thread. The two are joined by a seqlock per stage: the audio
+ * thread publishes a completed window without ever waiting, and a reader that
+ * catches a window mid-write notices and retries rather than drawing a frame
+ * spliced out of two different moments.
+ *
+ * ## Matching what it replaces
+ *
+ * The numbers are chosen to agree with the `AnalyserNode` this stands in for,
+ * because the graphs were drawn and tuned against it: a 2048-point transform,
+ * 1024 bins, a Blackman window, magnitudes divided by the transform size, and
+ * the same 0.8 smoothing applied between frames. A spectrum that is correct but
+ * differently scaled would land as every graph in the app changing shape on the
+ * day the engine changed, which is indistinguishable from a bug.
+ *
+ * The EQ tap keeps the scale and drops the rest: its graph is drawn like the
+ * main graph's analyser now, so it is sent the window ending now, unsmoothed,
+ * and a long one for the bass (`meters_eq_live.h`).
+ */
+#ifndef FLUIDEQ_METERS_H
+#define FLUIDEQ_METERS_H
+
+#include <stdint.h>
+
+#include "fluideq/deesser.h"
+#include "fluideq/denoise.h"
+#include "fluideq/footsteps.h"
+#include "fluideq/loudness_meter.h"
+#include "fluideq/room.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** The transform size, matching `analyser.fftSize` in `graph.ts`. */
+#define FEQ_METER_WINDOW 2048
+/** Half of it, matching `analyser.frequencyBinCount`. */
+#define FEQ_METER_BINS 1024
+/**
+ * The EQ tap's long window, for the bottom octaves' detail: 2.9 Hz bins at
+ * 48 kHz where the short window's are 23 Hz. The main graph reads its own
+ * bass from a window this size (`lowBandFftSize` in `liveGraphBand.ts`).
+ */
+#define FEQ_METER_DETAIL_WINDOW 16384
+/**
+ * How many of the long window's bins the panel is sent: the bottom eighth of
+ * the band, to 6 kHz at 48 kHz. The graph reads the long window up to an
+ * octave past where the short one takes over, which is 4.9 kHz at its
+ * twenty-fourth of an octave; above that the long window is never asked.
+ */
+#define FEQ_METER_DETAIL_BINS 2048
+/**
+ * Sample pairs kept for the goniometer.
+ *
+ * The worklet sends every fourth pair of a ~2048-sample report for a display
+ * three centimetres across; this keeps a comparable number for the same reason.
+ * Two thousand dots on that box is a filled square, not a shape.
+ */
+#define FEQ_METER_SCOPE_PAIRS 256
+
+/**
+ * The taps, in the order the audible chain passes them.
+ *
+ * Three rather than the six `DSP_OUTPUT_INDEX` names, because three are all the
+ * renderer ever reads: `DspEqGraph` and `DspPhaseMeter` want `eq`,
+ * `DspExciterGraph` wants `exciter`, `DspMasterGraph` wants `master`. Capturing
+ * the other three would be work done every block for a picture nobody draws.
+ */
+/*
+ * These are bit positions in `stage_mask`, so `denoise` is appended rather
+ * than placed where the stage actually runs. Inserting it at the front would
+ * renumber the three taps a running host already publishes and feed every
+ * graph its neighbour's spectrum. Matches `ANALYSIS_STAGES` in
+ * `analysisWire.ts`, which is append-only for the same reason.
+ */
+typedef enum FeqMeterStage {
+  FEQ_METER_STAGE_EXCITER = 0,
+  FEQ_METER_STAGE_EQ = 1,
+  FEQ_METER_STAGE_MASTER = 2,
+  FEQ_METER_STAGE_DENOISE = 3,
+  FEQ_METER_STAGE_COUNT = 4
+} FeqMeterStage;
+
+/**
+ * The most EQ bands whose activity is reported. Matches the rack's ceiling.
+ */
+#define FEQ_METER_MAX_BANDS 64
+
+/** The exciter has three bands, and the display shows three lights. */
+#define FEQ_METER_EXCITER_BANDS 3
+
+/**
+ * Bass Forge's band count, mirrored here rather than included.
+ *
+ * `meters.h` is pulled in by every stage in the rack and by the host; taking
+ * `bass_forge.h` for one integer would drag `harmonics.h` and `biquad.h`
+ * behind it into all of them. `meters.cpp` includes the real header and pins
+ * the two equal with a `static_assert`, so the copy cannot drift silently.
+ */
+#define FEQ_METER_BASS_FORGE_BANDS 8
+
+typedef struct FeqMeters FeqMeters;
+void feq_meters_publish_room(FeqMeters* meters, const FeqRoomReport* report);
+void feq_meters_read_room(const FeqMeters* meters, FeqRoomReport* report);
+
+FeqMeters* feq_meters_create(uint32_t channels);
+void feq_meters_destroy(FeqMeters* meters);
+
+/**
+ * Off by default, and genuinely free while off.
+ *
+ * The panel is one tab of several and is usually closed. `capture` returns on
+ * its first branch when this is clear, so a user who never opens the DSP tab
+ * pays nothing for the machinery that draws it.
+ */
+void feq_meters_set_enabled(FeqMeters* meters, int enabled);
+int feq_meters_enabled(const FeqMeters* meters);
+
+/**
+ * Tell the meters how fast their windows will arrive, so decay matches.
+ *
+ * `AnalyserNode` applies its 0.8 smoothing on every call to
+ * `getFloatFrequencyData` — which the graphs make once per animation frame, so
+ * sixty times a second. These publish one window per `FEQ_METER_WINDOW`
+ * samples, about twenty-three times a second at 48 kHz. The same coefficient
+ * at less than half the rate is a decay that takes more than twice as long,
+ * and it is visible: reported as the graphs having "slow release" on the
+ * native engine compared to the TypeScript one.
+ *
+ * So the coefficient is derived from the rate rather than copied. Call it
+ * whenever the device rate changes; until it is called, 48 kHz is assumed.
+ */
+void feq_meters_set_sample_rate(FeqMeters* meters, double sample_rate);
+
+/**
+ * Take one block at one stage. **Audio thread.**
+ *
+ * Real-time safe in the strict sense: no allocation, no lock, no OS call, no
+ * transform. Down-mixes to mono for the spectrum the same way `AnalyserNode`
+ * does, and at the master stage also keeps the sample pairs and running sums
+ * the scope and the phase needle are drawn from.
+ */
+void feq_meters_capture(FeqMeters* meters,
+                        uint32_t stage,
+                        const float* const* channels,
+                        uint32_t frames);
+
+/**
+ * Magnitudes in dB for one stage, into `out_db`. **Control thread.**
+ *
+ * Returns 0 when no new window has been published since the last read, so the
+ * host can skip sending a frame that would repaint the same picture. `bins`
+ * must be `FEQ_METER_BINS`.
+ *
+ * The EQ tap answers differently from the others: the window ending NOW,
+ * unsmoothed, whenever audio has arrived since the last read
+ * (`meters_eq_live.h`). Its graph
+ * draws its own ballistics; the other taps keep one smoothed window in every
+ * `FEQ_METER_WINDOW` samples.
+ */
+int feq_meters_read_spectrum(FeqMeters* meters,
+                             uint32_t stage,
+                             float* out_db,
+                             uint32_t bins);
+
+/**
+ * The EQ tap's long window, its lowest `FEQ_METER_DETAIL_BINS` bins in dB on
+ * the same scale as the spectra, unsmoothed. **Control thread.**
+ *
+ * Returns 0 when less than a fortieth of a second has arrived since the
+ * last read. `bins` must be `FEQ_METER_DETAIL_BINS`.
+ */
+int feq_meters_read_eq_detail(FeqMeters* meters,
+                              float* out_db,
+                              uint32_t bins);
+
+/**
+ * The goniometer's pairs, the correlation and the peaks. **Control thread.**
+ *
+ * `out_pairs` receives `pairs * 2` floats, interleaved left, right. Returns 0
+ * when nothing new has been published.
+ *
+ * Correlation is +1 for identical channels, 0 for unrelated, negative for
+ * content that will partly cancel when summed to mono — the same convention
+ * the worklet reports, so the needle does not change meaning with the engine.
+ */
+int feq_meters_read_scope(FeqMeters* meters,
+                          float* out_pairs,
+                          uint32_t pairs,
+                          double* out_correlation,
+                          float* out_peaks);
+
+/**
+ * What each EQ band is currently applying, and what it is hearing.
+ * **Audio thread.**
+ *
+ * `amounts` is 0 to 1 per band — always 1 for a static band, which is what
+ * makes it static — and `levels` is each band's own detected envelope **in dB**,
+ * floored at -120, which is the quantity its threshold is compared against.
+ *
+ * dB and not the linear envelope the detector holds, because `DspEqGraph` plots
+ * this against `thresholdDb` on a decibel scale and fades the line out below
+ * the spectrum floor. Handed the raw envelope it read 0.25 as "0.25 dB": never
+ * below the floor, so never faded, and pinned just under 0 dB whatever the band
+ * was hearing. The worklet converted before sending and this has to as well.
+ *
+ * Reported at all because a dynamic band is the one control in the rack whose
+ * effect cannot be drawn from its settings. The curve is drawn at full strength
+ * and its at-rest twin at zero, and neither moves when the threshold does — so
+ * without this the threshold dial looks broken while working perfectly. The
+ * worklet used to send these; it no longer processes anything, so the engine
+ * that does has to.
+ */
+void feq_meters_publish_bands(FeqMeters* meters,
+                              const double* amounts,
+                              const double* levels,
+                              uint32_t count);
+
+/**
+ * The exciter three bands and its organic stage. **Audio thread.**
+ *
+ * Four numbers rather than a window, because that is all the display is: three
+ * band contributions and one organic mix, each already a block mean.
+ */
+void feq_meters_publish_exciter(FeqMeters* meters,
+                                const double* bands,
+                                double organic);
+
+/** What the Maximizer is holding down, in dB. **Audio thread.** */
+void feq_meters_publish_maximizer(FeqMeters* meters, double reduction_db);
+
+/**
+ * How loud the output is, by BS.1770. **Audio thread.**
+ *
+ * The one reading the Master page could not take. It offered a loudness target
+ * and then had no way to say whether the chain was reaching it — the only LUFS
+ * on the page was the number the user had dialled, beside a spectrum that says
+ * nothing about level. A target with no meter is a setting that cannot be
+ * checked, which is how it came to apply exactly zero decibels to every track
+ * without anybody seeing.
+ */
+void feq_meters_publish_loudness(FeqMeters* meters,
+                                 const FeqLoudnessReading* reading);
+
+/**
+ * The published loudness. **Control thread.** Not cleared: it integrates.
+ *
+ * `out_loudness` receives four floats: momentary, short term, integrated, and
+ * the range in LU.
+ */
+void feq_meters_read_loudness(FeqMeters* meters, float* out_loudness);
+
+/** How much widening Dimension is allowing, 0 to 1. **Audio thread.** */
+void feq_meters_publish_dimension(FeqMeters* meters, double guard);
+
+/** The published Dimension guard. **Control thread.** */
+void feq_meters_read_dimension(FeqMeters* meters, float* out_guard);
+
+/** The published Maximizer reduction. **Control thread.** */
+void feq_meters_read_maximizer(FeqMeters* meters, float* out_reduction_db);
+
+/**
+ * What the Master's Auto Headroom did to this block.
+ *
+ * The numbers the Master card prints used to arrive in the worklet's
+ * `outputSafety` message. The worklet is a passthrough now and posts nothing,
+ * so they sat at their construction defaults for the life of the app while
+ * the C++ chain measured them and threw them away:
+ * `feq_post_filter_normalizer_take_telemetry` was compiled and called by
+ * nobody. A Master showing "Auto headroom 0.0 dB" while it is holding the
+ * signal down six decibels is worse than one showing nothing, because it is a
+ * measurement and it is wrong.
+ */
+typedef struct FeqMasterTelemetry {
+  /** Auto Headroom's deepest gain over the window, dB. Never positive. */
+  double auto_headroom_reduction_db;
+  /** What Auto Headroom saw arriving, dBTP. */
+  double auto_headroom_true_peak_db;
+} FeqMasterTelemetry;
+
+/**
+ * Fold one block's Master readings into the window. **Audio thread.**
+ *
+ * Folded rather than stored, because the reader runs at about a fifth of the
+ * rate this is called at: the deepest reduction and the highest peak in a
+ * window are what the meter is for, and storing only the last block would drop
+ * four blocks in five and miss precisely the transient that caused the
+ * reduction being displayed.
+ */
+void feq_meters_publish_master(FeqMeters* meters,
+                               const FeqMasterTelemetry* telemetry);
+
+/**
+ * The folded window, cleared as it is taken. **Control thread.**
+ *
+ * Cleared here rather than decayed, matching the interval the worklet reported
+ * over: the next window has to be able to say "nothing happened", and a hold
+ * that survives its own read cannot.
+ */
+void feq_meters_read_master(FeqMeters* meters, FeqMasterTelemetry* out);
+
+/**
+ * The Normalizer's before and after peaks, and the gain between them.
+ * **Audio thread.**
+ *
+ * Peak-with-release rather than peak-per-window, and the release is computed
+ * from `frames` and the device rate here rather than applied by the reader.
+ * The worklet decayed these once per report interval, which only holds while
+ * the reader's cadence is fixed; the host's is not — it skips a frame whenever
+ * no stage published a window. Deriving it from the block keeps the fall time
+ * the same 350 ms it has always been however often the panel asks.
+ */
+void feq_meters_publish_normalizer(FeqMeters* meters,
+                                   const double* input_peaks,
+                                   const double* output_peaks,
+                                   double applied_gain_db,
+                                   uint32_t frames,
+                                   double sample_rate);
+
+/** The held Normalizer peaks. **Control thread.** Not cleared: they decay. */
+void feq_meters_read_normalizer(FeqMeters* meters,
+                                float* out_input_peaks,
+                                float* out_output_peaks,
+                                float* out_applied_gain_db);
+
+/**
+ * Bass Forge's eight band levels, before and after it ran. **Audio thread.**
+ *
+ * Both runs, because the graph draws the generated content as the area
+ * BETWEEN them. Sent as levels in dBFS rather than as a difference so the
+ * card can show where the stage is working as well as how much it made — a
+ * single delta curve cannot say whether 6 dB appeared at 40 Hz or at 400.
+ *
+ * Measured by band-pass envelope followers rather than by a transform: the
+ * eight are sixteen biquads on a signal already in the buffer, where an FFT
+ * per block is tens of microseconds of work on the audio thread for a picture
+ * eight points wide.
+ */
+void feq_meters_publish_bass_forge(FeqMeters* meters,
+                                   const double* input_db,
+                                   const double* output_db);
+
+/**
+ * The published Forge bands, `FEQ_METER_BASS_FORGE_BANDS` each.
+ * **Control thread.**
+ */
+void feq_meters_read_bass_forge(FeqMeters* meters,
+                                float* out_input_db,
+                                float* out_output_db);
+
+/**
+ * What Bass Punch is applying, in dB of gain. **Audio thread.**
+ *
+ * Gains and not levels, so the resting value is 0 dB. The stage's whole claim
+ * is that the transient and the sustain are shaped independently and that
+ * over a complete note the two average to unity; three numbers on a scrolling
+ * strip are what let that be watched rather than taken on trust.
+ */
+void feq_meters_publish_bass_punch(FeqMeters* meters,
+                                   double transient_db,
+                                   double sustain_db,
+                                   double duck_db);
+
+/**
+ * The published Punch gains. **Control thread.**
+ *
+ * The transient is the window's largest excursion either way and is CLEARED
+ * as it is taken; the sustain and the duck are the latest block's and are not.
+ * Publishing runs at about 94 blocks a second and this is called about 23
+ * times, so three blocks in four go unseen: measured through the real host, a
+ * stored transient read 0.0 dB in every one of 69 frames while the same signal
+ * read every block reached 7.6. The other two are slow envelopes and came
+ * through that same run at 9.0 and 6.0 dB, so they lose nothing by being
+ * sampled and keep the shape a scrolling strip is drawn from.
+ */
+void feq_meters_read_bass_punch(FeqMeters* meters,
+                                float* out_transient_db,
+                                float* out_sustain_db,
+                                float* out_duck_db);
+
+/**
+ * What the De-esser cut, where, and how sure it was that it was a voice.
+ * **Audio thread.** Folded over the window: the deepest cut and the band
+ * levels at their extremes, the thresholds as last measured.
+ */
+void feq_meters_publish_deesser(FeqMeters* meters,
+                                const FeqDeEsserReport* report);
+
+/** The folded window, cleared as it is taken. **Control thread.** */
+void feq_meters_read_deesser(FeqMeters* meters, FeqDeEsserReport* out);
+
+/**
+ * What Footsteps lifted and calmed, and what it heard. **Audio thread.**
+ * Folded over the window: the largest lifts, the deepest calm, the loudest
+ * levels, the bed as last measured.
+ */
+void feq_meters_publish_footsteps(FeqMeters* meters,
+                                  const FeqFootstepsReport* report);
+
+/** The folded window, cleared as it is taken. **Control thread.** */
+void feq_meters_read_footsteps(FeqMeters* meters, FeqFootstepsReport* out);
+
+/** The published exciter activity. **Control thread.** */
+void feq_meters_read_exciter(FeqMeters* meters,
+                             float* out_bands,
+                             float* out_organic);
+
+/** The published band activity. **Control thread.** Returns the band count. */
+uint32_t feq_meters_read_bands(FeqMeters* meters,
+                               float* out_amounts,
+                               float* out_levels,
+                               uint32_t capacity);
+
+/* Live source measurements, separate from the output loudness meter. */
+void feq_meters_publish_live_input(FeqMeters* meters, double peak_db, double lufs,
+                                 double reference_lufs, int level_state, double output_lufs);
+/* Five words: peak, input LUFS, reference LUFS, state, output LUFS. */
+void feq_meters_read_live_input(FeqMeters* meters, float* values);
+
+/** Audio-thread publication; the display reader never follows a retired chain. */
+void feq_meters_publish_denoise(FeqMeters* meters, const FeqDenoiseReport* report);
+void feq_meters_read_denoise(const FeqMeters* meters, FeqDenoiseReport* report);
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FLUIDEQ_METERS_H */

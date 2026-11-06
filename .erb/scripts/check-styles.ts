@@ -1,0 +1,134 @@
+/**
+ * Compile every stylesheet, and say which one does not.
+ *
+ * Sass is the one language in this repo nothing checks. `pnpm typecheck` does
+ * not see it, jest does not import it, and prettier will happily format a file
+ * that cannot compile — so a broken rule passes every gate in the runbook and
+ * turns up as something looking wrong in the window, which is the most
+ * expensive place to find it.
+ *
+ * That is not hypothetical. `$radius-xl` was used in GraphTheme.scss, which
+ * imports `color` and not `theme`; Sass threw the whole declaration away and
+ * the graph's corners stayed square through several rounds of "still not
+ * rounded". Two seconds of compiling would have said so.
+ *
+ * Partials are skipped: a file beginning with `_` is meant to be used from
+ * somewhere else and is not expected to stand alone. Everything else is a real
+ * entry point, imported by a component, and has to build on its own.
+ */
+
+import { compile } from 'sass';
+import { readdirSync, readFileSync } from 'fs';
+import path from 'path';
+
+const STYLES_DIR = path.join(
+  __dirname,
+  '..',
+  '..',
+  'src',
+  'renderer',
+  'styles',
+);
+
+const failures: string[] = [];
+
+/**
+ * Every stylesheet under the styles folder, subfolders included, by its path
+ * from it. The scans below used to read the folder alone, and the classic
+ * amp's sixteen partials in 'ampClassic/' shipped with neither rule checked.
+ */
+const ALL_SHEETS = (
+  readdirSync(STYLES_DIR, { recursive: true, encoding: 'utf8' }) as string[]
+)
+  .filter((name) => name.endsWith('.scss'))
+  .map((name) => name.split(path.sep).join('/'));
+
+readdirSync(STYLES_DIR)
+  .filter((name) => name.endsWith('.scss') && !name.startsWith('_'))
+  .forEach((name) => {
+    try {
+      compile(path.join(STYLES_DIR, name), {
+        loadPaths: [STYLES_DIR],
+        // Third-party deprecations are not this check's business; it is looking
+        // for stylesheets that do not build.
+        quietDeps: true,
+      });
+    } catch (error) {
+      failures.push(`${name}\n${(error as Error).message}`);
+    }
+  });
+
+if (failures.length > 0) {
+  console.error(
+    `\n${failures.length} stylesheet(s) failed to compile:\n\n${failures.join('\n\n')}\n`,
+  );
+  process.exit(1);
+}
+
+// A raw numeric font-weight is the one typographic mistake nothing else here
+// can see.
+//
+// Compiling proves a rule builds, not that it renders as intended, and jest
+// queries by role and never looks at a face. So the app quietly grew eighteen
+// distinct weight literals — 650, 680, 720, 730, 750, 760, 780, 820, 840, 850,
+// 880, 950 among them — that measured as four faces in the running window,
+// with everything from 800 up landing on `Segoe UI Black`. Every one of those
+// passed the whole suite; the titlebar tabs shipped looking flattened.
+//
+// Only the theme (`_themeTokens.scss`, forwarded by `_theme.scss`) may state
+// a weight as a number, because that is where the scale is defined — and `@font-face`, where `font-weight: 100 900` is not a
+// weight at all but the range of the variable axis, and has to be two numbers.
+// That pair is the reason the test below looks for a number with no second
+// number after it rather than simply for a digit.
+/** The theme's own files, where the scale and `tracking()` are defined. */
+const isTheme = (name: string) => /^_theme(Tokens|Mixins)?\.scss$/.test(name);
+
+const weightOffenders: string[] = [];
+
+ALL_SHEETS.filter((name) => !isTheme(name)).forEach((name) => {
+  readFileSync(path.join(STYLES_DIR, name), 'utf8')
+    .split('\n')
+    .forEach((line, index) => {
+      const match = /font-weight:\s*(\d+)(?!\s*\d)/.exec(line);
+      if (match) {
+        weightOffenders.push(`${name}:${index + 1}  font-weight: ${match[1]}`);
+      }
+    });
+});
+
+if (weightOffenders.length > 0) {
+  console.error(
+    `\n${weightOffenders.length} raw font-weight value(s) — use the $weight-* scale in _theme.scss:\n\n${weightOffenders.join('\n')}\n`,
+  );
+  process.exit(1);
+}
+
+// A raw positive letter-spacing is the other one. Tracking is a Latin habit:
+// on Devanagari it pulls a word's vowel signs and conjuncts apart, and the
+// Hindi card labels read as rows of loose letters while every test passed.
+// `@include tracking()` from the theme applies it only in the languages
+// whose script takes it, so that is the one way to write it. Zero, `normal`,
+// `inherit` and negative values stay allowed: none of them spreads a word.
+const trackingOffenders: string[] = [];
+
+ALL_SHEETS.filter((name) => !isTheme(name)).forEach((name) => {
+  readFileSync(path.join(STYLES_DIR, name), 'utf8')
+    .split('\n')
+    .forEach((line, index) => {
+      const match = /letter-spacing:\s*(\d*\.?\d+)(em|rem|px)\b/.exec(line);
+      if (match && Number.parseFloat(match[1]) > 0) {
+        trackingOffenders.push(`${name}:${index + 1}  ${line.trim()}`);
+      }
+    });
+});
+
+if (trackingOffenders.length > 0) {
+  console.error(
+    `\n${trackingOffenders.length} raw positive letter-spacing value(s) — use @include tracking() from _theme.scss:\n\n${trackingOffenders.join('\n')}\n`,
+  );
+  process.exit(1);
+}
+
+console.log(
+  `All stylesheets compile, every font-weight uses the scale, and every letter-spacing goes through tracking().`,
+);

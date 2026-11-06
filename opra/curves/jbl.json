@@ -1,0 +1,1 @@
+{"tour_one_m2":{"jbl:tour_one_m2::autoeq_rtings":{"gainDb":-4.6,"bands":[{"type":"low_shelf","frequency":105,"gain_db":-1.2,"q":0.71},{"type":"peak_dip","frequency":240,"gain_db":-2.1,"q":1.1},{"type":"peak_dip","frequency":3200,"gain_db":2.8,"q":2.0},{"type":"high_shelf","frequency":10000,"gain_db":-1.4,"q":0.71}]}}}

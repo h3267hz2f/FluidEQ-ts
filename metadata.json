@@ -1,0 +1,5 @@
+{
+  "name": "FluidEQ 2.1",
+  "description": "System-wide parametric equalizer, 11-stage studio DSP rack, OPRA headphone correction library, 7.1 binaural Room engine, and real-time audio analyzer.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,296 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * Reading Equalizer APO's own config layout back, for one output device.
+ *
+ * FluidEQ writes `config.txt -> Include: fluideq.txt`, and fluideq.txt is a
+ * tree of `Device:`-gated blocks that each `Include:` a handful of
+ * feature files (see `apoConfigReader.ts`, which reads the same tree from the
+ * app process). The system-wide effect has no app process to ask, so it has
+ * to walk that tree itself, from inside audiodg.exe, every time Windows
+ * creates it for an endpoint. This header is that walk, isolated from
+ * anything Windows-specific so it can be unit tested off-target: no COM, no
+ * registry, no file system — a caller hands it bytes through `FileProvider`
+ * and gets back the chain that applies to one endpoint.
+ *
+ * Deliberately never throws: `resolve_chain` runs on a load path a broken or
+ * hand-edited config must not be able to bring down, so every failure mode
+ * (a missing file, a malformed line, a config that loops) is a value in
+ * `Chain`, never an exception.
+ */
+#ifndef FLUIDEQ_ENGINE_CONFIG_H
+#define FLUIDEQ_ENGINE_CONFIG_H
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace fluideq_engine {
+
+// The seven band shapes Equalizer APO's `Filter:` line can name, after
+// folding its type aliases (PEQ/MODAL -> PK, LS/LSQ -> LSC, and so on) the
+// way `apoText.ts`'s TYPE_ALIASES table does.
+enum class FilterType { PK, NO, LSC, HSC, LPQ, HPQ, BP };
+
+/**
+ * The channels a `Channel:` line chose for the filters after it.
+ *
+ * Equalizer APO's grammar: `all`, or a list of speaker names and 1-based
+ * channel numbers in any mix. FluidEQ writes `L` and `R` for a band kept to
+ * one ear (Ivan, 2026-10-13, "EQ per channel") and `all` after them. Names
+ * are kept by speaker, never by place in the stream, because the same `L`
+ * is channel 1 of a stereo stream and of a 7.1 one only by luck of the mask:
+ * `selected_channels` reads them against the stream's own layout.
+ */
+struct ChannelSelection {
+  bool all = true;
+  /**
+   * Speakers in `speaker_of_channel`'s numbering — 0 FL, 1 FR, 2 C, 3 SL,
+   * 4 SR, 5 RL, 6 RR — and `kLowFrequencySpeaker` for the subwoofer feed.
+   */
+  uint32_t speakers = 0;
+  /** Channels by their place in the stream: bit 0 is `1`. */
+  uint32_t indices = 0;
+};
+
+/** The subwoofer feed's bit in `ChannelSelection::speakers`. */
+constexpr uint32_t kLowFrequencySpeaker = 7;
+
+struct Band {
+  FilterType type;
+  double frequency;
+  double gain_db;
+  double quality;
+  bool user_eq = false;
+  bool curve_layer = false;
+  /**
+   * Built analog-matched (`feq_biquad_coefficients_matched`) rather than from
+   * the cookbook: FluidEQ's own bands, which were drawn on a graph of the
+   * analog shape. Headphone corrections leave it off — AutoEQ and the graph
+   * tools fit their filters with the cookbook itself, at 44.1 or 48 kHz, so
+   * the cookbook is what plays them back as fitted (0.14 dB from the fit on a
+   * BlackShark correction, against 0.89 dB matched).
+   */
+  bool matched = false;
+  /** The channels it plays on: the `Channel:` line in force above it. */
+  ChannelSelection channels{};
+};
+
+struct GraphicPoint {
+  double frequency;
+  double gain_db;
+};
+
+/**
+ * The most one configuration may ask of the engine. The config folder is
+ * writable by every user and is read by audiodg: each band is a biquad per
+ * sample per channel on the audio thread, and one 4 MiB file holds a hundred
+ * thousand `Filter:` lines — enough to miss every deadline on the output for
+ * as long as it stays written. What FluidEQ writes comes to 45 bands (a
+ * correction, a preset and a Smart EQ) plus somebody's own; 256 leaves an
+ * Equalizer APO user's long list room. A GraphicEQ line is 127 points from
+ * AutoEQ and a few thousand from REW; its cost is paid on the watcher thread,
+ * where `Watcher::stop` waits for it with no way to cut it short.
+ */
+constexpr size_t kMaxChainBands = 256;
+constexpr size_t kMaxGraphicCurves = 32;
+constexpr size_t kMaxGraphicPoints = 16384;
+
+/** Everything Equalizer APO would apply to one endpoint, once resolved. */
+struct Chain {
+  // Empty when no `Convolution:` line applied. Absolute: a relative one on
+  // disk has already been joined to the config directory.
+  std::wstring convolution_path;
+  uint32_t convolution_passes = 1;
+  /**
+   * Every `GraphicEQ:` line that applied, one curve each, in file order.
+   *
+   * Kept side by side rather than each line replacing the last. FluidEQ
+   * writes one per layer — the driver type, a headphone correction published
+   * as a curve, the EQ itself in graphic mode — and Equalizer APO runs every
+   * one of them in series; keeping only the last dropped the others under
+   * this engine, with nothing anywhere to say so. `design_graphic_kernel`
+   * adds them in dB, which is the same response as running them in series,
+   * in one FIR with one delay.
+   */
+  std::vector<std::vector<GraphicPoint>> graphic_curves;
+  std::vector<std::vector<GraphicPoint>> comparison_curves;
+  std::vector<std::vector<GraphicPoint>> eq_graphic_curves;
+  bool minimum_curve_phase = true;
+  bool minimum_eq_phase = true;
+  /**
+   * The treble choice beside the phase ones: Classic keeps that group's
+   * bands on the cookbook even where their layer asks for the matched design
+   * — the way Equalizer APO plays them, narrower near the top. Read from
+   * `fluideq-eq-treble-<guid>.txt` and `fluideq-curve-treble-<guid>.txt`;
+   * absent means Precise, independently for each endpoint.
+   */
+  bool classic_eq_treble = false;
+  bool classic_curve_treble = false;
+  std::vector<Band> bands;
+  double preamp_db = 0.0;
+  bool auto_preamp = false;
+  /**
+   * Where Auto normalize starts: the `Preamp:` the app sized for this curve,
+   * 0 dB or below. With Auto normalize on, `preamp_db` is 0 and the output
+   * guard owns the level, beginning here and bringing the volume back up
+   * towards 0 dB as the music leaves room. It used to begin at 0 dB and only
+   * turn down, so the first loud hit of every song arrived over the ceiling
+   * and was crushed by the limiter before the level caught up — 7.7 dB deep
+   * on a loud rock master measured through this engine.
+   */
+  double auto_preamp_start_db = 0.0;
+  bool output_guard = false;
+  bool stable_graphic = false;
+  /**
+   * Game mode, asked for by the EQ side: `# FluidEQLowLatency: ON`, which the
+   * app writes into a device's configuration while its voicing is Games. The
+   * rack can ask for the same thing on its own wire (the Gaming preset); the
+   * graph honours either, for the whole path of that output, because the
+   * delay a player feels is the sum of every stage and not any one of them.
+   */
+  bool low_latency = false;
+  /**
+   * The DSP rack, exactly as `encodeChainSettings` wrote it.
+   *
+   * Read from `<config_dir>\fluideq-dsp-<guid>.txt`, which is not part of the
+   * Equalizer APO include tree above and is never named by an `Include:`
+   * line: it is one flat array of doubles the app rewrites on every rack
+   * change, and `feq_chain_settings_decode` on the other side is the only
+   * thing that knows what the numbers mean. Empty whenever the file is
+   * absent, empty, or carries a token that is not a plain decimal — all of
+   * which mean the rack is bypassed and the EQ below still runs.
+   *
+   * Deliberately NOT reflected in `matched`: its filename selects this
+   * endpoint even when the EQ include tree has no `Device:` block for it.
+   * A missing endpoint file never falls back to the old global rack.
+   */
+  std::vector<double> dsp_values;
+  // The first token of every line whose command this resolver does not
+  // recognise, deduplicated in the order first seen — the log needs to say
+  // what a hand-edited config carried that FluidEQ silently walked past.
+  std::vector<std::string> ignored;
+  // Every file actually opened while resolving this chain, in open order, as
+  // absolute paths. A file behind a `Device:` guard that never matched is
+  // never opened and so never appears here.
+  std::vector<std::wstring> files_read;
+  // True once some `Filter:`, `Preamp:`, `GraphicEQ:` or `Convolution:` line
+  // actually took effect for this endpoint. A config that only comments or
+  // only guards other devices leaves this false, which is the difference
+  // between "no work to do" and "a config that has nothing to say" — both
+  // return an otherwise-empty Chain.
+  bool matched = false;
+};
+
+struct Endpoint {
+  std::wstring guid;
+  std::wstring friendly_name;
+};
+
+/**
+ * `<stem>-<lowercase bare GUID>.txt`, or nothing for an invalid endpoint id.
+ * Accepts a canonical bare or braced GUID only. The caller supplies `stem`;
+ * an endpoint can never supply a directory or a partial filename.
+ */
+std::optional<std::wstring> endpoint_config_name(
+    std::wstring_view stem, const Endpoint& endpoint);
+
+/** Returns the file's bytes, or nullopt when unreadable. Paths are absolute. */
+using FileProvider =
+    std::function<std::optional<std::string>(const std::wstring& path)>;
+
+/**
+ * Resolve the chain Equalizer APO would apply to `endpoint`.
+ *
+ * Starts at `<config_dir>\config.txt` and follows every `Include:` a
+ * `Device:` guard currently allows, the same tree `apoConfigReader.ts` walks
+ * from the app side. Never throws: an absent config, a cycle, an escaping
+ * include, or a malformed line are all just a `Chain` with less in it, never
+ * a signal a caller has to catch.
+ *
+ * Include depth is capped at 8 open frames, the root `config.txt` counted as
+ * the first: an `Include:` line encountered while 8 frames are already open
+ * is skipped rather than followed, so the 8th frame (root + 7 levels of
+ * Include) is the deepest file this resolver ever opens.
+ */
+Chain resolve_chain(const std::wstring& config_dir, const Endpoint& endpoint,
+                    const FileProvider& read);
+
+/** One logical line of an APO config file: the label before `:`, and the rest. */
+struct Line {
+  std::string command;
+  std::string body;
+};
+
+/**
+ * Split one file's text into its command lines.
+ *
+ * Handles what `apoConfigReader.ts` never has to, because Node always hands
+ * it a decoded string: a UTF-16LE or UTF-8 byte-order mark, and `\r` in
+ * either position a line ending can put it (`\r\n`, or the legacy `\n\r`
+ * some generators still emit). Comments and blank lines are dropped here so
+ * every other function in this header only ever sees a real command.
+ */
+std::vector<Line> tokenize(std::string_view text);
+
+/**
+ * Parse a `Filter:` body: `ON <type> Fc <f> Hz [Gain <g> dB] (Q <q> | BW Oct <o>)`.
+ *
+ * Mirrors the `FILTER_LINE` regex in `apoText.ts`, including its type
+ * aliases, except `Q` and `BW Oct` are both accepted here rather than either
+ * being implied by omission, since Equalizer APO writes both forms in the
+ * wild. Rejects `OFF` bands, unknown types, non-positive frequency or
+ * quality, and any trailing token the grammar has no place for.
+ */
+std::optional<Band> parse_filter(std::string_view body);
+
+/**
+ * Parse a `GraphicEQ:` body: semicolon-separated `<frequency> <gain>` pairs.
+ *
+ * All-or-nothing, unlike the importer in `apoText.ts`, which keeps whatever
+ * points parse and drops the rest: a system-wide effect that silently plays
+ * back half the curve a user exported is a worse failure than one that
+ * refuses the whole line and leaves the previous chain in place.
+ */
+std::vector<GraphicPoint> parse_graphic(std::string_view body);
+
+/**
+ * Parse a `Channel:` body. A word or number it does not know is skipped, as
+ * Equalizer APO skips it; a body that names nothing it knows is every
+ * channel, because a line that selected nothing would silence the filters
+ * after it on every output — the one wrong answer that is not a no-op.
+ */
+ChannelSelection parse_channels(std::string_view body);
+
+/**
+ * Parse a DSP file: a `#` header line, then one line of doubles.
+ *
+ * All-or-nothing, for the same reason `parse_graphic` is: half a rack is a
+ * chain of stages the user never asked for, and a file this resolver could
+ * not read whole is one the app is in the middle of rewriting. Every token
+ * goes through `std::from_chars`, which is locale-free by construction —
+ * `strtod` on a machine whose locale uses a comma decimal separator reads
+ * `0.45` as `0`, silently, and the rack would simply sound wrong.
+ */
+std::vector<double> parse_dsp_values(std::string_view text);
+
+/**
+ * Whether a `Device:` pattern names `endpoint`.
+ *
+ * `all` always matches; otherwise the pattern matches the endpoint's GUID
+ * exactly (case-insensitive) or appears anywhere in its friendly name
+ * (case-insensitive, ASCII-only folding — the same rule Equalizer APO's own
+ * Device Selector applies).
+ */
+bool device_matches(std::string_view pattern, const Endpoint& endpoint);
+
+}  // namespace fluideq_engine
+
+#endif  // FLUIDEQ_ENGINE_CONFIG_H

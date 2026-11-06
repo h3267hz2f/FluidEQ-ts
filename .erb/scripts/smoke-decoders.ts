@@ -1,0 +1,230 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * Every container the library accepts, through the native decoder.
+ *
+ * The chain's own tests prove the arithmetic and `smoke-playback` proves the
+ * wiring, both on a WAV written by hand. Neither says anything about whether
+ * an MP3 opens — and until it does, the native engine cannot replace the
+ * TypeScript player for anyone with a real music folder, whatever the parity
+ * suite says.
+ *
+ * A decoder that reports the wrong duration or the wrong rate is the failure
+ * to watch for here, not one that crashes. A file that plays at 44.1 when it
+ * is 48 is a semitone and a half sharp and perfectly steady about it.
+ */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import path from 'path';
+import { findDspHostExecutable } from '../../src/main/dspHost/hostPath';
+import { DspHostSupervisor } from '../../src/main/dspHost/supervisor';
+import { NATIVE_DSP_PARAMETERS } from '../../src/common/dsp/nativeParameters';
+import { IHostTelemetry } from '../../src/main/dspHost/wire';
+
+let failures = 0;
+const check = (condition: boolean, what: string) => {
+  console.log(`  ${condition ? 'ok  ' : 'FAIL'} ${what}`);
+  if (!condition) {
+    failures += 1;
+  }
+};
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+/** A 16-bit stereo WAV, written by hand so the fixture owes nothing to a codec. */
+const writeWav = (file: string, rate: number, seconds: number, hz: number) => {
+  const frames = Math.round(rate * seconds);
+  const data = Buffer.alloc(frames * 4);
+  for (let at = 0; at < frames; at += 1) {
+    const value = Math.round(
+      Math.sin((2 * Math.PI * hz * at) / rate) * 0.5 * 32767,
+    );
+    data.writeInt16LE(value, at * 4);
+    data.writeInt16LE(value, at * 4 + 2);
+  }
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write('WAVE', 8, 'ascii');
+  header.write('fmt ', 12, 'ascii');
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(2, 22);
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 4, 28);
+  header.writeUInt16LE(4, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(data.length, 40);
+  writeFileSync(file, Buffer.concat([header, data]));
+};
+
+/**
+ * Headers that lie about their size. Each count in a WAV or AIFF header sizes
+ * an allocation, and the host used to take the file's word for it: a 4 GB
+ * `fmt ` chunk was allocated before it was read, and 65535 channels asked the
+ * decoder thread for 2 GB, where a failed allocation ends the host.
+ */
+const writeHostile = (file: string, kind: 'format' | 'channels' | 'common') => {
+  const tone = Buffer.alloc(4 * 4_410);
+  if (kind === 'common') {
+    const header = Buffer.alloc(12 + 8 + 18);
+    header.write('FORM', 0, 'ascii');
+    header.writeUInt32BE(header.length - 8, 4);
+    header.write('AIFF', 8, 'ascii');
+    header.write('COMM', 12, 'ascii');
+    header.writeUInt32BE(0xfffffff0, 16);
+    writeFileSync(file, header);
+    return;
+  }
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + tone.length, 4);
+  header.write('WAVE', 8, 'ascii');
+  header.write('fmt ', 12, 'ascii');
+  header.writeUInt32LE(kind === 'format' ? 0xfffffff0 : 16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(kind === 'channels' ? 65_535 : 2, 22);
+  header.writeUInt32LE(44_100, 24);
+  header.writeUInt32LE(44_100 * 4, 28);
+  header.writeUInt16LE(4, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(tone.length, 40);
+  writeFileSync(file, Buffer.concat([header, tone]));
+};
+
+const main = async (): Promise<void> => {
+  const executable = findDspHostExecutable();
+  if (!executable) {
+    console.error('decoder smoke: no host executable; run pnpm build first');
+    process.exit(2);
+  }
+  const scratch = mkdtempSync(path.join(tmpdir(), 'fluideq-decoders-'));
+  // Real encoder output rather than something this test wrote, which could be
+  // wrong about a format in the same way twice.
+  const repo = path.resolve(__dirname, '../..');
+  const wav = path.join(scratch, 'tone.wav');
+  writeWav(wav, 44_100, 3, 1_000);
+
+  const telemetry: IHostTelemetry[] = [];
+  const host = new DspHostSupervisor({
+    executablePath: executable,
+    expectedParameterCount: NATIVE_DSP_PARAMETERS.length,
+    onTelemetry: (frame) => telemetry.push(frame),
+  });
+  await host.start();
+  await host.setPlaying(true);
+
+  /**
+   * Loaded, played, and checked for a signal — not merely for an open.
+   *
+   * A decoder that opens a file and then returns silence forever is the
+   * failure that looks most like success: the transport advances, the
+   * position moves, and nothing comes out. So every case renders real blocks
+   * and asks the meter whether anything arrived.
+   */
+  const plays = async (file: string, label: string): Promise<void> => {
+    if (!existsSync(file)) {
+      check(false, `${label}: the fixture is missing`);
+      return;
+    }
+    if (!(await host.loadDeck(0, file))) {
+      check(false, `${label} opens`);
+      return;
+    }
+    check(true, `${label} opens`);
+    await host.seekDeck(0, 1);
+    await sleep(600);
+    telemetry.length = 0;
+    await host.runOfflineBlocks(600);
+    await sleep(250);
+    let peak = 0;
+    telemetry.forEach((frame) => {
+      peak = Math.max(peak, frame.peak[0], frame.peak[1]);
+    });
+    console.log(`       ${label}: peak ${peak.toFixed(4)}`);
+    check(peak > 0.001, `${label} produces audio rather than silence`);
+  };
+
+  console.log('containers');
+  await plays(wav, 'wav');
+
+  console.log('headers that lie');
+  const hostile: { kind: 'format' | 'channels' | 'common'; label: string }[] = [
+    { kind: 'format', label: 'a 4 GB fmt chunk' },
+    { kind: 'channels', label: '65535 channels' },
+    { kind: 'common', label: 'a 4 GB AIFF COMM chunk' },
+  ];
+  for (const { kind, label } of hostile) {
+    const file = path.join(scratch, `hostile-${kind}.wav`);
+    writeHostile(file, kind);
+    // eslint-disable-next-line no-await-in-loop -- one deck, one file at a time.
+    check(!(await host.loadDeck(0, file)), `${label} is refused`);
+  }
+  // The same host, still up: a refusal that took the process with it would
+  // read as refused above and then fail here.
+  await plays(wav, 'wav after the lying headers');
+
+  /**
+   * The rest, from fixtures generated by whatever encoder the machine has.
+   *
+   * Generated rather than committed: a repository is not the place for five
+   * more audio files, and an encoder is not a dependency of the build, only
+   * of this check. A machine without one skips them and says so, which is
+   * honest; silently reporting a pass for a format nothing tested is not.
+   *
+   * `pnpm fixtures:codecs` writes them. The paths are read, never encoded
+   * here, so this test never grades an encoder against its own output.
+   */
+  const fixtures = process.env.FEQ_CODEC_FIXTURES ?? path.join(tmpdir(), '');
+  const optional: { file: string; label: string }[] = [
+    { file: path.join(repo, 'karaoke_instrumental.mp3'), label: 'mp3' },
+    { file: path.join(fixtures, 'feq-test.flac'), label: 'flac' },
+    { file: path.join(fixtures, 'feq-test.ogg'), label: 'ogg vorbis' },
+    { file: path.join(fixtures, 'feq-test.m4a'), label: 'm4a (aac)' },
+    { file: path.join(fixtures, 'feq-test.wma'), label: 'wma' },
+    { file: path.join(fixtures, 'feq-test.opus'), label: 'opus' },
+  ];
+
+  let skipped = 0;
+  for (const { file, label } of optional) {
+    if (!existsSync(file)) {
+      console.log(`       ${label}: no fixture, skipped`);
+      skipped += 1;
+      // eslint-disable-next-line no-continue -- a missing fixture is not a result.
+      continue;
+    }
+    // eslint-disable-next-line no-await-in-loop -- one deck, one file at a time.
+    await plays(file, label);
+  }
+  if (skipped > 0) {
+    console.log(
+      `       ${skipped} format(s) had no fixture; run pnpm fixtures:codecs`,
+    );
+  }
+
+  await host.stop();
+  rmSync(scratch, { recursive: true, force: true });
+  if (failures > 0) {
+    console.error(`\n${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log('\nall checks passed');
+  // Explicit for the same reason `smoke-playback.ts` is: the supervisor's stdio
+  // handles outlive `stop()`, and a script that finishes and then sits is a
+  // suite that never reaches the next one.
+  process.exit(0);
+};
+
+main().catch((error: unknown) => {
+  console.error('decoder smoke failed', error);
+  process.exit(1);
+});

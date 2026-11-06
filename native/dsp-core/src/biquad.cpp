@@ -1,0 +1,260 @@
+/*
+<FluidEQ: System-wide parametric audio equalizer interface>
+Copyright (C) <2026>  <Ivan Carmenates Garcia>
+SPDX-License-Identifier: GPL-3.0-or-later
+*/
+
+/**
+ * The cookbook, transcribed rather than reinterpreted.
+ *
+ * Every expression below is in the same order and the same grouping as
+ * `src/renderer/dsp/biquad.ts`. Floating-point addition is not associative, so
+ * rewriting `a + b - c` as `a - c + b` — which reads identically and is
+ * algebraically identical — moves the last bits of the result and puts this
+ * port outside the parity tolerance on the very cases that matter, the high-Q
+ * ones. The shape of the arithmetic is part of the specification here.
+ */
+
+#include "fluideq/biquad.h"
+
+#include <cmath>
+
+namespace {
+
+/**
+ * The Q a character model gives a band; the band's own Q when there is
+ * nothing to model.
+ *
+ * Every model only ever moves the Q, which is why the cookbook and the
+ * matched design can share it (`feq_biquad_coefficients_designed`).
+ */
+double modelled_quality(FeqFilterType type,
+                        double gain_db,
+                        double quality,
+                        FeqEqModel model,
+                        double amount) {
+  /**
+   * Nothing to model when there is no gain to shape.
+   *
+   * Every design collapses to the same filter at zero gain, and a notch has no
+   * gain to correct in the first place — the types listed here are the ones
+   * whose gain term is unused.
+   */
+  const bool no_gain = type == FEQ_FILTER_BP || type == FEQ_FILTER_LPQ ||
+                       type == FEQ_FILTER_HPQ || type == FEQ_FILTER_NO;
+  if (model == FEQ_EQ_MODEL_CLEAN || amount <= 0.0 || gain_db == 0.0 ||
+      no_gain) {
+    return quality;
+  }
+
+  /**
+   * How far a band narrows at a given gain, and it is the app's own law
+   * (`shapeEqFilters` in `eqShape.ts`, mirrored in `common/dsp/eqModel.ts`)
+   * rather than a second one. Two pages offering the same character under the
+   * same name have to mean the same thing by it; these differed by half again
+   * at 12 dB until 2026-09-20.
+   */
+  const double driven = std::fabs(gain_db) < 20.0 ? std::fabs(gain_db) : 20.0;
+  const double narrowing = std::sqrt(1.0 + driven / 12.0);
+  const double factor = 1.0 + amount * (narrowing - 1.0);
+
+  if (model == FEQ_EQ_MODEL_PROPORTIONAL) {
+    const double narrowed = quality * factor;
+    return narrowed < 18.0 ? narrowed : 18.0;
+  }
+
+  if (model == FEQ_EQ_MODEL_ASYMMETRIC) {
+    // A cut is aimed at something and should take as little else with it as
+    // it can; a boost is a tone move and should be broad enough not to read
+    // as a resonance. Opposite treatments of the same dial, which is why this
+    // is its own model rather than proportional with a sign flipped.
+    const double shaped = gain_db > 0.0 ? quality / factor : quality * factor;
+    return shaped < 0.25 ? 0.25 : (shaped > 18.0 ? 18.0 : shaped);
+  }
+
+  const bool is_shelf = type == FEQ_FILTER_LSC || type == FEQ_FILTER_HSC;
+  const double full = is_shelf ? 0.4 : 0.45;
+  const double broadened = quality * (1.0 - amount * (1.0 - full));
+  return broadened > 0.25 ? broadened : 0.25;
+}
+
+}  // namespace
+
+extern "C" {
+
+FeqBiquadCoefficients feq_biquad_coefficients(FeqFilterType type,
+                                              double frequency,
+                                              double gain_db,
+                                              double quality,
+                                              double sample_rate) {
+  const double amplitude = std::pow(10.0, gain_db / 40.0);
+  // A preset's 18-20 kHz corner is above Nyquist on a 32 kHz device. Passing
+  // it through made alpha negative and the poles unstable (notably Exciter
+  // Air). Keep every caller inside the realizable band, clear of Nyquist's
+  // degenerate poles. The renderer uses the same bound for its response.
+  const double safe_frequency = std::fmin(frequency, sample_rate * 0.499);
+  const double omega = (2.0 * 3.14159265358979323846 * safe_frequency) / sample_rate;
+  const double cosine = std::cos(omega);
+  const double sine = std::sin(omega);
+  const double alpha = sine / (2.0 * quality);
+
+  double b0 = 1.0;
+  double b1 = 0.0;
+  double b2 = 0.0;
+  double a0 = 1.0;
+  double a1 = 0.0;
+  double a2 = 0.0;
+
+  switch (type) {
+    case FEQ_FILTER_PK:
+      b0 = 1.0 + alpha * amplitude;
+      b1 = -2.0 * cosine;
+      b2 = 1.0 - alpha * amplitude;
+      a0 = 1.0 + alpha / amplitude;
+      a1 = -2.0 * cosine;
+      a2 = 1.0 - alpha / amplitude;
+      break;
+
+    case FEQ_FILTER_NO:
+      b0 = 1.0;
+      b1 = -2.0 * cosine;
+      b2 = 1.0;
+      a0 = 1.0 + alpha;
+      a1 = -2.0 * cosine;
+      a2 = 1.0 - alpha;
+      break;
+
+    case FEQ_FILTER_LPQ:
+      b0 = (1.0 - cosine) / 2.0;
+      b1 = 1.0 - cosine;
+      b2 = (1.0 - cosine) / 2.0;
+      a0 = 1.0 + alpha;
+      a1 = -2.0 * cosine;
+      a2 = 1.0 - alpha;
+      break;
+
+    case FEQ_FILTER_HPQ:
+      b0 = (1.0 + cosine) / 2.0;
+      b1 = -(1.0 + cosine);
+      b2 = (1.0 + cosine) / 2.0;
+      a0 = 1.0 + alpha;
+      a1 = -2.0 * cosine;
+      a2 = 1.0 - alpha;
+      break;
+
+    case FEQ_FILTER_BP:
+      b0 = alpha;
+      b1 = 0.0;
+      b2 = -alpha;
+      a0 = 1.0 + alpha;
+      a1 = -2.0 * cosine;
+      a2 = 1.0 - alpha;
+      break;
+
+    case FEQ_FILTER_LSC:
+    case FEQ_FILTER_HSC:
+    default: {
+      // Shelves take their own alpha: the cookbook's shelf slope parameter,
+      // with S = 1 giving the steepest slope that stays monotonic.
+      const double beta = 2.0 * std::sqrt(amplitude) * alpha;
+      if (type == FEQ_FILTER_LSC) {
+        b0 = amplitude * (amplitude + 1.0 - (amplitude - 1.0) * cosine + beta);
+        b1 = 2.0 * amplitude * (amplitude - 1.0 - (amplitude + 1.0) * cosine);
+        b2 = amplitude * (amplitude + 1.0 - (amplitude - 1.0) * cosine - beta);
+        a0 = amplitude + 1.0 + (amplitude - 1.0) * cosine + beta;
+        a1 = -2.0 * (amplitude - 1.0 + (amplitude + 1.0) * cosine);
+        a2 = amplitude + 1.0 + (amplitude - 1.0) * cosine - beta;
+      } else {
+        b0 = amplitude * (amplitude + 1.0 + (amplitude - 1.0) * cosine + beta);
+        b1 = -2.0 * amplitude * (amplitude - 1.0 + (amplitude + 1.0) * cosine);
+        b2 = amplitude * (amplitude + 1.0 + (amplitude - 1.0) * cosine - beta);
+        a0 = amplitude + 1.0 - (amplitude - 1.0) * cosine + beta;
+        a1 = 2.0 * (amplitude - 1.0 - (amplitude + 1.0) * cosine);
+        a2 = amplitude + 1.0 - (amplitude - 1.0) * cosine - beta;
+      }
+      break;
+    }
+  }
+
+  FeqBiquadCoefficients out;
+  out.b0 = b0 / a0;
+  out.b1 = b1 / a0;
+  out.b2 = b2 / a0;
+  out.a1 = a1 / a0;
+  out.a2 = a2 / a0;
+  return out;
+}
+
+FeqBiquadCoefficients feq_biquad_coefficients_modelled(FeqFilterType type,
+                                                       double frequency,
+                                                       double gain_db,
+                                                       double quality,
+                                                       double sample_rate,
+                                                       FeqEqModel model,
+                                                       double amount) {
+  return feq_biquad_coefficients(
+      type, frequency, gain_db,
+      modelled_quality(type, gain_db, quality, model, amount), sample_rate);
+}
+
+FeqBiquadCoefficients feq_biquad_coefficients_designed(FeqFilterType type,
+                                                       double frequency,
+                                                       double gain_db,
+                                                       double quality,
+                                                       double sample_rate,
+                                                       FeqEqModel model,
+                                                       double amount,
+                                                       int matched) {
+  const double shaped = modelled_quality(type, gain_db, quality, model, amount);
+  return matched != 0
+             ? feq_biquad_coefficients_matched(type, frequency, gain_db, shaped,
+                                               sample_rate)
+             : feq_biquad_coefficients(type, frequency, gain_db, shaped,
+                                       sample_rate);
+}
+
+void feq_biquad_reset(FeqBiquadState* state) {
+  if (state == nullptr) {
+    return;
+  }
+  state->x1 = 0.0;
+  state->x2 = 0.0;
+  state->y1 = 0.0;
+  state->y2 = 0.0;
+}
+
+void feq_biquad_process(FeqBiquadState* state,
+                        float* buffer,
+                        uint32_t frames,
+                        const FeqBiquadCoefficients* coefficients) {
+  if (state == nullptr || buffer == nullptr || coefficients == nullptr) {
+    return;
+  }
+  const double b0 = coefficients->b0;
+  const double b1 = coefficients->b1;
+  const double b2 = coefficients->b2;
+  const double a1 = coefficients->a1;
+  const double a2 = coefficients->a2;
+  double x1 = state->x1;
+  double x2 = state->x2;
+  double y1 = state->y1;
+  double y2 = state->y2;
+
+  for (uint32_t at = 0; at < frames; ++at) {
+    const double x = static_cast<double>(buffer[at]);
+    const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1;
+    x1 = x;
+    y2 = y1;
+    // Unrounded, matching the reference. The buffer below takes the float.
+    y1 = y;
+    buffer[at] = static_cast<float>(y);
+  }
+
+  state->x1 = x1;
+  state->x2 = x2;
+  state->y1 = y1;
+  state->y2 = y2;
+}
+
+}  // extern "C"

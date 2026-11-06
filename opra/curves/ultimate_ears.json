@@ -1,0 +1,1 @@
+{"ue_reference_remastered":{"ultimate_ears:ue_reference_remastered::autoeq_crinacle":{"gainDb":-4.8,"bands":[{"type":"low_shelf","frequency":105,"gain_db":3.6,"q":0.71},{"type":"peak_dip","frequency":260,"gain_db":-1.8,"q":1.1},{"type":"peak_dip","frequency":3100,"gain_db":2.1,"q":1.9},{"type":"high_shelf","frequency":10000,"gain_db":-1.4,"q":0.71}]}}}
