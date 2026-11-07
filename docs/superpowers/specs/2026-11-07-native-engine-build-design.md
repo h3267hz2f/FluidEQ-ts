@@ -80,18 +80,23 @@ Run URL:
 
 ## Bundle result
 
-Run `42347599405` on commit `7485252` built the NSIS installer with the staged
-engine. The `Verify the installer carries the engine` step checked the
-`FluidEQ-native-engine` binaries are inside the installer. The installer grew
-from 2,161,889 bytes to 2,638,316 bytes:
+Run `42349204821` on commit `d3ce555` built the NSIS installer with the staged
+engine and MSVC runtime. The `Verify the installer carries the engine` step
+checked the binaries are inside the installer:
 
-- `FluidEQ_2.1.0_x64-setup.exe`: 2,638,316 bytes.
-- Contains `engine-bin/FluidEQ-Engine.dll`,
-  `engine-bin/FluidEQ-Engine-Setup.exe`, and
-  `engine-bin/FluidEQ-DSP.exe`.
+- `engine-bin/FluidEQ-Engine.dll`
+- `engine-bin/FluidEQ-Engine-Setup.exe`
+- `engine-bin/FluidEQ-DSP.exe`
+- `engine-bin/msvcp140.dll`
+- `engine-bin/vcruntime140.dll`
+- `engine-bin/vcruntime140_1.dll`
+
+The installer grew from 2,161,889 bytes to 2,835,487 bytes:
+
+- `FluidEQ_2.1.0_x64-setup.exe`: 2,835,487 bytes.
 
 Run URL:
-<https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42347599405>. The
+<https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42349204821>. The
 temporary `v2.1.0-engine-bundle-test` tag was deleted after the run.
 
 ## Risks
