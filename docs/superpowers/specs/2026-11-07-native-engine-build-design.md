@@ -112,6 +112,37 @@ the helper remains the only component that writes the audio registry.
 (23 passed, 1 ignored), and run `42351890431` (workflow_dispatch, `bundle=false`)
 passed on the runner.
 
+## View install control result
+
+The shell view's status bar now carries the activation control: a status dot,
+a plain-language engine state ("System engine off", "Engine installed, not
+attached", "Engine on N outputs"), and one button that runs `install_engine`
+and so prompts for administrator rights itself. A declined UAC prompt leaves
+the previous state on screen with the reason in the message line; a successful
+install renders the fresh status the command returns. The control stays hidden
+in the browser preview and shows "System engine unavailable" when the bundled
+helper is missing (dev builds without the staged engine). Verified in a browser
+against a stubbed Tauri bridge: boot, install success, partial attach, and UAC
+decline all render correctly, and the status bar wraps instead of overflowing
+on narrow windows.
+
+## DSP supervision result
+
+`rust/fluideq-shell/src/engine_host.rs` now owns the whole `FluidEQ-DSP`
+lifetime. The shell starts the bundled host with `--parent-pid` at boot,
+queues the current `export_wire_parameters()` snapshot before `FEQ_CMD_START`,
+and re-sends the whole snapshot after every store mutation. A writer thread
+owns stdin and a reader thread owns stdout, so a blocking command write never
+stops the draining that keeps the host's pipe full-proof. The reader validates
+the one `FEQH` handshake, records rejected acks, and replaces a dead host within
+the 3-per-60s budget, re-sending the last snapshot first. Exit sends
+`FEQ_CMD_SHUTDOWN`, then stdin EOF, and kills only after a 3 s grace. A dev
+build without the staged host records the failure in `engine_host_status`
+instead of refusing to open the window.
+
+`cargo check -p fluideq-shell` is warning-free and `cargo test -p fluideq-shell`
+passes locally (41 passed, 1 ignored).
+
 ## Risks
 
 - `/W4 /WX` may expose warnings in a newer MSVC than the original build.
@@ -127,6 +158,7 @@ passed on the runner.
 2. Copy the artifacts into the Tauri bundle and the NSIS installer — **done**;
    see Bundle result above. They are shipped, not yet installed or activated.
 3. Implement the install/register/uninstall flow with UAC and audio restart —
-   the Rust activation bridge is done; the view still needs the install control.
-4. Launch and supervise `FluidEQ-DSP`, and send chain snapshots from Rust.
+   **done**; the Rust activation bridge and the view install control are in.
+4. Launch and supervise `FluidEQ-DSP`, and send chain snapshots from Rust —
+   **done**; see DSP supervision result above.
 5. Verify on a real endpoint, including bypass when the shell exits.
