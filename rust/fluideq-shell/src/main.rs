@@ -13,6 +13,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod audio_endpoint;
+pub mod engine_host;
 pub mod engine_setup;
 pub mod host_runtime;
 pub mod ipc;
@@ -28,6 +29,7 @@ use tauri::{Manager, State};
 struct ShellState {
     store: Mutex<AppStateStore>,
     state_path: PathBuf,
+    host: engine_host::EngineHost,
 }
 
 fn store_of(state: &ShellState) -> Result<MutexGuard<'_, AppStateStore>, String> {
@@ -41,6 +43,12 @@ fn save(store: &AppStateStore, state: &ShellState) {
     // Persistence is best-effort: a read-only profile must not make a slider
     // stop working. The next successful write repairs the file.
     let _ = store.save_to_file(&state.state_path);
+}
+
+/// Every store mutation re-sends the whole chain snapshot, so the host never
+/// holds a partial opinion about the sound.
+fn push_chain(store: &AppStateStore, state: &ShellState, revision: u64) {
+    state.host.apply_chain(&store.export_wire_parameters(), revision as u32);
 }
 
 #[tauri::command]
@@ -57,6 +65,7 @@ fn set_master_power(
     store.set_master_power(enabled);
     let snapshot = store.snapshot();
     save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
     Ok(snapshot)
 }
 
@@ -66,6 +75,7 @@ fn set_preamp_db(state: State<'_, ShellState>, preamp_db: f64) -> Result<AppStat
     store.set_preamp_db(preamp_db);
     let snapshot = store.snapshot();
     save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
     Ok(snapshot)
 }
 
@@ -81,6 +91,7 @@ fn set_band_gain(
     store.update_band_gain(band_id, frequency, gain_db, quality);
     let snapshot = store.snapshot();
     save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
     Ok(snapshot)
 }
 
@@ -104,8 +115,13 @@ fn install_engine(app: tauri::AppHandle) -> Result<Value, String> {
     engine_setup::install(&app)
 }
 
+#[tauri::command]
+fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
+    Ok(state.host.status())
+}
+
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -116,9 +132,23 @@ fn main() {
                 // successful save replaces it.
                 let _ = store.load_from_file(&state_path);
             }
+            let host_exe = app
+                .path()
+                .resolve(
+                    engine_host::ENGINE_HOST_RESOURCE,
+                    tauri::path::BaseDirectory::Resource,
+                )
+                .unwrap_or_else(|_| PathBuf::from(engine_host::ENGINE_HOST_RESOURCE));
+            let host = engine_host::EngineHost::new(host_exe);
+            let snapshot = store.snapshot();
+            host.apply_chain(&store.export_wire_parameters(), snapshot.revision as u32);
+            // A dev build without the staged engine records the failure in the
+            // host status; the window still opens.
+            let _ = host.start();
             app.manage(ShellState {
                 store: Mutex::new(store),
                 state_path,
+                host,
             });
             Ok(())
         })
@@ -131,7 +161,13 @@ fn main() {
             set_output_volume,
             engine_status,
             install_engine,
+            engine_host_status,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("FluidEQ failed to start");
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            app.state::<ShellState>().host.shutdown();
+        }
+    });
 }
