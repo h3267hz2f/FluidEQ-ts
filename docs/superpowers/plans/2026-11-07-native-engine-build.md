@@ -14,8 +14,23 @@
 
 **Files:**
 - Create: `.github/workflows/native-engine.yml`
+- Create: `native/tools/generate-parameters.mjs`
 - Read: `native/CMakeLists.txt` (targets `fluideq-engine`, `fluideq-engine-setup`, `fluideq-dsp-host`)
 - Read: `native/system-apo/src/engine.def` (exports `DllGetClassObject`, `DllCanUnloadNow`)
+- Read: `rust/fluideq-dsp-sys/build.rs` (parameter table parser and header writer)
+
+- [ ] **Step 0: Create the generator**
+
+The native build runs outside Cargo, so create the Node port of the Rust
+`build.rs` parameter parser in `native/tools/generate-parameters.mjs`. Run:
+
+```powershell
+node native/tools/generate-parameters.mjs
+```
+
+Expected: it writes `native/dsp-core/include/fluideq/parameters.h` with the same
+ids, paths, structural flags and schema version as
+`target/debug/build/fluideq-dsp-sys-*/out/fluideq/parameters.h`.
 
 - [ ] **Step 1: Create the workflow**
 
@@ -46,6 +61,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Generate the native parameter header
+        run: node native/tools/generate-parameters.mjs
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:

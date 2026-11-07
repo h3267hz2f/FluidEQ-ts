@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate the native parameter header
+        run: node native/tools/generate-parameters.mjs
+
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
