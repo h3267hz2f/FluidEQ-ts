@@ -143,6 +143,23 @@ instead of refusing to open the window.
 `cargo check -p fluideq-shell` is warning-free and `cargo test -p fluideq-shell`
 passes locally (41 passed, 1 ignored).
 
+## Activated installer result
+
+Run `42360215473` (workflow_dispatch, `bundle=true`) on commit `d93246b`
+passed every step on `windows-latest`: the workspace tests with
+`link-cpp-core`, the engine staging, the NSIS build, and the check that the
+installer carries the engine DLL, setup helper, DSP host, and the three MSVC
+runtime DLLs. The uploaded `FluidEQ-installer` artifact is 2,873,993 bytes
+(`FluidEQ_2.1.0_x64-setup.exe`, 2,892,231 bytes unpacked), up from 2,835,487
+with the view control and the host supervisor.
+
+Run URL:
+<https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42360215473>.
+
+The stale TypeScript `Test` workflow was removed from this branch in
+`c03b6be`: it expected a pnpm lockfile this repository does not have and had
+failed on every push. The Rust desktop workflow is the branch's test gate.
+
 ## Risks
 
 - `/W4 /WX` may expose warnings in a newer MSVC than the original build.
