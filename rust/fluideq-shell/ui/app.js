@@ -84,6 +84,9 @@ const els = {
   chainState: document.getElementById('chain-state'),
   connection: document.getElementById('connection'),
   message: document.getElementById('message'),
+  engineActivation: document.getElementById('engine-activation'),
+  engineText: document.getElementById('engine-text'),
+  engineInstall: document.getElementById('engine-install'),
 };
 
 let snapshot = demoSnapshot();
@@ -96,6 +99,8 @@ let volumeAvailable = false;
 let lastAudibleVolume = 0.8;
 let bandCommitInFlight = false;
 let bandCommitQueued = false;
+let engineStatus = null;
+let engineInstallInFlight = false;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -130,12 +135,14 @@ function setConnection(text, mode) {
   els.connection.classList.toggle('preview', mode === 'preview');
 }
 
-function showMessage(text) {
+function showMessage(text, kind) {
   els.message.textContent = text;
+  els.message.classList.toggle('ok', kind === 'ok');
 }
 
 function clearMessage() {
   els.message.textContent = '';
+  els.message.classList.remove('ok');
 }
 
 function setRangeFill(input, percentage) {
@@ -738,6 +745,64 @@ new ResizeObserver(scheduleDraw).observe(els.canvas.parentElement);
 window.addEventListener('resize', scheduleDraw);
 
 // ---------------------------------------------------------------------------
+// System engine activation
+// ---------------------------------------------------------------------------
+
+function renderEngineStatus(status) {
+  engineStatus = status;
+  const endpoints = Array.isArray(status?.endpoints) ? status.endpoints : [];
+  const attached = endpoints.filter((endpoint) => endpoint.attached).length;
+  const installed = Boolean(status?.installed);
+  const active = installed && attached > 0;
+  const attachable = endpoints.length > attached;
+
+  els.engineActivation.hidden = false;
+  els.engineActivation.classList.toggle('active', active);
+  if (active) {
+    els.engineText.textContent = attachable
+      ? `Engine on ${attached} of ${endpoints.length} outputs`
+      : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
+  } else if (installed) {
+    els.engineText.textContent = endpoints.length
+      ? 'Engine installed, not attached'
+      : 'Engine installed, no outputs found';
+  } else {
+    els.engineText.textContent = 'System engine off';
+  }
+  els.engineInstall.hidden = installed && !attachable;
+  els.engineInstall.textContent = installed ? 'Attach all outputs' : 'Enable system audio';
+}
+
+async function refreshEngineStatus() {
+  try {
+    renderEngineStatus(await invoke('engine_status'));
+  } catch (error) {
+    els.engineActivation.hidden = false;
+    els.engineActivation.classList.remove('active');
+    els.engineText.textContent = 'System engine unavailable';
+    els.engineInstall.hidden = true;
+    showMessage(`Engine status: ${error}`);
+  }
+}
+
+els.engineInstall.addEventListener('click', async () => {
+  if (engineInstallInFlight) return;
+  engineInstallInFlight = true;
+  els.engineInstall.disabled = true;
+  els.engineInstall.textContent = 'Installing…';
+  try {
+    renderEngineStatus(await invoke('install_engine'));
+    showMessage('System engine enabled — Windows audio restarted', 'ok');
+  } catch (error) {
+    showMessage(`Engine was not enabled: ${error}`);
+    if (engineStatus) renderEngineStatus(engineStatus);
+  } finally {
+    engineInstallInFlight = false;
+    els.engineInstall.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 
@@ -758,6 +823,7 @@ async function boot() {
     selectedId = snapshot.bands?.[3]?.id ?? snapshot.bands?.[0]?.id ?? selectedId;
     setConnection('Rust state centre connected · C++ core linked', 'live');
     clearMessage();
+    refreshEngineStatus();
   } catch (error) {
     setConnection('Rust state centre unavailable', 'preview');
     showMessage(`Could not read the state: ${error}`);

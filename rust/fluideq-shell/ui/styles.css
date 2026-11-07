@@ -656,7 +656,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  flex-wrap: wrap;
+  gap: 6px 18px;
   min-height: 15px;
   flex-shrink: 0;
   color: var(--muted-soft);
@@ -681,6 +682,52 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.message.ok {
+  color: var(--accent);
+}
+
+.engine-activation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.engine-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-soft);
+}
+
+.engine-activation.active .engine-dot {
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(59, 232, 196, 0.5);
+}
+
+.engine-install {
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.engine-install:hover {
+  border-color: rgba(59, 232, 196, 0.34);
+  background: rgba(59, 232, 196, 0.05);
+}
+
+.engine-install:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 @media (max-width: 1180px) {
