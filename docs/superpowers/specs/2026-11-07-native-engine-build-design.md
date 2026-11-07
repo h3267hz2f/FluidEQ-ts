@@ -41,13 +41,15 @@ the current MSVC/Windows SDK.
 Add `.github/workflows/native-engine.yml`:
 
 1. Check out the public repository.
-2. Set up the MSVC developer environment so `dumpbin` is on `PATH`.
-3. Configure `native/` with the installed Visual Studio x64 generator.
-4. Build only `fluideq-engine`, `fluideq-engine-setup`, and `fluideq-dsp-host`
+2. Generate `native/dsp-core/include/fluideq/parameters.h` from the TypeScript
+   table with `native/tools/generate-parameters.mjs`.
+3. Set up the MSVC developer environment so `dumpbin` is on `PATH`.
+4. Configure `native/` with the installed Visual Studio x64 generator.
+5. Build only `fluideq-engine`, `fluideq-engine-setup`, and `fluideq-dsp-host`
    in Release.
-5. Assert `FluidEQ-Engine.dll` exports `DllGetClassObject` and
+6. Assert `FluidEQ-Engine.dll` exports `DllGetClassObject` and
    `DllCanUnloadNow`.
-6. Upload the three binaries as `FluidEQ-native-engine`.
+7. Upload the three binaries as `FluidEQ-native-engine`.
 
 The build tree lives under `native/.build/engine`, already ignored by git.
 
@@ -58,6 +60,23 @@ The build tree lives under `native/.build/engine`, already ignored by git.
 - `dumpbin /exports` finds both required APO entry points.
 - No source or generated binary is committed; only the workflow and design
   records are.
+
+## Result
+
+Run `42345880973` on commit `89abe40` built all three targets in 3m13s on the
+`windows-latest` runner (`Visual Studio 18.11.3`, CMake from
+`C:\Program Files\CMake\bin`). The parameter header was generated from
+`src/common/dsp/nativeParameters.ts` by `native/tools/generate-parameters.mjs`
+before CMake. The uploaded `FluidEQ-native-engine` artifact contains:
+
+| File | Size |
+| --- | ---: |
+| `FluidEQ-Engine.dll` | 945,152 |
+| `FluidEQ-Engine-Setup.exe` | 249,856 |
+| `FluidEQ-DSP.exe` | 677,376 |
+
+Run URL:
+<https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42345880973>.
 
 ## Risks
 
