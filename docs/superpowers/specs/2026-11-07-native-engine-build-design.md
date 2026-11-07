@@ -99,6 +99,19 @@ Run URL:
 <https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42349204821>. The
 temporary `v2.1.0-engine-bundle-test` tag was deleted after the run.
 
+## Activation bridge result
+
+Commit `ae92ba3` adds `rust/fluideq-shell/src/engine_setup.rs` and exposes
+`engine_status` / `install_engine` to the view. `status` runs the bundled
+`FluidEQ-Engine-Setup.exe` unelevated and parses its one-line JSON; `install`
+starts the same helper with `ShellExecuteExW` + `runas`, then reads
+`%ProgramData%\FluidEQ\engine\last-setup.json`. Nothing runs automatically and
+the helper remains the only component that writes the audio registry.
+
+`cargo check -p fluideq-shell` and `cargo test -p fluideq-shell` pass locally
+(23 passed, 1 ignored), and run `42351890431` (workflow_dispatch, `bundle=false`)
+passed on the runner.
+
 ## Risks
 
 - `/W4 /WX` may expose warnings in a newer MSVC than the original build.
@@ -113,6 +126,7 @@ temporary `v2.1.0-engine-bundle-test` tag was deleted after the run.
 1. Build the engine artifacts in CI — **done**; see Result above.
 2. Copy the artifacts into the Tauri bundle and the NSIS installer — **done**;
    see Bundle result above. They are shipped, not yet installed or activated.
-3. Implement the install/register/uninstall flow with UAC and audio restart.
+3. Implement the install/register/uninstall flow with UAC and audio restart —
+   the Rust activation bridge is done; the view still needs the install control.
 4. Launch and supervise `FluidEQ-DSP`, and send chain snapshots from Rust.
 5. Verify on a real endpoint, including bypass when the shell exits.
