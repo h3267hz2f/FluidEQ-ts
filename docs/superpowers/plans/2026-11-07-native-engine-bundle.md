@@ -91,7 +91,6 @@ Add after the build, before upload:
       - name: Verify the installer carries the engine
         if: github.event_name != 'workflow_dispatch' || inputs.bundle
         shell: pwsh
-        working-directory: rust/fluideq-shell
         run: |
           $installer = Get-Item target/release/bundle/nsis/*.exe | Select-Object -First 1
           $listing = & 7z l $installer.FullName
