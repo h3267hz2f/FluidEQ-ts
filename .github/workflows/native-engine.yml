@@ -1,0 +1,71 @@
+name: Native engine
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - rust-desktop-shell
+    paths:
+      - "native/**"
+      - ".github/workflows/native-engine.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    concurrency:
+      group: native-engine-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure the native engine
+        run: >
+          cmake -S native -B native/.build/engine
+          -G "Visual Studio 17 2022" -A x64
+          -DFEQ_CORE_VERSION=2.1.0
+          -DFEQ_BUILD_REVISION=${{ github.sha }}
+
+      - name: Build the engine, setup helper and DSP host
+        run: >
+          cmake --build native/.build/engine --config Release
+          --target fluideq-engine fluideq-engine-setup fluideq-dsp-host
+          --parallel
+
+      - name: Verify the engine DLL exports
+        shell: pwsh
+        run: |
+          $dll = "native/.build/engine/bin/FluidEQ-Engine.dll"
+          if (-not (Test-Path $dll)) { throw "missing $dll" }
+          $exports = & dumpbin /nologo /exports $dll
+          foreach ($name in @("DllGetClassObject", "DllCanUnloadNow")) {
+            if (-not ($exports -match "\b$name\b")) { throw "missing export $name" }
+          }
+
+      - name: Verify the helper and host exist
+        shell: pwsh
+        run: |
+          foreach ($file in @(
+            "native/.build/engine/bin/FluidEQ-Engine-Setup.exe",
+            "native/.build/engine/bin/FluidEQ-DSP.exe"
+          )) {
+            if (-not (Test-Path $file)) { throw "missing $file" }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluidEQ-native-engine
+          path: |
+            native/.build/engine/bin/FluidEQ-Engine.dll
+            native/.build/engine/bin/FluidEQ-Engine-Setup.exe
+            native/.build/engine/bin/FluidEQ-DSP.exe
+          if-no-files-found: error
+          retention-days: 14
