@@ -142,11 +142,11 @@ impl SourceAnalysis {
     /// Encodes DSP facts only: an ACK `revision` or route `endpoint` move must not rebuild a rack.
     pub fn processing_identity(&self) -> String {
         let mut out = String::from(if self.library { "library" } else { "live" });
-        let mut integer_part = |value: u64| {
+        let integer_part = |out: &mut String, value: u64| {
             out.push('|');
             out.push_str(&value.to_string());
         };
-        let mut number_part = |value: f64| {
+        let number_part = |out: &mut String, value: f64| {
             out.push('|');
             if value == 0.0 {
                 out.push('0');
@@ -155,34 +155,34 @@ impl SourceAnalysis {
             }
         };
 
-        integer_part(if self.engine_owner { 1 } else { 0 });
-        integer_part(self.source);
-        integer_part(self.epoch);
-        integer_part(if self.has_level { 1 } else { 0 });
+        integer_part(&mut out, if self.engine_owner { 1 } else { 0 });
+        integer_part(&mut out, self.source);
+        integer_part(&mut out, self.epoch);
+        integer_part(&mut out, if self.has_level { 1 } else { 0 });
         if self.has_level {
-            number_part(self.level);
-            number_part(self.peak);
+            number_part(&mut out, self.level);
+            number_part(&mut out, self.peak);
         }
-        integer_part(if self.noise.is_some() { 1 } else { 0 });
+        integer_part(&mut out, if self.noise.is_some() { 1 } else { 0 });
         if let Some(noise) = &self.noise {
             for &band in &noise.bands_db {
-                number_part(band);
+                number_part(&mut out, band);
             }
-            number_part(noise.floor_dbfs);
-            number_part(noise.hum_hz);
-            integer_part(noise.hum_partial_count as u64);
+            number_part(&mut out, noise.floor_dbfs);
+            number_part(&mut out, noise.hum_hz);
+            integer_part(&mut out, noise.hum_partial_count as u64);
             for &hz in &noise.hum_partial_hz {
-                number_part(hz);
+                number_part(&mut out, hz);
             }
             for &excess in &noise.hum_partial_excess_db {
-                number_part(excess);
+                number_part(&mut out, excess);
             }
         }
-        integer_part(if self.voice_available { 1 } else { 0 });
-        integer_part(if self.voice_model_verified { 1 } else { 0 });
-        integer_part(self.voice_model.len() as u64);
+        integer_part(&mut out, if self.voice_available { 1 } else { 0 });
+        integer_part(&mut out, if self.voice_model_verified { 1 } else { 0 });
+        integer_part(&mut out, self.voice_model.len() as u64);
         out.push_str(&self.voice_model);
-        integer_part(self.voice_runtime.len() as u64);
+        integer_part(&mut out, self.voice_runtime.len() as u64);
         out.push_str(&self.voice_runtime);
         out
     }
@@ -840,6 +840,9 @@ pub fn parent_of(path: &str) -> String {
     };
     let bytes = path.as_bytes();
     if cut == 2 && bytes.len() > 2 && bytes[1] == b':' {
+        if bytes.len() == 3 {
+            return String::new();
+        }
         return path[..3].to_string();
     }
     if cut < 3 {
@@ -1039,6 +1042,14 @@ impl ApoEngineLog {
 /// Exact port of `trace` in `/native/system-apo/src/log.cpp`.
 pub fn trace_in_path(log_file_path: &str, endpoint_guid: &str, message: &str) {
     ApoEngineLog::with_path(log_file_path.to_string(), endpoint_guid).write(message);
+}
+
+/// The engine log type under its C++ name.
+pub type EngineLog = ApoEngineLog;
+
+/// `trace` against the engine's own log path (`log.h`).
+pub fn trace(endpoint_guid: &str, message: &str) {
+    trace_in_path(&log_path(), endpoint_guid, message);
 }
 
 /// Exact port of `trace_built` in `/native/system-apo/src/log.h`:

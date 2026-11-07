@@ -40,6 +40,7 @@ pub struct MemoryFootprintEstimate {
     pub meters_fft_enabled: bool,
     pub spectrum_target_fps: u32,
     pub online_media_protected: bool,
+    pub online_media_playing: bool,
     pub minimized_elapsed_ms: u64,
 }
 
@@ -185,6 +186,7 @@ impl ColdResidencyController {
             spectrum_target_fps: self.target_spectrum_fps(),
             online_media_protected: self.online_media_playing
                 && self.mode == WindowResidencyMode::MinimizedWarm,
+            online_media_playing: self.online_media_playing,
             minimized_elapsed_ms: self.minimized_elapsed_ms,
         }
     }

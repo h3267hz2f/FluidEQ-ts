@@ -13,7 +13,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! - `/native/system-apo/src/split_board.h` & `split_board.cpp`
 //! - `/native/dsp-core/src/leveling_memory.cpp` & `/native/system-apo/src/leveling_board.cpp`
 
-use crate::apo_engine_runtime::{ChannelSelection, Programme, LOW_FREQUENCY_SPEAKER};
+use crate::apo_engine_runtime::{ChannelSelection, SongProgramme as Programme};
 use std::collections::BTreeMap;
 use std::mem:: offset_of;
 use std::sync::atomic::{fence, AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -119,7 +119,7 @@ pub fn selected_channels(selection: &ChannelSelection, mask: u32, channels: u16)
     let lfe = lfe_channel_of(mask, channels);
     for channel in 0..count {
         let speaker = if channel as i32 == lfe {
-            LOW_FREQUENCY_SPEAKER as i32
+            SPEAKER_LOW_FREQUENCY_BIT as i32
         } else {
             speaker_of_channel(mask, channels, channel)
         };
@@ -214,7 +214,7 @@ impl SplitStorage {
 }
 
 /// Pure Rust FIPS 180-4 SHA-256 implementation for `split_transport_name`.
-fn sha256_digest(data: &[u8]) -> [u8; 32] {
+pub fn sha256_digest(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -312,7 +312,7 @@ pub fn split_transport_name(config_path: &str, endpoint: &str) -> Result<String,
             ch.to_lowercase().next().unwrap_or(ch)
         };
         let mut buf = [0u16; 2];
-        for &unit in normalized.encode_utf16(&mut buf) {
+        for unit in normalized.encode_utf16(&mut buf).iter() {
             utf16_bytes.extend_from_slice(&unit.to_le_bytes());
         }
     }
@@ -1118,6 +1118,40 @@ impl EndpointLeveling {
             Ok(g) => *g,
             Err(poisoned) => *poisoned.into_inner(),
         }
+    }
+}
+
+/// Per-endpoint leveling owned by a watcher, named for the endpoint it serves.
+///
+/// The watcher keeps one of these for the life of the process, so a song's
+/// learned level survives every stream unlock/relock cycle on that output.
+pub struct EndpointLevelingCoordinator {
+    endpoint: String,
+    leveling: EndpointLeveling,
+}
+
+impl EndpointLevelingCoordinator {
+    pub fn new(endpoint: &str) -> Self {
+        Self {
+            endpoint: endpoint.to_string(),
+            leveling: EndpointLeveling::new(),
+        }
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn announce(&self, programme: &Programme, _settled_at: Option<f64>) -> bool {
+        self.leveling.announce(programme)
+    }
+
+    pub fn last_song(&self) -> Option<SongReport> {
+        self.leveling.last_song()
+    }
+
+    pub fn memory(&self) -> &Arc<FeqLevelingMemory> {
+        self.leveling.memory()
     }
 }
 

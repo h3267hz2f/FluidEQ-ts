@@ -10,3 +10,7 @@ description = "Authoritative Rust state center and cold-residency lifecycle cont
 fluideq-dsp-sys = { path = "../fluideq-dsp-sys" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+default = []
+link-cpp-core = ["fluideq-dsp-sys/link-cpp-core"]

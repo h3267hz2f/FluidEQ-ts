@@ -578,7 +578,7 @@ impl MirrorOutputEngine {
         let frames = (self.device_frames - current_padding) as usize;
         let total_samples = frames * (self.channels as usize);
         let mut output = vec![0.0f32; total_samples];
-        self.playback.mix(&mut output, frames);
+        self.playback.mix(&mut output, frames as u32);
         for s in &mut output {
             *s *= self.volume;
         }
@@ -1226,7 +1226,7 @@ impl PlaybackRuntimeEngine {
     pub fn render(&mut self, pcm: &mut [f32], frames: u32) {
         let frames_usize = frames as usize;
         for peer in self.peers.iter_mut().flatten() {
-            peer.mix(pcm, frames_usize);
+            peer.mix(pcm, frames);
         }
         let to = self.volume_target;
         let channels = self.output_format.channels as usize;

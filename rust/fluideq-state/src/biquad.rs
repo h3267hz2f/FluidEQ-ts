@@ -7,6 +7,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! Biquad filter synthesis (RBJ Audio EQ Cookbook + Martin Vicanek analog-matched),
 //! character model Q shaping, and worst-case auto-headroom calculation in Rust.
 
+// The Rust matched-biquad solver is the no-C++ fallback. When the native core
+// is linked, its C++ counterpart is authoritative and these helpers are unused.
+#![cfg_attr(feature = "link-cpp-core", allow(dead_code))]
+
 use fluideq_dsp_sys::{FeqBiquadCoefficients, FeqEqModel, FeqFilterType};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::{LN_2, PI, SQRT_2};

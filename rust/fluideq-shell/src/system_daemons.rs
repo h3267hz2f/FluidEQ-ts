@@ -453,9 +453,7 @@ pub fn detect_cover_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
         return Some("image/jpeg");
     }
-    if bytes.len() >= 8
-        && bytes[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
-    {
+    if bytes.len() >= 8 && bytes[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
         return Some("image/png");
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
@@ -502,7 +500,11 @@ impl MediaWatchCoordinator {
     /// Processes a line from `media-watch`, deduplicating whole-second timeline ticks
     /// and updating `AppStateStore::set_online_media_playing` so Cold-Residency never
     /// interrupts active online media sessions.
-    pub fn handle_line(&mut self, line: &str, store: &mut AppStateStore) -> Option<MediaWatchEvent> {
+    pub fn handle_line(
+        &mut self,
+        line: &str,
+        store: &mut AppStateStore,
+    ) -> Option<MediaWatchEvent> {
         let ev = parse_media_watch_line(line)?;
         match &ev {
             MediaWatchEvent::Cleared => {
@@ -655,10 +657,7 @@ pub struct ProcessSnapshotItem {
 /// Expands all descendant PIDs of `root_pid` using BFS while guarding against Windows PID reuse
 /// (`child_created >= parent_created` whenever both creation times are non-zero),
 /// matching `children_of` in `/native/process-meter/src/main.cpp` (lines 97–137).
-pub fn expand_process_tree_children(
-    root_pid: u32,
-    snapshot: &[ProcessSnapshotItem],
-) -> Vec<u32> {
+pub fn expand_process_tree_children(root_pid: u32, snapshot: &[ProcessSnapshotItem]) -> Vec<u32> {
     if root_pid == 0 {
         return Vec::new();
     }
@@ -868,7 +867,10 @@ pub enum PlaybackReplyEvent {
 }
 
 /// Decodes a reply packet (`PlaybackHeader` + optional payload) emitted by `remote-audio-playback`.
-pub fn parse_playback_reply_packet(header: &PlaybackHeader, payload: &[u8]) -> Option<PlaybackReplyEvent> {
+pub fn parse_playback_reply_packet(
+    header: &PlaybackHeader,
+    payload: &[u8],
+) -> Option<PlaybackReplyEvent> {
     if header.magic != PLAYBACK_HEADER_MAGIC || payload.len() < (header.bytes as usize) {
         return None;
     }
@@ -977,7 +979,7 @@ pub struct WindowsRenderDevice {
 
 #[derive(Debug, Default)]
 pub struct OutputWatchCoordinator {
-    pub refresh_Generation: u64,
+    pub refresh_generation: u64,
     pub devices: Vec<WindowsRenderDevice>,
     pub default_device_guid: Option<String>,
 }
@@ -987,7 +989,7 @@ impl OutputWatchCoordinator {
     /// Returns `true` when the endpoint list must be re-queried.
     pub fn handle_line(&mut self, line: &str) -> bool {
         if line.trim() == "outputs" {
-            self.refresh_Generation += 1;
+            self.refresh_generation += 1;
             true
         } else {
             false
@@ -1009,10 +1011,7 @@ impl OutputWatchCoordinator {
             Vec::new()
         };
 
-        let new_default = parsed
-            .iter()
-            .find(|d| d.is_default)
-            .map(|d| d.guid.clone());
+        let new_default = parsed.iter().find(|d| d.is_default).map(|d| d.guid.clone());
         let switched = if new_default != self.default_device_guid {
             self.default_device_guid = new_default.clone();
             new_default
@@ -1064,7 +1063,10 @@ pub struct LightingColoursFrame {
 
 /// Encodes a `ColoursFrame` (`FLH1`, 12-byte header + `u32 device` + `u32 lamp_count` + `R,G,B` triplets)
 /// matching `/native/lighting-host/src/wire.h`.
-pub fn encode_lighting_colours_frame(device_index: u32, rgb_triplets: &[[u8; 3]]) -> Option<Vec<u8>> {
+pub fn encode_lighting_colours_frame(
+    device_index: u32,
+    rgb_triplets: &[[u8; 3]],
+) -> Option<Vec<u8>> {
     let lamp_count = rgb_triplets.len() as u32;
     if lamp_count > LIGHTING_MAX_LAMPS {
         return None;
@@ -1274,11 +1276,7 @@ pub fn desktop_cover_of(
 /// Exact port of `wallpaper::stacked_between` in `/native/wallpaper/desktop.h` (lines 14–37):
 /// Returns the z-order slice strictly between `top` and `bottom` in `order`.
 /// Returns an empty `Vec` if `top == 0`, `bottom == 0`, `top == bottom`, or if `top` does not precede `bottom`.
-pub fn stacked_between<T: Copy + PartialEq + Default>(
-    top: T,
-    bottom: T,
-    order: &[T],
-) -> Vec<T> {
+pub fn stacked_between<T: Copy + PartialEq + Default>(top: T, bottom: T, order: &[T]) -> Vec<T> {
     let zero = T::default();
     if top == zero || bottom == zero || top == bottom {
         return Vec::new();
@@ -1310,10 +1308,10 @@ pub fn window_hides_desktop(
     if is_tool_window || is_no_activate {
         return false;
     }
-    if let Some(alpha) = layered_alpha
-        && alpha < 240
-    {
-        return false;
+    if let Some(alpha) = layered_alpha {
+        if alpha < 240 {
+            return false;
+        }
     }
     if has_complex_region {
         return false;
@@ -1408,12 +1406,12 @@ pub fn parse_wallpaper_cli_args(args: &[&str]) -> Option<(u64, u32)> {
 // 11. `dsp-host` Binary Command & Telemetry Frame Codec (`/native/dsp-host/src/wire.h`)
 // ============================================================================
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use fluideq_dsp_sys::{
     FeqChainLatencyParts, FeqRoomReport, FeqWireAckFrame, FeqWireCommand, FeqWireCommandFrame,
     FeqWireStatsFrame, FEQ_MAGIC_ACK, FEQ_MAGIC_ANALYSIS, FEQ_MAGIC_COMMAND, FEQ_MAGIC_STATS,
     FEQ_ROOM_REPORT_TAG, FEQ_WIRE_PROTOCOL_VERSION,
 };
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Bounded, lock-free 10-word seqlock snapshot from the audio callback.
 /// Exact port of `ProcessingLatency` in `/native/dsp-host/src/processing_latency.h`.
@@ -1452,12 +1450,7 @@ impl ProcessingLatencySnapshot {
     }
 
     /// Publishes `[total_frames, eq, restoration, leveler, room, bass_punch, maximizer, headroom, deesser, processed_stages]`.
-    pub fn publish(
-        &self,
-        total_frames: u32,
-        parts: &FeqChainLatencyParts,
-        processed_stages: u32,
-    ) {
+    pub fn publish(&self, total_frames: u32, parts: &FeqChainLatencyParts, processed_stages: u32) {
         let words: [u32; 10] = [
             total_frames,
             parts.eq,
@@ -1603,8 +1596,7 @@ pub fn validate_analysis_packet_layout(packet: &[u8]) -> Option<(u32, u32, usize
     let pairs = u32::from_le_bytes([packet[16], packet[17], packet[18], packet[19]]);
     let bands = u32::from_le_bytes([packet[20], packet[21], packet[22], packet[23]]);
     // `eq_detail_bins` sits at byte offset 88 in `FeqWireAnalysisFrame` (`wire.h` line 659)
-    let eq_detail_bins =
-        u32::from_le_bytes([packet[88], packet[89], packet[90], packet[91]]);
+    let eq_detail_bins = u32::from_le_bytes([packet[88], packet[89], packet[90], packet[91]]);
 
     let payload_bytes =
         compute_analysis_frame_payload_bytes(stage_mask, bins, pairs, bands, eq_detail_bins);
@@ -1765,11 +1757,12 @@ impl LightingJsonLine {
         } else {
             let formatted = format!("{:.3}", value);
             let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-            self.text.push_str(if trimmed.is_empty() || trimmed == "-0" {
-                "0"
-            } else {
-                trimmed
-            });
+            self.text
+                .push_str(if trimmed.is_empty() || trimmed == "-0" {
+                    "0"
+                } else {
+                    trimmed
+                });
         }
         self
     }
@@ -1790,8 +1783,13 @@ impl LightingJsonLine {
 pub enum LightingHostCliCommand {
     RunDaemon,
     Status,
-    Register { external_dir: String, sparse_msix: String },
-    RegisterDev { manifest_path: String },
+    Register {
+        external_dir: String,
+        sparse_msix: String,
+    },
+    RegisterDev {
+        manifest_path: String,
+    },
     Remove,
     InvalidArgs,
 }
@@ -1902,7 +1900,11 @@ impl LightingSettingsSnapshot {
             if d_idx > 0 {
                 line.ch(',');
             }
-            line.ch('{').key("id").string(&dev.device_id).ch(',').key("controlled");
+            line.ch('{')
+                .key("id")
+                .string(&dev.device_id)
+                .ch(',')
+                .key("controlled");
             match dev.controlled {
                 Some(v) => line.boolean(v),
                 None => line.raw("null"),
@@ -1916,7 +1918,7 @@ impl LightingSettingsSnapshot {
             }
             line.ch(']').ch('}');
         }
-        line.ch(']}');
+        line.ch(']').ch('}');
         line.finish_line()
     }
 }
@@ -2010,15 +2012,15 @@ impl RazerContainerTracker {
         instance_id_fallback: Option<&str>,
     ) -> Option<String> {
         let (mut vid, mut pid) = parse_usb_vid_pid(interface_id);
-        if (vid == 0 || pid == 0)
-            && let Some(inst) = instance_id_fallback
-        {
-            let (iv, ip) = parse_usb_vid_pid(inst);
-            if vid == 0 {
-                vid = iv;
-            }
-            if pid == 0 {
-                pid = ip;
+        if vid == 0 || pid == 0 {
+            if let Some(inst) = instance_id_fallback {
+                let (iv, ip) = parse_usb_vid_pid(inst);
+                if vid == 0 {
+                    vid = iv;
+                }
+                if pid == 0 {
+                    pid = ip;
+                }
             }
         }
         if vid != RAZER_USB_VENDOR_ID || pid == 0 || container_id.is_empty() {
@@ -2075,7 +2077,7 @@ impl RazerContainerTracker {
             }
             line.number_u32(p as u32);
         }
-        line.ch(']}');
+        line.ch(']').ch('}');
         Some(line.finish_line())
     }
 
@@ -2242,7 +2244,7 @@ impl LampArrayRegistry {
                 .number_u32(lamp.purposes)
                 .ch('}');
         }
-        line.ch(']}');
+        line.ch(']').ch('}');
         self.devices.push(dev);
         Some(line.finish_line())
     }
@@ -2327,11 +2329,10 @@ impl LampArrayRegistry {
             return None;
         }
         let min_interval_us = (dev.min_update_ms.max(0.0) * 1000.0) as u64;
-        if let Some(last_us) = dev.last_send_us
-            && min_interval_us > 0
-            && now_us.saturating_sub(last_us) < min_interval_us
-        {
-            return None;
+        if let Some(last_us) = dev.last_send_us {
+            if min_interval_us > 0 && now_us.saturating_sub(last_us) < min_interval_us {
+                return None;
+            }
         }
         let count = (frame.lamp_count as usize).min(dev.lamp_count as usize);
         if count == 0 || frame.rgb_bytes.len() < count * 3 {
@@ -2408,7 +2409,7 @@ mod tests {
         let mut store = AppStateStore::new(48_000.0);
         let mut media = MediaWatchCoordinator::default();
         let line_1 = r#"{"app":"Spotify.exe","title":"Holocene","artist":"Bon Iver","isPlaying":true,"positionMs":12150,"durationMs":336000,"canNext":true,"canPrevious":true,"canSeek":true,"playing":["Spotify.exe"],"coverId":"0123456789abcdef"}"#;
-        let line_2 = r#"{"app":"Spotify.exe","title":"Holocene","artist":"Bon Iver","isPlaying":true,"positionMs":12890,"durationMs":336000,"canNext":true,"canPrevious":true,"canSeek":true,"playing":["Spotify.exe"],"coverId":"0123456789abcdef"}"#;
+        let line_2 = r#"{"app":"Spotify.exe","title":"Holocene","artist":"Bon Iver","isPlaying":true,"positionMs":12300,"durationMs":336000,"canNext":true,"canPrevious":true,"canSeek":true,"playing":["Spotify.exe"],"coverId":"0123456789abcdef"}"#;
 
         assert!(media.handle_line(line_1, &mut store).is_some());
         assert!(store.snapshot().residency.online_media_playing);
@@ -2534,25 +2535,15 @@ mod tests {
             WallpaperCoverState::Owner
         );
         assert_eq!(
-            desktop_cover_of(
-                monitor,
-                &[left_half, right_half],
-                &[left_half, right_half]
-            ),
+            desktop_cover_of(monitor, &[left_half, right_half], &[left_half, right_half]),
             WallpaperCoverState::Others
         );
     }
 
     #[test]
     fn dsp_host_command_and_stats_frame_roundtrip() {
-        let cmd_bytes = encode_dsp_host_command_frame(
-            FeqWireCommand::FEQ_CMD_SET_VOLUME,
-            7,
-            42,
-            0,
-            0,
-            0.85,
-        );
+        let cmd_bytes =
+            encode_dsp_host_command_frame(FeqWireCommand::FEQ_CMD_SET_VOLUME, 7, 42, 0, 0, 0.85);
         assert_eq!(
             u32::from_le_bytes([cmd_bytes[0], cmd_bytes[1], cmd_bytes[2], cmd_bytes[3]]),
             FEQ_MAGIC_COMMAND
@@ -2620,11 +2611,16 @@ mod tests {
         assert!(line2.contains("\"productIds\":[3872,18672]"));
 
         // Removing first interface does NOT emit razer-removed while second interface remains
-        assert!(razer.remove_interface("\\\\?\\HID#VID_1532&PID_0F20&MI_00#1").is_none());
+        assert!(razer
+            .remove_interface("\\\\?\\HID#VID_1532&PID_0F20&MI_00#1")
+            .is_none());
         let removed = razer
             .remove_interface("\\\\?\\HID#VID_1532&PID_48F0&MI_01#1")
             .expect("last interface removed");
-        assert_eq!(removed, "{\"type\":\"razer-removed\",\"id\":\"{aaaa-bbbb}\"}\n");
+        assert_eq!(
+            removed,
+            "{\"type\":\"razer-removed\",\"id\":\"{aaaa-bbbb}\"}\n"
+        );
 
         // 2. LampArrayRegistry cancels in-flight open if device is removed before FromIdAsync finishes,
         //    and enforces min_update_ms frame rate limiting.
@@ -2732,7 +2728,10 @@ mod tests {
             resolve_uwp_frame_host_pid(
                 1100,
                 "C:\\Windows\\System32\\ApplicationFrameHost.exe",
-                &[("ApplicationFrameInputSinkWindow", 1100), ("Windows.UI.Core.CoreWindow", 8420)]
+                &[
+                    ("ApplicationFrameInputSinkWindow", 1100),
+                    ("Windows.UI.Core.CoreWindow", 8420)
+                ]
             ),
             8420
         );

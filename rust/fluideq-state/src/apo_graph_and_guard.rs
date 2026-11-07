@@ -16,7 +16,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! - `/native/system-apo/src/graph_handover.cpp`
 //! - `/native/system-apo/src/owner_link.h` & `owner_link.cpp`
 
-use crate::apo_engine_runtime::{signature_of_chain, ApoEngineChain, SourceAnalysisReport};
+use crate::apo_analysis_and_status::SourceAnalysis as SourceAnalysisReport;
+use crate::apo_engine_runtime::{signature_of_chain, ApoEngineChain};
 use std::f64::consts::PI;
 use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 

@@ -268,6 +268,25 @@ pub struct SplitReader {
     last: [f32; SPLIT_RING_STRIDE],
 }
 
+/// Adds `weight` to the route from source channel `from` to the output channel
+/// that carries `speaker`, if this output has it.
+fn route_into(
+    matrix: &mut [[f32; SPLIT_RING_STRIDE]; SPLIT_RING_STRIDE],
+    to: &[i32; ROOM_SPEAKERS],
+    from: usize,
+    speaker: i32,
+    weight: f32,
+) -> bool {
+    if speaker >= 0 && (speaker as usize) < ROOM_SPEAKERS {
+        let target = to[speaker as usize];
+        if target >= 0 {
+            matrix[target as usize][from] += weight;
+            return true;
+        }
+    }
+    false
+}
+
 impl SplitReader {
     pub fn new(rate: u32, channels: u32, mask: u32) -> Self {
         let mut reader = Self {
@@ -389,17 +408,6 @@ impl SplitReader {
             return;
         }
 
-        let mut route = |from: usize, speaker: i32, weight: f32| -> bool {
-            if speaker >= 0 && (speaker as usize) < ROOM_SPEAKERS {
-                let target = to[speaker as usize];
-                if target >= 0 {
-                    self.matrix[target as usize][from] += weight;
-                    return true;
-                }
-            }
-            false
-        };
-
         let lfe = lfe_channel_of(clock.mask, in_ch);
         for ch in 0..u32::from(in_ch) {
             if (ch as i32) == lfe {
@@ -413,8 +421,8 @@ impl SplitReader {
             let from = ch as usize;
             if speaker == -2 {
                 // Mono: both fronts, at half power each.
-                route(from, 0, HALF_POWER);
-                route(from, 1, HALF_POWER);
+                route_into(&mut self.matrix, &to, from, 0, HALF_POWER);
+                route_into(&mut self.matrix, &to, from, 1, HALF_POWER);
                 continue;
             }
             if speaker < 0 {
@@ -424,28 +432,28 @@ impl SplitReader {
                 }
                 continue;
             }
-            if route(from, speaker, 1.0) {
+            if route_into(&mut self.matrix, &to, from, speaker, 1.0) {
                 continue;
             }
             // The second output has no such speaker: the nearest one it has.
             let left = speaker == 0 || speaker == 3 || speaker == 5;
             match speaker {
                 2 => {
-                    route(from, 0, HALF_POWER);
-                    route(from, 1, HALF_POWER);
+                    route_into(&mut self.matrix, &to, from, 0, HALF_POWER);
+                    route_into(&mut self.matrix, &to, from, 1, HALF_POWER);
                 }
                 3 | 4 => {
-                    if !route(from, speaker + 2, 1.0) {
-                        route(from, if left { 0 } else { 1 }, HALF_POWER);
+                    if !route_into(&mut self.matrix, &to, from, speaker + 2, 1.0) {
+                        route_into(&mut self.matrix, &to, from, if left { 0 } else { 1 }, HALF_POWER);
                     }
                 }
                 5 | 6 => {
-                    if !route(from, speaker - 2, 1.0) {
-                        route(from, if left { 0 } else { 1 }, HALF_POWER);
+                    if !route_into(&mut self.matrix, &to, from, speaker - 2, 1.0) {
+                        route_into(&mut self.matrix, &to, from, if left { 0 } else { 1 }, HALF_POWER);
                     }
                 }
                 _ => {
-                    route(from, 2, HALF_POWER);
+                    route_into(&mut self.matrix, &to, from, 2, HALF_POWER);
                 }
             }
         }
@@ -826,10 +834,10 @@ impl SplitTap {
             if let Ok(mut g) = self.route.lock() {
                 *g = self.own.clone();
             }
-            if role.source
-                && let Some(ref own_ep) = self.own
-            {
-                let _ = board.split_ring(own_ep);
+            if role.source {
+                if let Some(ref own_ep) = self.own {
+                    let _ = board.split_ring(own_ep);
+                }
             }
         }
 
@@ -838,14 +846,14 @@ impl SplitTap {
         self.volume_bits
             .store(role.volume.to_bits(), Ordering::Relaxed);
 
-        if let (Some(src), Some(own_ep)) = (source.as_ref(), self.own.as_ref())
-            && !Arc::ptr_eq(src, own_ep)
-        {
-            let ring = board.split_ring(src);
-            if let Some(clk) = ring.clock()
-                && clk.rate != 0
-            {
-                self.ensure_kernel(clk.rate);
+        if let (Some(src), Some(own_ep)) = (source.as_ref(), self.own.as_ref()) {
+            if !Arc::ptr_eq(src, own_ep) {
+                let ring = board.split_ring(src);
+                if let Some(clk) = ring.clock() {
+                    if clk.rate != 0 {
+                        self.ensure_kernel(clk.rate);
+                    }
+                }
             }
         }
 
@@ -1199,7 +1207,15 @@ mod tests {
         {
             let mut planes: [&mut [f32]; 2] = [&mut left, &mut right];
             let woke = sec_tap.mix(&mut planes, 480, 62_000);
-            assert!(woke); // Transitioned Waiting -> Playing and prepared/used 48kHz kernel
+            assert!(woke); // Asked for a kernel at the writer's 48 kHz rate
+        }
+        // The watcher thread answers that request before the next block
+        sec_tap.prepare();
+
+        sec_tap.begin();
+        {
+            let mut planes: [&mut [f32]; 2] = [&mut left, &mut right];
+            assert!(sec_tap.mix(&mut planes, 480, 62_000));
             sec_tap.trim_output(&mut planes, 480);
         }
 

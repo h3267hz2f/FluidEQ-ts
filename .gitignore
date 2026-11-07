@@ -80,6 +80,11 @@ native/.build/
 native/build-remote-playback/
 native/dsp-core/include/fluideq/parameters.h
 
+# Rust build output and the Tauri schemas tauri-build regenerates on every
+# build. Neither is source; both made `git status` unreadable.
+/target/
+rust/fluideq-shell/gen/
+
 # Add-ons: code kept in a developer's own checkout, loaded by pnpm dev only
 # and never shipped (.erb/scripts/addons.ts). Each is a repository of its own.
 /addons/

@@ -293,6 +293,15 @@ impl AdaptivePlaybackCushion {
 // ============================================================================
 
 /// Complete per-peer ring-buffer resampler, PI clock-drift servo, and 3ms clickless fade-in/out engine.
+/// What one peer is doing, as the runtime reports it (`PlaybackStats` in `playback_core.h`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlaybackStats {
+    pub buffered_ms: f64,
+    pub target_ms: f64,
+    pub peak: f64,
+    pub rms: f64,
+}
+
 /// Exact port of `PeerPlayback` in `/native/remote-audio-playback/src/playback_core.cpp`.
 #[derive(Debug, Clone)]
 pub struct PeerPlaybackEngine {
@@ -370,6 +379,47 @@ impl PeerPlaybackEngine {
     pub fn latency_ms(&self) -> f64 {
         let held = self.buffered_frames().max(0.0);
         held * 1000.0 / (self.source_rate.max(1) as f64)
+    }
+
+    /// Switches the peer between the ordinary and the music-smooth cushion.
+    pub fn set_smooth(&mut self, smooth: bool) {
+        self.cushion.set_smooth(smooth);
+    }
+
+    /// What the playback runtime reports for this peer (`PlaybackStats` in `playback_core.h`).
+    ///
+    /// `peak` and `rms` are read from the samples still held for playback, which
+    /// is the signal this peer adds to the output; the runtime only asks every
+    /// fifty renders, so the scan is not on the audio thread's critical path.
+    pub fn stats(&self) -> PlaybackStats {
+        let channels = self.source_channels as usize;
+        let capacity = self.capacity as u64;
+        let held = self.buffered_frames().max(0.0) as u64;
+        let start = self.read_pos.max(0.0) as u64;
+        let mut peak = 0.0f64;
+        let mut square = 0.0f64;
+        let mut count = 0u64;
+        if channels > 0 && capacity > 0 {
+            for index in 0..held {
+                let base = (((start + index) % capacity) as usize) * channels;
+                for channel in 0..channels {
+                    let sample = f64::from(self.ring[base + channel]);
+                    peak = peak.max(sample.abs());
+                    square += sample * sample;
+                    count += 1;
+                }
+            }
+        }
+        PlaybackStats {
+            buffered_ms: self.latency_ms(),
+            target_ms: self.cushion.target_ms,
+            peak,
+            rms: if count > 0 {
+                (square / count as f64).sqrt()
+            } else {
+                0.0
+            },
+        }
     }
 
     /// Pushes a decoded `LAN1` packet into the peer ring buffer (`PeerPlayback::push`).

@@ -251,6 +251,26 @@ impl AppStateStore {
         let _ = self.native_chain.configure(&self.chain_settings);
     }
 
+    /// Turns the whole chain on or off without discarding the current bands.
+    pub fn set_master_power(&mut self, enabled: bool) {
+        self.master_power = enabled;
+        self.revision += 1;
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+    }
+
+    /// Sets the preamp trim in dB, clamped to the range the UI exposes.
+    pub fn set_preamp_db(&mut self, preamp_db: f64) {
+        self.preamp_db = if preamp_db.is_finite() {
+            preamp_db.clamp(-24.0, 24.0)
+        } else {
+            0.0
+        };
+        self.revision += 1;
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+    }
+
     pub fn update_band_gain(&mut self, band_id: u32, frequency: f64, gain_db: f64, quality: f64) {
         if let Some(band) = self.bands.iter_mut().find(|b| b.id == band_id) {
             band.frequency = frequency.clamp(20.0, 20000.0);

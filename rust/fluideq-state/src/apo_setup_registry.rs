@@ -649,6 +649,8 @@ pub fn apo_off_endpoints_on_disk(engine_root: &Path) -> Vec<String> {
 
 /// `{B7E2C4D1-5A8F-4C3E-9D2B-6F1A0C8E7D34}` — FluidEQ Engine COM class ID (`kEngineClsid` in `com_paths.cpp`).
 pub const SETUP_ENGINE_CLSID: &str = "{B7E2C4D1-5A8F-4C3E-9D2B-6F1A0C8E7D34}";
+/// The engine's CLSID as the setup helper spells it when comparing registry values.
+pub const ENGINE_CLSID_UPPER: &str = SETUP_ENGINE_CLSID;
 
 /// `"FluidEQ Engine"` (`kEngineFriendlyName` in `com_registration.cpp`).
 pub const ENGINE_FRIENDLY_NAME: &str = "FluidEQ Engine";
@@ -731,6 +733,13 @@ pub struct InMemoryRegistryHive {
 impl InMemoryRegistryHive {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a key in the hive, the test-facing spelling of `ensure_key`.
+    pub fn create_key(&mut self, path: &str) -> Result<(), String> {
+        let norm = Self::normalize_key(path);
+        self.keys.entry(norm).or_default();
+        Ok(())
     }
 
     fn normalize_key(path: &str) -> String {

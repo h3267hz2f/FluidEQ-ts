@@ -14,7 +14,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! - `/native/system-apo/src/status_json.cpp` (`EngineStatus`, `status_json`)
 //! - `/native/system-apo/src/config_file.cpp` (`read_config_file` 4 MB cap + case-folded disk `Include:` tree loader)
 
-use crate::apo::{resolve_apo_endpoint_chain, ApoEndpointChain, GraphicEqPoint};
+pub use crate::apo::{ApoGraphicPoint as GraphicEqPoint, ResolvedApoChain as ApoEndpointChain};
+use crate::apo::resolve_apo_endpoint_chain;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -333,6 +334,17 @@ pub struct SignatureChainInput {
     pub dsp_values: Vec<f64>,
 }
 
+/// The resolved chain a level prediction replays (`ApoEngineChain` in `level_prediction.cpp`).
+pub type ApoEngineChain = SignatureChainInput;
+
+/// Channels a stream's layout selection names (`ChannelSelection` in `channel_layout.cpp`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChannelSelection {
+    pub all: bool,
+    pub speakers: u32,
+    pub indices: u32,
+}
+
 fn format_number_g17(value: f64) -> String {
     if !value.is_finite() {
         return "?".to_string();
@@ -384,7 +396,7 @@ pub fn signature_of_chain(chain: &SignatureChainInput) -> String {
     out.push_str("|eqg=");
     for curve in &chain.eq_graphic_curves {
         for point in curve {
-            out.push_str(&format_number_g17(point.freq_hz));
+            out.push_str(&format_number_g17(point.frequency));
             out.push(',');
             out.push_str(&format_number_g17(point.gain_db));
             out.push(';');
@@ -395,7 +407,7 @@ pub fn signature_of_chain(chain: &SignatureChainInput) -> String {
     out.push_str("|cg=");
     for curve in &chain.comparison_curves {
         for point in curve {
-            out.push_str(&format_number_g17(point.freq_hz));
+            out.push_str(&format_number_g17(point.frequency));
             out.push(',');
             out.push_str(&format_number_g17(point.gain_db));
             out.push(';');
@@ -435,7 +447,7 @@ pub fn signature_of_chain(chain: &SignatureChainInput) -> String {
     out.push_str("|g=");
     for curve in &chain.graphic_curves {
         for point in curve {
-            out.push_str(&format_number_g17(point.freq_hz));
+            out.push_str(&format_number_g17(point.frequency));
             out.push(',');
             out.push_str(&format_number_g17(point.gain_db));
             out.push(';');
@@ -721,7 +733,7 @@ pub fn resolve_apo_endpoint_chain_from_dir(
         }
         if let Some(content) = read_apo_config_file_bounded(&path) {
             canonical_names.insert(name.to_ascii_lowercase(), name.to_string());
-            files.insert(name.to_string(), content);
+            files.insert(name.to_string(), content.clone());
             files.insert(name.to_ascii_lowercase(), content);
         }
     }

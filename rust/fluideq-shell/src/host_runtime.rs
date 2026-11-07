@@ -15,8 +15,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 use fluideq_dsp_sys::{
     FeqWireAckFrame, FeqWireAnalysisFrame, FeqWireHandshake, FeqWireStatus, FEQ_ABI_VERSION,
-    FEQ_CHAIN_BAND_PARAMS, FEQ_CHAIN_MAX_EQ_BANDS, FEQ_CHAIN_MAX_TONE_BANDS,
-    FEQ_CHAIN_PARAM_LEAD, FEQ_MAGIC_ACK, FEQ_MAGIC_HANDSHAKE, FEQ_WIRE_PROTOCOL_VERSION,
+    FEQ_CHAIN_BAND_PARAMS, FEQ_CHAIN_MAX_EQ_BANDS, FEQ_CHAIN_MAX_TONE_BANDS, FEQ_CHAIN_PARAM_LEAD,
+    FEQ_MAGIC_ACK, FEQ_MAGIC_HANDSHAKE, FEQ_WIRE_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -39,19 +39,19 @@ pub const ENGINE_CHANNELS: u32 = 2;
 pub const MAX_WIRE_PATH_BYTES: u32 = 32 * 1024;
 
 /// Maximum chain parameter count in `f64` words (`FEQ_CHAIN_MAX_PARAMS` in `chain.h` / `host.h`):
-/// `158` lead + `64 * 7` EQ bands + `1 + 9` Room trailer + `6` Footsteps trailer + `2 + 48 * 4` Tone trailer = `815`.
+/// `158` lead + `64 * 7` EQ bands + `15` room/de-esser trailer + `7` Footsteps trailer +
+/// `4` tone header + `48 * 4` tone bands = `824`.
 pub const MAX_WIRE_CHAIN_PARAMS: u32 = (FEQ_CHAIN_PARAM_LEAD
     + FEQ_CHAIN_MAX_EQ_BANDS * FEQ_CHAIN_BAND_PARAMS
-    + 1
-    + 9
-    + 6
-    + 2
+    + 15
+    + 7
+    + 4
     + FEQ_CHAIN_MAX_TONE_BANDS * 4) as u32;
 
 /// Schema version of the core parameter block (`FEQ_PARAMETER_SCHEMA_VERSION`).
-pub const PARAMETER_SCHEMA_VERSION: u32 = 1;
-/// Legacy core parameter count (`FEQ_PARAMETER_COUNT`).
-pub const CORE_PARAMETER_COUNT: u32 = 64;
+pub const PARAMETER_SCHEMA_VERSION: u32 = fluideq_dsp_sys::FEQ_PARAMETER_SCHEMA_VERSION;
+/// Core parameter count (`FEQ_PARAMETER_COUNT`), from the shared parameter table.
+pub const CORE_PARAMETER_COUNT: u32 = fluideq_dsp_sys::FEQ_PARAMETER_COUNT as u32;
 
 /// Reads exactly `into.len()` bytes from `reader`, looping across short pipe reads (`read_exact` in `host_wire.cpp`).
 /// Returns `false` only on true EOF (`0` bytes read) or unrecoverable I/O error.
@@ -752,14 +752,14 @@ impl ProcessingLatency {
     ) {
         let next: [u32; 10] = [
             total_frames,
-            parts.eq_frames,
-            parts.exciter_frames,
-            parts.maximizer_frames,
-            parts.room_frames,
-            parts.safety_frames,
-            parts.bass_frames,
-            parts.denoise_frames,
-            parts.deesser_frames,
+            parts.eq,
+            parts.restoration,
+            parts.leveler,
+            parts.room,
+            parts.bass_punch,
+            parts.maximizer,
+            parts.headroom,
+            parts.deesser,
             active_stages,
         ];
         let mut unchanged = true;
@@ -773,11 +773,13 @@ impl ProcessingLatency {
             return;
         }
         let gen = self.generation.load(Ordering::Relaxed);
-        self.generation.store(gen.wrapping_add(1), Ordering::Release);
+        self.generation
+            .store(gen.wrapping_add(1), Ordering::Release);
         for (i, &val) in next.iter().enumerate() {
             self.words[i].store(val, Ordering::Relaxed);
         }
-        self.generation.store(gen.wrapping_add(2), Ordering::Release);
+        self.generation
+            .store(gen.wrapping_add(2), Ordering::Release);
     }
 
     pub fn read(&self) -> (u32, [u32; 8], u32) {
@@ -953,25 +955,24 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
         let request_id = u32::from_le_bytes([cmd_buf[8], cmd_buf[9], cmd_buf[10], cmd_buf[11]]);
         let settings_revision =
             u32::from_le_bytes([cmd_buf[12], cmd_buf[13], cmd_buf[14], cmd_buf[15]]);
-        let parameter_id =
-            u32::from_le_bytes([cmd_buf[16], cmd_buf[17], cmd_buf[18], cmd_buf[19]]);
+        let parameter_id = u32::from_le_bytes([cmd_buf[16], cmd_buf[17], cmd_buf[18], cmd_buf[19]]);
         let parameter_index =
             i32::from_le_bytes([cmd_buf[20], cmd_buf[21], cmd_buf[22], cmd_buf[23]]);
         let value = f64::from_le_bytes([
-            cmd_buf[24], cmd_buf[25], cmd_buf[26], cmd_buf[27], cmd_buf[28], cmd_buf[29],
-            cmd_buf[30], cmd_buf[31],
+            cmd_buf[24],
+            cmd_buf[25],
+            cmd_buf[26],
+            cmd_buf[27],
+            cmd_buf[28],
+            cmd_buf[29],
+            cmd_buf[30],
+            cmd_buf[31],
         ]);
 
         if magic != fluideq_dsp_sys::FEQ_MAGIC_COMMAND
             || protocol_version != FEQ_WIRE_PROTOCOL_VERSION
         {
-            let ack = build_ack_frame(
-                request_id,
-                FeqWireStatus::FEQ_WIRE_UNSUPPORTED,
-                0,
-                0,
-                0.0,
-            );
+            let ack = build_ack_frame(request_id, FeqWireStatus::FEQ_WIRE_UNSUPPORTED, 0, 0, 0.0);
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
             continue;
         }
@@ -1016,13 +1017,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
                 session.backend_running = true;
                 (FeqWireStatus::FEQ_WIRE_APPLIED, session.sample_rate as f64)
             };
-            let ack = build_ack_frame(
-                request_id,
-                status,
-                settings_revision,
-                0,
-                reported_rate,
-            );
+            let ack = build_ack_frame(request_id, status, settings_revision, 0, reported_rate);
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
         } else if command_raw == FeqWireCommand::FEQ_CMD_STOP as u16 {
             // `stop_device` (`host_commands.cpp` lines 86–92): releases hardware so DAC noise floor is silent.
@@ -1050,7 +1045,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
         } else if command_raw == FeqWireCommand::FEQ_CMD_APPLY_SNAPSHOT as u16 {
             // `FEQ_CMD_APPLY_SNAPSHOT` (`host_commands.cpp` lines 165–186):
-            // Must equal `FEQ_PARAMETER_COUNT` (64), otherwise reject without reading payload.
+            // Must equal `FEQ_PARAMETER_COUNT`, otherwise reject without reading payload.
             if (parameter_id as usize) != fluideq_dsp_sys::FEQ_PARAMETER_COUNT {
                 let ack = build_ack_frame(
                     request_id,
@@ -1436,7 +1431,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
             // `FEQ_CMD_RENDER_TO_FILE` (`host_commands.cpp` lines 460–513):
             // Always consumes the path payload if `wire_length_from_double` passes, then rejects if `backend_running`.
             let path_len = wire_length_from_double(value, MAX_WIRE_PATH_BYTES)?;
-            let mut path_bytes = vec![0u8; path_len];
+            let mut path_bytes = vec![0u8; path_len as usize];
             if !read_exact_from_pipe(reader, &mut path_bytes) {
                 return Err("Pipe closed mid RENDER_TO_FILE path".to_string());
             }
@@ -1492,8 +1487,11 @@ mod tests {
 
     #[test]
     fn wire_guards_refuse_oversized_or_nan_lengths_before_allocation() {
-        assert_eq!(payload_within(815, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN"), Ok(815));
-        assert!(payload_within(816, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN").is_err());
+        assert_eq!(
+            payload_within(824, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN"),
+            Ok(824)
+        );
+        assert!(payload_within(825, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN").is_err());
 
         assert_eq!(wire_length_from_double(256.0, MAX_WIRE_PATH_BYTES), Ok(256));
         assert!(wire_length_from_double(-1.0, MAX_WIRE_PATH_BYTES).is_err());
@@ -1524,11 +1522,8 @@ mod tests {
         coord.room_head_loaded = 1;
 
         // 1. Outage window: first failure logs once, second failure suppresses duplicate log
-        let out1 = coord.handle_reopen_attempt(
-            true,
-            Err("no default endpoint".to_string()),
-            Ok(()),
-        );
+        let out1 =
+            coord.handle_reopen_attempt(true, Err("no default endpoint".to_string()), Ok(()));
         assert_eq!(
             out1,
             DeviceReopenOutcome::OutageAwaitingEndpoint {
@@ -1536,11 +1531,8 @@ mod tests {
                 error: "no default endpoint".to_string()
             }
         );
-        let out2 = coord.handle_reopen_attempt(
-            true,
-            Err("no default endpoint".to_string()),
-            Ok(()),
-        );
+        let out2 =
+            coord.handle_reopen_attempt(true, Err("no default endpoint".to_string()), Ok(()));
         assert_eq!(
             out2,
             DeviceReopenOutcome::OutageAwaitingEndpoint {

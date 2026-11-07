@@ -21,7 +21,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::apo::ApoGraphicPoint;
 use crate::apo_analysis_and_status::{
-    output_block_timing, output_carried_flag, trace, EngineLog,
+    output_block_timing, output_carried_flag, trace, ApoEngineLog, EngineLog,
 };
 use crate::apo_engine_runtime::SignatureBand;
 use crate::apo_graph_and_guard::{describe_timing, timing_step, BlockTiming};
@@ -636,17 +636,20 @@ fn process_biquad_in_place(
     buffer: &mut [f32],
     coeffs: &FeqBiquadCoefficients,
 ) {
-    let mut s1 = state.s1;
-    let mut s2 = state.s2;
+    let b0 = coeffs.b0;
+    let b1 = coeffs.b1;
+    let b2 = coeffs.b2;
+    let a1 = coeffs.a1;
+    let a2 = coeffs.a2;
     for sample in buffer.iter_mut() {
         let x = *sample as f64;
-        let y = coeffs.b0 * x + s1;
-        s1 = coeffs.b1 * x - coeffs.a1 * y + s2;
-        s2 = coeffs.b2 * x - coeffs.a2 * y;
+        let y = b0 * x + b1 * state.x1 + b2 * state.x2 - a1 * state.y1 - a2 * state.y2;
+        state.x2 = state.x1;
+        state.x1 = x;
+        state.y2 = state.y1;
+        state.y1 = y;
         *sample = y as f32;
     }
-    state.s1 = s1;
-    state.s2 = s2;
 }
 
 /// Complete 1:1 port of `fluideq_engine::IirCascade` in `/native/system-apo/src/iir_cascade.cpp`:
@@ -1554,14 +1557,14 @@ impl ApoInstance {
         self.max_frames = in_conn.max_frame_count;
         self.scratch
             .resize((self.channels as usize) * (self.max_frames as usize), 0.0);
-        self.carried = output_carried_flag(&self.endpoint_guid);
+        self.carried = Some(output_carried_flag(&self.endpoint_guid));
         self.carried_told = false;
-        self.timing = output_block_timing(&self.endpoint_guid);
+        self.timing = Some(output_block_timing(&self.endpoint_guid));
         self.timing_step_told = 0;
         self.blocks_timed = 0;
 
         if let Some(path) = log_file_path {
-            let log = EngineLog::new(path, &self.endpoint_guid);
+            let log = ApoEngineLog::with_path(path.to_string_lossy().into_owned(), &self.endpoint_guid);
             log.write(&format!(
                 "locked: {} ch, {} Hz, up to {} frames, device \"{}\"",
                 self.channels,

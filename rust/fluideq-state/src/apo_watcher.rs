@@ -31,7 +31,7 @@ use crate::apo_graph_and_guard::{
     LevelPrediction, LevelPredictionJudgement, LEVEL_HISTORY_SECONDS,
 };
 use crate::apo_split_and_leveling::EndpointLevelingCoordinator;
-use crate::apo_split_tap_and_reader::{SplitState, SplitStats};
+use crate::apo_split_tap_and_reader::{SplitReport, SplitState};
 use crate::chain_wire::decode_chain_settings_wire;
 use crate::room_heads::RoomHeadBank;
 use fluideq_dsp_sys::FeqChainLatencyParts;
@@ -636,7 +636,7 @@ pub struct ApoWatcher {
     pub unwatched: bool,
 
     // Split tap status & transport failure state
-    pub split_report: Option<SplitStats>,
+    pub split_report: Option<SplitReport>,
     pub split_transport_failed: bool,
 
     // Status file share & timing step (`watcher_log.cpp`)
@@ -723,7 +723,7 @@ impl ApoWatcher {
             unwatched: false,
             split_report: None,
             split_transport_failed: false,
-            status_share: StatusShare::new(status_path),
+            status_share: StatusShare::with_root(status_path),
             status_failure_logged: false,
             timing_step_logged: 0,
             stop_event: AtomicBool::new(false),
@@ -797,7 +797,7 @@ impl ApoWatcher {
             self.log
                 .write("no endpoint identified; only unguarded configuration applies");
         }
-        if !is_directory(Path::new(&self.config_dir)) {
+        if !is_directory(&self.config_dir) {
             self.log.write(&format!(
                 "configuration directory {} is not present; waiting for it",
                 self.config_dir
@@ -819,9 +819,9 @@ impl ApoWatcher {
 
     /// Resolves the deepest existing directory ancestor to watch (`deepest_existing(config_dir_)` in `watcher.cpp`).
     pub fn watched_directory(&self) -> (String, bool) {
-        let watched = deepest_existing(Path::new(&self.config_dir));
-        let watching_config = watched == Path::new(&self.config_dir);
-        (watched.to_string_lossy().into_owned(), watching_config)
+        let watched = deepest_existing(&self.config_dir);
+        let watching_config = watched == self.config_dir;
+        (watched, watching_config)
     }
 
     /// Exact port of one iteration of `Watcher::run()`'s inner wait loop (`watcher.cpp` lines 348–448).
@@ -875,7 +875,7 @@ impl ApoWatcher {
                 let mut rearm = false;
                 if watching_config {
                     self.reload(build_graph, predicted_level);
-                } else if is_directory(Path::new(&self.config_dir)) {
+                } else if is_directory(&self.config_dir) {
                     return (false, true);
                 }
                 if !rearmed_ok {
@@ -1355,7 +1355,7 @@ impl ApoWatcher {
         if graph.is_passthrough {
             if !owner_present {
                 reason = "FluidEQ is not running".to_string();
-            } else if !is_directory(Path::new(&self.config_dir)) {
+            } else if !is_directory(&self.config_dir) {
                 reason = "no configuration directory".to_string();
             } else if chain.files_read.is_empty() {
                 reason = "no config.txt in the configuration directory".to_string();
@@ -1378,9 +1378,7 @@ impl ApoWatcher {
 
     /// Exact port of `Watcher::log_timing()` in `/native/system-apo/src/watcher_log.cpp`.
     pub fn log_timing(&mut self) {
-        let Some(timing) = output_block_timing(&self.endpoint_guid) else {
-            return;
-        };
+        let timing = output_block_timing(&self.endpoint_guid);
         let reading = timing.read();
         let step = timing_step(reading.slowest_permille);
         if reading.blocks == 0 || step <= self.timing_step_logged {
@@ -1454,19 +1452,16 @@ impl ApoWatcher {
             if self.split_transport_failed {
                 status.problems.push("split-transport".to_string());
             }
-            if let Some(carried) = output_carried_flag(&self.endpoint_guid) {
-                status.carried = carried.load(Ordering::Relaxed);
-            }
-            if let Some(timing) = output_block_timing(&self.endpoint_guid) {
-                let reading = timing.read();
-                if reading.blocks > 0 {
-                    status.load = Some(BlockLoadReport {
-                        blocks: reading.blocks,
-                        over_half: reading.over_half,
-                        slowest_ms: reading.slowest_ms,
-                        period_ms: reading.period_ms,
-                    });
-                }
+            status.carried = output_carried_flag(&self.endpoint_guid).load(Ordering::Relaxed);
+            let timing = output_block_timing(&self.endpoint_guid);
+            let reading = timing.read();
+            if reading.blocks > 0 {
+                status.load = Some(BlockLoadReport {
+                    blocks: reading.blocks,
+                    over_half: reading.over_half,
+                    slowest_ms: reading.slowest_ms,
+                    period_ms: reading.period_ms,
+                });
             }
             if self.reload_failed {
                 status.problems.push("reload-failed".to_string());
@@ -1497,11 +1492,11 @@ impl ApoWatcher {
                     } else {
                         0.0
                     },
-                    underruns: split.underruns,
+                    underruns: split.underruns as u64,
                 });
             }
 
-            if let Err(err) = self.status_share.publish(status) {
+            if let Err(err) = self.status_share.publish(&status) {
                 written = false;
                 why = err;
             }
@@ -1531,7 +1526,7 @@ impl ApoWatcher {
             .as_deref()
             .map(parse_programme)
             .unwrap_or_default();
-        leveling.announce(programme, None)
+        leveling.announce(&programme, None)
     }
 
     /// Exact port of `Watcher::follow_split(bool owner)` in `/native/system-apo/src/watcher_log.cpp`.
@@ -1757,7 +1752,10 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let slot = Arc::new(GraphSlot::new());
-        let log = EngineLog::new(temp_dir.join("engine.log"), "{11111111-2222-3333-4444-555555555555}");
+        let log = EngineLog::with_path(
+            temp_dir.join("engine.log").to_string_lossy().into_owned(),
+            "{11111111-2222-3333-4444-555555555555}",
+        );
         let mut watcher = ApoWatcher::new(
             slot.clone(),
             log,

@@ -29,7 +29,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //!    descending into reparse points/symlinks), and `describe_error`.
 
 use crate::apo::EndpointAttachResult;
-use crate::apo_watcher::sha256_digest;
+use crate::apo_split_and_leveling::sha256_digest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -716,6 +716,60 @@ impl SetupPaths {
     pub fn installed_dll_path(&self) -> Option<PathBuf> {
         self.install_dir().map(|d| d.join("FluidEQ-Engine.dll"))
     }
+
+    /// The tree every write is checked against (`engine_parent` in `fs.cpp`).
+    fn link_root(&self) -> PathBuf {
+        self.engine_parent().unwrap_or_default()
+    }
+
+    /// Creates `path` and its missing parents, refusing a path that crosses a link.
+    pub fn ensure_directory(&self, path: &Path) -> bool {
+        ensure_directory_safe(&self.link_root(), path)
+    }
+
+    /// Writes UTF-8 without a BOM, refusing a path that crosses a link.
+    pub fn write_utf8(&self, path: &Path, text: &str) -> bool {
+        write_utf8_safe(&self.link_root(), path, text)
+    }
+
+    /// Appends UTF-8 without truncating, refusing a path that crosses a link.
+    pub fn append_utf8(&self, path: &Path, text: &str) -> bool {
+        append_utf8_safe(&self.link_root(), path, text)
+    }
+
+    /// Reads a UTF-8 file up to the 4 MB cap, or nothing.
+    pub fn read_utf8(&self, path: &Path) -> Option<String> {
+        read_utf8_bounded(path)
+    }
+
+    /// Whether anything exists at `path`.
+    pub fn path_exists(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+
+    /// File names in `directory` matching `pattern`.
+    pub fn files_matching(directory: &Path, pattern: &str) -> Vec<String> {
+        files_matching(directory, pattern)
+    }
+
+    /// A plain file's bytes, read once, up to `limit`.
+    pub fn read_locked(path: &Path, limit: usize) -> Option<Vec<u8>> {
+        read_locked(path, limit)
+    }
+
+    /// Replaces `to` with `bytes`, moving an in-use file aside for the next reboot.
+    pub fn replace_with_bytes_simulated(
+        bytes: &[u8],
+        to: &Path,
+        target_is_mapped_in_use: bool,
+    ) -> Result<(), String> {
+        replace_with_bytes(bytes, to, target_is_mapped_in_use).map(|_| ())
+    }
+
+    /// Deletes `directory` and everything under it, never following a link.
+    pub fn delete_directory_tree(directory: &Path) {
+        let _ = delete_directory_tree(directory);
+    }
 }
 
 fn is_symlink_or_reparse(path: &Path) -> bool {
@@ -1029,28 +1083,28 @@ mod tests {
     #[test]
     fn retry_policy_passes_all_six_checks_from_retry_test_cpp() {
         // 1. A command that works runs once and never waits
-        let mut calls = Vec::new();
+        let calls = std::cell::RefCell::new(Vec::new());
         let res = run_with_retries(
             COMMAND_TRIES,
             |attempt| {
-                calls.push("try");
+                calls.borrow_mut().push("try");
                 attempt.ok = true;
             },
             |_why| {
-                calls.push("settle");
+                calls.borrow_mut().push("settle");
                 true
             },
         );
         assert!(res.ok);
-        assert_eq!(calls, vec!["try"]);
+        assert_eq!(*calls.borrow(), vec!["try"]);
 
         // 2. A command that works the second time clears the first try's error
-        let mut calls = Vec::new();
+        let calls = std::cell::RefCell::new(Vec::new());
         let mut try_count = 0;
         let res = run_with_retries(
             COMMAND_TRIES,
             |attempt| {
-                calls.push("try");
+                calls.borrow_mut().push("try");
                 try_count += 1;
                 attempt.ok = try_count >= 2;
                 if !attempt.ok {
@@ -1058,51 +1112,51 @@ mod tests {
                 }
             },
             |_why| {
-                calls.push("settle");
+                calls.borrow_mut().push("settle");
                 true
             },
         );
         assert!(res.ok);
         assert!(res.error.is_empty());
-        assert_eq!(calls, vec!["try", "settle", "try"]);
+        assert_eq!(*calls.borrow(), vec!["try", "settle", "try"]);
 
         // 3. A command that never works tries 3 times with 2 settles
-        let mut calls = Vec::new();
+        let calls = std::cell::RefCell::new(Vec::new());
         let mut try_count = 0;
         let res = run_with_retries(
             COMMAND_TRIES,
             |attempt| {
-                calls.push("try");
+                calls.borrow_mut().push("try");
                 try_count += 1;
                 attempt.ok = false;
                 attempt.error = format!("try {}", try_count);
             },
             |_why| {
-                calls.push("settle");
+                calls.borrow_mut().push("settle");
                 true
             },
         );
         assert!(!res.ok);
-        assert_eq!(calls, vec!["try", "settle", "try", "settle", "try"]);
+        assert_eq!(*calls.borrow(), vec!["try", "settle", "try", "settle", "try"]);
         assert_eq!(res.error, "failed 3 times; the last time: try 3");
 
         // 4. A wait that fails ends the tries immediately
-        let mut calls = Vec::new();
+        let calls = std::cell::RefCell::new(Vec::new());
         let res = run_with_retries(
             COMMAND_TRIES,
             |attempt| {
-                calls.push("try");
+                calls.borrow_mut().push("try");
                 attempt.ok = false;
                 attempt.error = "could not attach".to_string();
             },
             |why| {
-                calls.push("settle");
+                calls.borrow_mut().push("settle");
                 *why = "access is denied".to_string();
                 false
             },
         );
         assert!(!res.ok);
-        assert_eq!(calls, vec!["try", "settle"]);
+        assert_eq!(*calls.borrow(), vec!["try", "settle"]);
         assert!(res.error.contains("could not attach"));
         assert!(res.error.contains("access is denied"));
 

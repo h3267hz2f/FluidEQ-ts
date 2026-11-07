@@ -22,6 +22,11 @@ use std::os::raw::{c_char, c_double, c_float, c_int};
 pub const FEQ_ABI_VERSION: u32 = 1;
 pub const FEQ_CHAIN_PARAM_LEAD: usize = 158;
 pub const FEQ_CHAIN_BAND_PARAMS: usize = 7;
+// Generated from `src/common/dsp/nativeParameters.ts` by `build.rs`, the same
+// table the generated C++ `parameters.h` comes from. It defines
+// `FEQ_PARAMETER_SCHEMA_VERSION`, `FEQ_PARAMETER_COUNT`, `FEQ_PARAMETER_IDS`,
+// `FEQ_PARAMETER_STRUCTURAL`, and `feq_parameter_slot`.
+include!(concat!(env!("OUT_DIR"), "/parameters.rs"));
 pub const FEQ_CHAIN_MAX_EQ_BANDS: usize = 64;
 pub const FEQ_CHAIN_EXCITER_BANDS: usize = 3;
 pub const FEQ_CHAIN_CHANNELS: usize = 2;
@@ -276,7 +281,7 @@ impl Default for FeqBiquadCoefficients {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeqBiquadState {
     pub x1: c_double,
     pub x2: c_double,
@@ -330,14 +335,14 @@ pub struct FeqSongLevel {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeqMasterTelemetry {
     pub auto_headroom_reduction_db: c_double,
     pub auto_headroom_true_peak_db: c_double,
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeqChainLatencyParts {
     pub eq: u32,
     pub restoration: u32,
@@ -622,7 +627,7 @@ pub struct FeqFootstepsReport {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FeqChainExciterBand {
     pub enabled: c_int,
     pub freq_hz: c_double,
@@ -633,7 +638,7 @@ pub struct FeqChainExciterBand {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FeqChainExciterSettings {
     pub enabled: c_int,
     pub isolate: c_int,
@@ -847,7 +852,7 @@ impl Default for FeqBassPunchSettings {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FeqDimensionSettings {
     pub enabled: c_int,
     pub low_width: c_double,
@@ -1076,6 +1081,53 @@ pub struct FeqChainSettings {
     pub master: FeqChainMasterSettings,
     pub surround_all_channels: c_int,
     pub low_latency: c_int,
+}
+
+/// The Exciter's resting band: the lowest frequency and range its controls accept,
+/// so a default encode/decode stays bit-identical.
+impl Default for FeqChainExciterBand {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            freq_hz: 20.0,
+            range: 0.25,
+            drive: 0.0,
+            mix: 0.0,
+            texture: 0.0,
+        }
+    }
+}
+
+impl Default for FeqChainExciterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            isolate: 0,
+            stereo: 0,
+            align_enabled: 0,
+            align_amount: 0.0,
+            organic_enabled: 0,
+            organic_amount: 0.0,
+            organic_focus_hz: 50.0,
+            organic_range: 0.5,
+            bands: [FeqChainExciterBand::default(); FEQ_CHAIN_EXCITER_BANDS],
+            oversampling: 1,
+        }
+    }
+}
+
+impl Default for FeqDimensionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            low_width: 0.0,
+            mid_width: 0.0,
+            high_width: 0.0,
+            low_hz: 60.0,
+            high_hz: 1200.0,
+            decorrelation: 0.0,
+        }
+    }
 }
 
 impl Default for FeqChainSettings {
@@ -1901,6 +1953,35 @@ impl NativeChainHandle {
         {
             self.eq_kernel_len = len as u32;
             true
+        }
+    }
+
+    /// Resets the chain's carried state for `reason` (`FEQ_CHAIN_RESET_*`).
+    pub fn reset(&mut self, reason: FeqChainResetReason) {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_chain_reset(self.raw, reason);
+            }
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = reason;
+        }
+    }
+
+    /// Applies or clears the denoise profile on the native chain.
+    pub fn set_noise_profile(&mut self, profile: Option<&FeqNoiseProfile>) {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let pointer = profile.map_or(std::ptr::null(), |p| p as *const FeqNoiseProfile);
+                feq_chain_set_noise_profile(self.raw, pointer);
+            }
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = profile;
         }
     }
 
