@@ -78,6 +78,22 @@ before CMake. The uploaded `FluidEQ-native-engine` artifact contains:
 Run URL:
 <https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42345880973>.
 
+## Bundle result
+
+Run `42347599405` on commit `7485252` built the NSIS installer with the staged
+engine. The `Verify the installer carries the engine` step checked the
+`FluidEQ-native-engine` binaries are inside the installer. The installer grew
+from 2,161,889 bytes to 2,638,316 bytes:
+
+- `FluidEQ_2.1.0_x64-setup.exe`: 2,638,316 bytes.
+- Contains `engine-bin/FluidEQ-Engine.dll`,
+  `engine-bin/FluidEQ-Engine-Setup.exe`, and
+  `engine-bin/FluidEQ-DSP.exe`.
+
+Run URL:
+<https://github.com/h3267hz2f/FluidEQ-ts/actions/runs/42347599405>. The
+temporary `v2.1.0-engine-bundle-test` tag was deleted after the run.
+
 ## Risks
 
 - `/W4 /WX` may expose warnings in a newer MSVC than the original build.
@@ -90,10 +106,8 @@ Run URL:
 ## Milestones
 
 1. Build the engine artifacts in CI — **done**; see Result above.
-2. Copy the artifacts into the Tauri bundle and the NSIS installer — added by
-   `rust/fluideq-shell/scripts/stage-native-engine.mjs` and
-   `.github/workflows/rust-desktop.yml`; the installer is verified to contain the
-   three binaries, not yet installed or activated.
+2. Copy the artifacts into the Tauri bundle and the NSIS installer — **done**;
+   see Bundle result above. They are shipped, not yet installed or activated.
 3. Implement the install/register/uninstall flow with UAC and audio restart.
 4. Launch and supervise `FluidEQ-DSP`, and send chain snapshots from Rust.
 5. Verify on a real endpoint, including bypass when the shell exits.
