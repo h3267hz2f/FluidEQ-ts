@@ -105,7 +105,10 @@ pub use platform::{get_master_volume, set_master_volume};
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
+    // Hosted Windows runners have no default render endpoint, so this stays out
+    // of the normal test run. Run it on a real desktop with `-- --ignored`.
     #[test]
+    #[ignore = "requires a real Windows audio endpoint"]
     fn default_render_volume_is_a_scalar() {
         let volume =
             super::get_master_volume().expect("the default render endpoint must expose volume");

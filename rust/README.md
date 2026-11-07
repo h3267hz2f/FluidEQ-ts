@@ -20,6 +20,13 @@ target\debug\fluideq-shell.exe
 cargo test --workspace --features link-cpp-core
 ```
 
+CI runners have no default audio endpoint, so the WASAPI read test is ignored
+by default. Run it on a real Windows desktop with:
+
+```powershell
+cargo test -p fluideq-shell --features link-cpp-core default_render_volume_is_a_scalar -- --ignored
+```
+
 ## Installer
 
 ```powershell
@@ -47,3 +54,13 @@ the Rust constants from it on every build; there is no second copy to drift.
   biquad forms the C++ core applies.
 - The state is saved to `%APPDATA%\com.fluideq.desktop\state.json` after each
   change.
+
+## CI
+
+`.github/workflows/rust-desktop.yml` runs the tests and builds the NSIS
+installer on GitHub's Windows runners, so dependency downloads and compilation
+do not use the local connection. It is manual (or tag-triggered) because the
+repository is private and hosted minutes are billed; start it from
+**Actions → Rust desktop → Run workflow**. The workflow caches Cargo artifacts
+between runs and uploads only the installer (about 2.2 MB) for download. Set
+the `bundle` input to `false` for a tests-only run.

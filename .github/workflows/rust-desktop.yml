@@ -4,6 +4,11 @@ name: Rust desktop
 # workflow is deliberate rather than continuous: a tag or an explicit run.
 on:
   workflow_dispatch:
+    inputs:
+      bundle:
+        description: "Build the NSIS installer after the tests"
+        type: boolean
+        default: true
   push:
     tags:
       - "v*"
@@ -14,6 +19,11 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 60
+    concurrency:
+      group: rust-desktop-${{ github.ref }}
+      cancel-in-progress: true
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,11 +35,14 @@ jobs:
         run: cargo test --workspace --features link-cpp-core
 
       - name: Build the Tauri shell and the NSIS installer
+        if: github.event_name != 'workflow_dispatch' || inputs.bundle
         working-directory: rust/fluideq-shell
         run: npx -y @tauri-apps/cli@2 build --features link-cpp-core
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'workflow_dispatch' || inputs.bundle
         with:
           name: FluidEQ-installer
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
+          retention-days: 14
