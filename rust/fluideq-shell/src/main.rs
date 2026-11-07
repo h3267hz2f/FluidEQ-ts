@@ -13,12 +13,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod audio_endpoint;
+pub mod engine_setup;
 pub mod host_runtime;
 pub mod ipc;
 pub mod spectrum_bridge;
 pub mod system_daemons;
 
 use fluideq_state::{AppStateSnapshot, AppStateStore};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use tauri::{Manager, State};
@@ -92,6 +94,16 @@ fn set_output_volume(volume: f64) -> Result<f64, String> {
     audio_endpoint::set_master_volume(volume)
 }
 
+#[tauri::command]
+fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
+    engine_setup::status(&app)
+}
+
+#[tauri::command]
+fn install_engine(app: tauri::AppHandle) -> Result<Value, String> {
+    engine_setup::install(&app)
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -117,6 +129,8 @@ fn main() {
             set_band_gain,
             get_output_volume,
             set_output_volume,
+            engine_status,
+            install_engine,
         ])
         .run(tauri::generate_context!())
         .expect("FluidEQ failed to start");
