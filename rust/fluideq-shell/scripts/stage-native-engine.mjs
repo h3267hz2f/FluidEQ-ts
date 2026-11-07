@@ -17,6 +17,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 import {
   copyFileSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -40,11 +41,13 @@ const overridePath = path.join(shellDir, 'tauri.bundle.conf.json');
 const version = '2.1.0';
 const revision = process.env.GITHUB_SHA || 'unknown';
 
-const files = [
+const engineFiles = [
   'FluidEQ-Engine.dll',
   'FluidEQ-Engine-Setup.exe',
   'FluidEQ-DSP.exe',
 ];
+const runtimeFiles = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'];
+const files = [...engineFiles, ...runtimeFiles];
 
 function fail(message) {
   throw new Error(`stage-native-engine: ${message}`);
@@ -69,6 +72,69 @@ function run(command, args, cwd) {
 
 if (process.platform !== 'win32') {
   fail('the native FluidEQ Engine is Windows-only');
+}
+
+mkdirSync(nativeBin, { recursive: true });
+
+function listDirectories(directory) {
+  let entries = [];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+function directoryHasRuntimeFiles(directory) {
+  return runtimeFiles.every((file) => {
+    try {
+      return statSync(path.join(directory, file)).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+function findRuntimeDirectory() {
+  const candidates = [];
+  const redistFromEnvironment = process.env.VCToolsRedistDir;
+  if (redistFromEnvironment) {
+    candidates.push(path.resolve(redistFromEnvironment));
+  }
+
+  const visualStudioRoot = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft Visual Studio');
+  for (const year of listDirectories(visualStudioRoot)) {
+    const installRoot = path.join(visualStudioRoot, year);
+    for (const edition of listDirectories(installRoot)) {
+      candidates.push(
+        path.join(installRoot, edition, 'VC', 'Redist', 'MSVC'),
+      );
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (!directoryHasRuntimeFiles(candidate)) {
+      for (const version of listDirectories(candidate).sort().reverse()) {
+        const versionRoot = path.join(candidate, version);
+        for (const crt of listDirectories(path.join(versionRoot, 'x64'))) {
+          const crtDirectory = path.join(versionRoot, 'x64', crt);
+          if (directoryHasRuntimeFiles(crtDirectory)) {
+            return crtDirectory;
+          }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+const runtimeDirectory = findRuntimeDirectory();
+if (!runtimeDirectory) {
+  fail(`could not find the MSVC runtime DLLs (${runtimeFiles.join(', ')}) next to the engine build; run this under the MSVC developer environment`);
+}
+for (const file of runtimeFiles) {
+  copyFileSync(path.join(runtimeDirectory, file), path.join(nativeBin, file));
 }
 
 run('node', [path.join(nativeDir, 'tools', 'generate-parameters.mjs')], repoRoot);

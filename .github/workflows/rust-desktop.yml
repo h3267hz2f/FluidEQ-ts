@@ -35,6 +35,11 @@ jobs:
       - name: Test the Rust state centre and shell
         run: cargo test --workspace --features link-cpp-core
 
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: github.event_name != 'workflow_dispatch' || inputs.bundle
+        with:
+          arch: x64
+
       - name: Stage the native engine into the installer
         if: github.event_name != 'workflow_dispatch' || inputs.bundle
         run: node rust/fluideq-shell/scripts/stage-native-engine.mjs
@@ -51,7 +56,7 @@ jobs:
           $installer = Get-Item target/release/bundle/nsis/*.exe | Select-Object -First 1
           if (-not $installer) { throw "no NSIS installer was produced" }
           $listing = & 7z l $installer.FullName
-          foreach ($name in @("FluidEQ-Engine.dll", "FluidEQ-Engine-Setup.exe", "FluidEQ-DSP.exe")) {
+          foreach ($name in @("FluidEQ-Engine.dll", "FluidEQ-Engine-Setup.exe", "FluidEQ-DSP.exe", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
             if (-not ($listing | Select-String -SimpleMatch $name)) {
               throw "installer is missing $name"
             }

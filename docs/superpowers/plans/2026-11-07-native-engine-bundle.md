@@ -22,13 +22,15 @@
 The script must:
 
 1. Fail unless `process.platform === 'win32'`.
-2. Run `node native/tools/generate-parameters.mjs`.
-3. Configure `native/.build/engine` with `-A x64`,
+2. Copy `msvcp140.dll`, `vcruntime140.dll`, and `vcruntime140_1.dll`
+   beside `native/.build/engine/bin` before CMake builds the setup helper.
+3. Run `node native/tools/generate-parameters.mjs`.
+4. Configure `native/.build/engine` with `-A x64`,
    `-DFEQ_CORE_VERSION=2.1.0`, and
    `-DFEQ_BUILD_REVISION=${GITHUB_SHA || unknown}`.
-4. Build `fluideq-engine`, `fluideq-engine-setup`, and `fluideq-dsp-host`.
-5. Copy the three build outputs into `rust/fluideq-shell/engine-bin/`.
-6. Read `rust/fluideq-shell/tauri.conf.json`, add:
+5. Build `fluideq-engine`, `fluideq-engine-setup`, and `fluideq-dsp-host`.
+6. Copy the engine binaries and runtime DLLs into `rust/fluideq-shell/engine-bin/`.
+7. Read `rust/fluideq-shell/tauri.conf.json`, add:
    ```json
    {
      "bundle": {
@@ -94,7 +96,7 @@ Add after the build, before upload:
         run: |
           $installer = Get-Item target/release/bundle/nsis/*.exe | Select-Object -First 1
           $listing = & 7z l $installer.FullName
-          foreach ($name in @("FluidEQ-Engine.dll", "FluidEQ-Engine-Setup.exe", "FluidEQ-DSP.exe")) {
+          foreach ($name in @("FluidEQ-Engine.dll", "FluidEQ-Engine-Setup.exe", "FluidEQ-DSP.exe", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
             if (-not ($listing | Select-String -SimpleMatch $name)) { throw "installer is missing $name" }
           }
 ```
