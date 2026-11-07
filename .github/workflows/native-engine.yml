@@ -30,9 +30,9 @@ jobs:
       - name: Configure the native engine
         run: >
           cmake -S native -B native/.build/engine
-          -G "Visual Studio 17 2022" -A x64
-          -DFEQ_CORE_VERSION=2.1.0
-          -DFEQ_BUILD_REVISION=${{ github.sha }}
+          -A x64
+          "-DFEQ_CORE_VERSION=2.1.0"
+          "-DFEQ_BUILD_REVISION=${{ github.sha }}"
 
       - name: Build the engine, setup helper and DSP host
         run: >

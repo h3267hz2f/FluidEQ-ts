@@ -42,7 +42,7 @@ Add `.github/workflows/native-engine.yml`:
 
 1. Check out the public repository.
 2. Set up the MSVC developer environment so `dumpbin` is on `PATH`.
-3. Configure `native/` with the Visual Studio 17 2022 x64 generator.
+3. Configure `native/` with the installed Visual Studio x64 generator.
 4. Build only `fluideq-engine`, `fluideq-engine-setup`, and `fluideq-dsp-host`
    in Release.
 5. Assert `FluidEQ-Engine.dll` exports `DllGetClassObject` and
