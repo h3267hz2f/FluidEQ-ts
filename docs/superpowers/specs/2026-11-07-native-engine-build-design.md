@@ -89,8 +89,11 @@ Run URL:
 
 ## Milestones
 
-1. Build the engine artifacts in CI (this design).
-2. Copy the artifacts into the Tauri bundle and the NSIS installer.
+1. Build the engine artifacts in CI — **done**; see Result above.
+2. Copy the artifacts into the Tauri bundle and the NSIS installer — added by
+   `rust/fluideq-shell/scripts/stage-native-engine.mjs` and
+   `.github/workflows/rust-desktop.yml`; the installer is verified to contain the
+   three binaries, not yet installed or activated.
 3. Implement the install/register/uninstall flow with UAC and audio restart.
 4. Launch and supervise `FluidEQ-DSP`, and send chain snapshots from Rust.
 5. Verify on a real endpoint, including bypass when the shell exits.

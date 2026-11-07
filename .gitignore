@@ -61,6 +61,12 @@ presets/**
 /*.MP3
 /*.wav
 /*.flac
+
+# The native engine staged for an installer build. Built by
+# rust/fluideq-shell/scripts/stage-native-engine.mjs before
+# `@tauri-apps/cli build`, never committed.
+rust/fluideq-shell/engine-bin/
+rust/fluideq-shell/tauri.bundle.conf.json
 /*.m4a
 
 # The karaoke files exported beside them, for the same reason and one more: a
