@@ -28,12 +28,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The C++ core includes a header generated from the one parameter table
+      # and gitignored, so it must exist before the first cargo build.
+      - name: Generate the native parameter header
+        run: node native/tools/generate-parameters.mjs
+
+      - uses: dtolnay/rust-toolchain@1.94.1
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Test the Rust state centre and shell
-        run: cargo test --workspace --features link-cpp-core
+        run: cargo test --workspace --features link-cpp-core --locked
 
       - uses: ilammy/msvc-dev-cmd@v1
         if: github.event_name != 'workflow_dispatch' || inputs.bundle
@@ -47,7 +56,7 @@ jobs:
       - name: Build the Tauri shell and the NSIS installer
         if: github.event_name != 'workflow_dispatch' || inputs.bundle
         working-directory: rust/fluideq-shell
-        run: npx -y @tauri-apps/cli@2 build --features link-cpp-core --config tauri.bundle.conf.json
+        run: npx -y @tauri-apps/cli@2.12.4 build --features link-cpp-core --config tauri.bundle.conf.json
 
       - name: Verify the installer carries the engine
         if: github.event_name != 'workflow_dispatch' || inputs.bundle

@@ -3,10 +3,9 @@ name: Native engine
 on:
   workflow_dispatch:
   push:
-    branches:
-      - rust-desktop-shell
     paths:
       - "native/**"
+      - "src/common/dsp/nativeParameters.ts"
       - ".github/workflows/native-engine.yml"
 
 permissions:

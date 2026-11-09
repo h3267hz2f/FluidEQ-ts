@@ -1,0 +1,45 @@
+name: Rust CI
+
+# Every push and pull request, so a broken Rust change is caught before it
+# reaches a tag. Packaging stays in rust-desktop.yml, which is deliberate: it
+# only runs on a tag or by hand.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The C++ core includes a header that is generated from the one
+      # parameter table in src/common/dsp/nativeParameters.ts and stays
+      # gitignored, so it has to exist before the first translation unit is
+      # compiled.
+      - name: Generate the native parameter header
+        run: node native/tools/generate-parameters.mjs
+
+      - uses: dtolnay/rust-toolchain@1.94.1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test the workspace
+        run: cargo test --workspace --features link-cpp-core --locked
