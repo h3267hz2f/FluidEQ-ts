@@ -21,6 +21,8 @@ use std::os::raw::{c_char, c_double, c_float, c_int};
 
 pub const FEQ_ABI_VERSION: u32 = 1;
 pub const FEQ_PARAMETER_COUNT: usize = 64;
+/// Schema version of the core parameter block (`FEQ_PARAMETER_SCHEMA_VERSION` in `parameters.h`).
+pub const FEQ_PARAMETER_SCHEMA_VERSION: u32 = 4;
 pub const FEQ_CHAIN_PARAM_LEAD: usize = 158;
 pub const FEQ_CHAIN_BAND_PARAMS: usize = 7;
 pub const FEQ_CHAIN_MAX_EQ_BANDS: usize = 64;

@@ -42,7 +42,7 @@ pub const MAX_WIRE_PATH_BYTES: u32 = 32 * 1024;
 pub const MAX_WIRE_CHAIN_PARAMS: u32 = fluideq_dsp_sys::FEQ_CHAIN_MAX_PARAMS as u32;
 
 /// Schema version of the core parameter block (`FEQ_PARAMETER_SCHEMA_VERSION`).
-pub const PARAMETER_SCHEMA_VERSION: u32 = 1;
+pub const PARAMETER_SCHEMA_VERSION: u32 = fluideq_dsp_sys::FEQ_PARAMETER_SCHEMA_VERSION;
 /// Legacy core parameter count (`FEQ_PARAMETER_COUNT`).
 pub const CORE_PARAMETER_COUNT: u32 = 64;
 
