@@ -789,12 +789,11 @@ pub fn resolve_apo_endpoint_chain(
             {
                 if let Ok(val) = tokens[0].parse::<f64>() {
                     if val.is_finite() {
-                        if chain.auto_preamp {
-                            chain.auto_preamp_start_db = val.min(0.0);
-                            chain.preamp_db = 0.0;
-                        } else {
-                            chain.preamp_db = val;
-                        }
+                        // `config.cpp` reads every Preamp into the same field:
+                        // one above the guard directive is its starting point,
+                        // one after it is the user's own fixed trim.
+                        chain.preamp_db = val;
+                        chain.matched = true;
                     }
                 }
             }

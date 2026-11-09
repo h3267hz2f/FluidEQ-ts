@@ -21,27 +21,27 @@ const OWNER_MARKER: &str = "fluideq-owner.txt";
 /// The Equalizer APO text the engine parses, for the current state.
 ///
 /// Powered off is an empty file, which the engine reads as a pass-through
-/// chain. With auto headroom on, the preamp the app sized is written above the
-/// guard directive so the engine starts the guard from there.
+/// chain. With auto headroom on, the preamp the app sized goes above the guard
+/// directive and the manual preamp goes after it: the engine takes the first as
+/// where its guard starts and the second as the user's own fixed trim, so the
+/// Preamp slider keeps working instead of being swallowed by auto headroom.
 pub fn render(snapshot: &AppStateSnapshot) -> String {
     if !snapshot.master_power {
         return String::new();
     }
-    let preamp = if snapshot.auto_headroom {
-        snapshot.auto_preamp_db.min(0.0)
-    } else {
-        snapshot.preamp_db
-    };
-    let lines = format_bands_as_apo_lines(preamp, &snapshot.bands);
-    if !snapshot.auto_headroom {
-        return lines;
+    let rendered = format_bands_as_apo_lines(0.0, &snapshot.bands);
+    let filters = rendered.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+    let mut text = String::new();
+    if snapshot.auto_headroom {
+        text.push_str(&format!("Preamp: {:+.1} dB\n", snapshot.auto_preamp_db.min(0.0)));
+        text.push_str("# FluidEQAutoPreamp: ON\n");
     }
-    let (first, rest) = lines.split_once('\n').unwrap_or((lines.as_str(), ""));
-    if rest.is_empty() {
-        format!("{first}\n# FluidEQAutoPreamp: ON\n")
-    } else {
-        format!("{first}\n# FluidEQAutoPreamp: ON\n{rest}\n")
+    text.push_str(&format!("Preamp: {:+.1} dB\n", snapshot.preamp_db));
+    text.push_str(filters);
+    if !text.ends_with('\n') {
+        text.push('\n');
     }
+    text
 }
 
 /// Writes `config.txt` whole through a temporary file, so the watcher never
@@ -69,9 +69,16 @@ pub fn publish(snapshot: &AppStateSnapshot) -> Result<PathBuf, String> {
 }
 
 /// Holds the owner pipe open for the lifetime of the process.
+///
+/// Waits until the first pipe instance exists before returning: the engine
+/// retries the link only on a change in its configuration directory, so a
+/// config written before the name exists would leave the audio bypassed until
+/// the next edit.
 #[cfg(target_os = "windows")]
 pub fn start_owner_link() {
-    pipe::spawn(owner_pipe_name());
+    let (ready, wait) = std::sync::mpsc::channel();
+    pipe::spawn(owner_pipe_name(), ready);
+    let _ = wait.recv_timeout(std::time::Duration::from_secs(2));
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -160,11 +167,12 @@ mod pipe {
         (attributes, descriptor)
     }
 
-    pub fn spawn(name: String) {
+    pub fn spawn(name: String, ready: std::sync::mpsc::Sender<()>) {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let _ = std::thread::Builder::new()
             .name("fluideq-owner-pipe".to_string())
             .spawn(move || unsafe {
+                let mut announced = false;
                 loop {
                     let (mut attributes, descriptor) = security();
                     let handle = CreateNamedPipeW(
@@ -181,7 +189,14 @@ mod pipe {
                         LocalFree(descriptor);
                     }
                     if handle as isize == INVALID_HANDLE_VALUE {
-                        return;
+                        // A transient failure (handle limit, a stale instance)
+                        // must not leave audio bypassed for the whole session.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+                    if !announced {
+                        announced = true;
+                        let _ = ready.send(());
                     }
                     let connected = ConnectNamedPipe(handle, ptr::null_mut()) != 0
                         || GetLastError() == ERROR_PIPE_CONNECTED;
@@ -260,11 +275,18 @@ mod tests {
     }
 
     #[test]
-    fn auto_headroom_writes_the_guard_directive() {
+    fn auto_headroom_writes_the_guard_directive_and_keeps_the_trim() {
         let snapshot = store_with_two_bands(true, true).snapshot();
         let text = render(&snapshot);
         assert!(text.contains("# FluidEQAutoPreamp: ON"));
         assert!(text.starts_with("Preamp:"));
+
+        let mut files = BTreeMap::new();
+        files.insert("config.txt".to_string(), text);
+        let resolved = resolve_apo_endpoint_chain("config.txt", "", "", &files);
+        assert!(resolved.auto_preamp);
+        assert!(resolved.auto_preamp_start_db <= 0.0);
+        assert!((resolved.preamp_db - -1.0).abs() < 0.11);
     }
 
     #[test]
