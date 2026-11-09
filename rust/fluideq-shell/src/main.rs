@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod apo_bridge;
 pub mod audio_endpoint;
 pub mod engine_host;
 pub mod engine_setup;
@@ -74,6 +75,7 @@ fn set_master_power(
     );
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
     Ok(snapshot)
 }
 
@@ -92,6 +94,7 @@ fn set_preamp_db(state: State<'_, ShellState>, preamp_db: f64) -> Result<AppStat
     );
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
     Ok(snapshot)
 }
 
@@ -108,6 +111,7 @@ fn set_band_gain(
     let snapshot = store.snapshot();
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
     Ok(snapshot)
 }
 
@@ -158,6 +162,11 @@ fn main() {
             let host = engine_host::EngineHost::new(host_exe);
             let snapshot = store.snapshot();
             host.apply_chain(&store.export_wire_parameters(), snapshot.revision as u32);
+            // The system engine keeps its own copy of the chain, reads it from
+            // its configuration directory, and passes audio through unless this
+            // process holds the owner pipe open.
+            apo_bridge::start_owner_link();
+            let _ = apo_bridge::publish(&snapshot);
             // A dev build without the staged engine records the failure in the
             // host status; the window still opens.
             let _ = host.start();
