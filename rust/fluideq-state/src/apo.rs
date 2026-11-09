@@ -84,90 +84,208 @@ pub fn format_bands_as_apo_lines(preamp_db: f64, bands: &[EqBandSpec]) -> String
     lines.join("\n")
 }
 
+pub const LOW_FREQUENCY_SPEAKER: u32 = 7;
+pub const APO_MAX_GRAPHIC_CURVES: usize = 32;
+pub const APO_MAX_GRAPHIC_POINTS: usize = 16_384;
+pub const APO_MAX_DSP_VALUES: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ApoGraphicPoint {
     pub frequency: f64,
     pub gain_db: f64,
 }
 
+pub type GraphicEqPoint = ApoGraphicPoint;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApoChannelSelection {
     pub all: bool,
+    pub speakers: u32,
+    pub indices: u32,
     pub speakers_mask: u32,
     pub indices_mask: u32,
 }
+
+pub type ChannelSelection = ApoChannelSelection;
 
 impl Default for ApoChannelSelection {
     fn default() -> Self {
         Self {
             all: true,
+            speakers: 0,
+            indices: 0,
             speakers_mask: 0,
             indices_mask: 0,
         }
     }
 }
 
-/// Parses an Equalizer APO `Channel:` body (`all`, `L`, `R`, `C`, `LFE`/`SUB`, `SL`, `SR`, `RL`, `RR`, or 1-based channel indices).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApoTokenizedLine {
+    pub command: String,
+    pub body: String,
+}
+
+/// Strips a UTF-16LE (`0xFF 0xFE`) or UTF-8 (`0xEF 0xBB 0xBF`) byte-order mark,
+/// transcoding UTF-16LE (including surrogate pairs) to UTF-8.
+///
+/// Mirrors `strip_bom_and_decode` in `/native/system-apo/src/config_grammar.cpp`.
+pub fn strip_bom_and_decode_bytes(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        let mut out = String::new();
+        let mut i = 2usize;
+        while i + 1 < bytes.len() {
+            let mut unit = u32::from(bytes[i]) | (u32::from(bytes[i + 1]) << 8);
+            i += 2;
+            if (0xD800..=0xDBFF).contains(&unit) && i + 1 < bytes.len() {
+                let unit2 = u32::from(bytes[i]) | (u32::from(bytes[i + 1]) << 8);
+                if (0xDC00..=0xDFFF).contains(&unit2) {
+                    unit = 0x10000 + ((unit - 0xD800) << 10) + (unit2 - 0xDC00);
+                    i += 2;
+                }
+            }
+            if let Some(ch) = char::from_u32(unit) {
+                out.push(ch);
+            }
+        }
+        return out;
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn trim_apo_line_ws(s: &str) -> &str {
+    s.trim_matches(|c| c == ' ' || c == '\t' || c == '\r')
+}
+
+/// Tokenizes an Equalizer APO / FluidEQ config text into `Command: Body` lines,
+/// promoting the 6 `# FluidEQ*:` metadata comments into first-class commands before
+/// stripping `#` comments, and stripping trailing `<space><digits>` from `Filter <N>`.
+///
+/// Mirrors `fluideq_engine::tokenize` in `/native/system-apo/src/config_grammar.cpp`.
+pub fn tokenize_apo_config(text: &str) -> Vec<ApoTokenizedLine> {
+    let decoded = strip_bom_and_decode_bytes(text.as_bytes());
+    let mut lines = Vec::new();
+    for raw_part in decoded.split('\n') {
+        let mut raw = trim_apo_line_ws(raw_part);
+        if raw.starts_with("# FluidEQAutoPreamp: ")
+            || raw.starts_with("# FluidEQCurveStage: ")
+            || raw.starts_with("# FluidEQCurveLayer: ")
+            || raw.starts_with("# FluidEQEqLayer: ")
+            || raw.starts_with("# FluidEQFilterDesign: ")
+            || raw.starts_with("# FluidEQLowLatency: ")
+        {
+            raw = &raw[2..];
+        }
+        if let Some(hash_idx) = raw.find('#') {
+            raw = &raw[..hash_idx];
+        }
+        raw = trim_apo_line_ws(raw);
+        if let Some(colon_idx) = raw.find(':') {
+            let mut command = trim_apo_line_ws(&raw[..colon_idx]);
+            let body = trim_apo_line_ws(&raw[colon_idx + 1..]);
+            let bytes = command.as_bytes();
+            let mut digit_start = bytes.len();
+            while digit_start > 0 && bytes[digit_start - 1].is_ascii_digit() {
+                digit_start -= 1;
+            }
+            if digit_start > 0 && digit_start < bytes.len() && bytes[digit_start - 1] == b' ' {
+                command = &command[..digit_start - 1];
+            }
+            if !command.is_empty() {
+                lines.push(ApoTokenizedLine {
+                    command: command.to_string(),
+                    body: body.to_string(),
+                });
+            }
+        }
+    }
+    lines
+}
+
+/// Parses an Equalizer APO `Channel:` body (`all`, `L`, `R`, `C`, `LFE`/`SUB`, `SL`, `SR`, `RL`, `RR`, or 1-based channel indices `1..=32`).
+///
+/// Mirrors `fluideq_engine::parse_channels` in `/native/system-apo/src/config_grammar.cpp`.
 pub fn parse_apo_channel_selection(body: &str) -> ApoChannelSelection {
     let mut sel = ApoChannelSelection {
         all: false,
+        speakers: 0,
+        indices: 0,
         speakers_mask: 0,
         indices_mask: 0,
     };
-    for raw_token in body.split_whitespace() {
-        let token = raw_token.trim_matches(',').to_ascii_uppercase();
+    for raw_token in body.split([' ', '\t']) {
+        let token = raw_token.trim_matches(',');
         if token.is_empty() {
             continue;
         }
-        match token.as_str() {
+        let upper = token.to_ascii_uppercase();
+        match upper.as_str() {
             "ALL" => return ApoChannelSelection::default(),
-            "L" | "FL" => sel.speakers_mask |= 1 << 0,
-            "R" | "FR" => sel.speakers_mask |= 1 << 1,
-            "C" => sel.speakers_mask |= 1 << 2,
-            "SL" => sel.speakers_mask |= 1 << 3,
-            "SR" => sel.speakers_mask |= 1 << 4,
-            "RL" | "BL" => sel.speakers_mask |= 1 << 5,
-            "RR" | "BR" => sel.speakers_mask |= 1 << 6,
-            "LFE" | "SUB" => sel.speakers_mask |= 1 << 7,
+            "L" | "FL" => sel.speakers |= 1 << 0,
+            "R" | "FR" => sel.speakers |= 1 << 1,
+            "C" => sel.speakers |= 1 << 2,
+            "SL" => sel.speakers |= 1 << 3,
+            "SR" => sel.speakers |= 1 << 4,
+            "RL" | "BL" => sel.speakers |= 1 << 5,
+            "RR" | "BR" => sel.speakers |= 1 << 6,
+            "LFE" | "SUB" => sel.speakers |= 1 << LOW_FREQUENCY_SPEAKER,
             _ => {
                 if let Ok(ch_num) = token.parse::<u32>() {
                     if (1..=32).contains(&ch_num) {
-                        sel.indices_mask |= 1 << (ch_num - 1);
+                        sel.indices |= 1 << (ch_num - 1);
                     }
                 }
             }
         }
     }
-    if sel.speakers_mask == 0 && sel.indices_mask == 0 {
-        sel.all = true;
+    if sel.speakers == 0 && sel.indices == 0 {
+        return ApoChannelSelection::default();
     }
+    sel.speakers_mask = sel.speakers;
+    sel.indices_mask = sel.indices;
     sel
 }
 
-/// Converts bandwidth in octaves (`BW Oct <o>`) to Q factor (`1 / (2 * sinh(ln(2)/2 * bw))`).
+/// Converts bandwidth in octaves (`BW Oct <o>`) to Q factor (`sqrt(2^oct) / (2^oct - 1)`),
+/// matching `parse_filter` in `/native/system-apo/src/config_grammar.cpp` (lines 324–325).
 fn bandwidth_octaves_to_q(bw_oct: f64) -> Option<f64> {
     if !(bw_oct > 0.0) || !bw_oct.is_finite() {
         return None;
     }
-    let arg = 0.5 * std::f64::consts::LN_2 * bw_oct;
-    let denom = 2.0 * arg.sinh();
-    if denom > 1e-9 {
-        Some(1.0 / denom)
-    } else {
-        None
+    let factor = 2.0_f64.powf(bw_oct);
+    let denom = factor - 1.0;
+    if denom > 0.0 && factor.is_finite() {
+        let q = factor.sqrt() / denom;
+        if q > 0.0 && q.is_finite() {
+            return Some(q);
+        }
     }
+    None
 }
 
 /// Parses an Equalizer APO `Filter:` body:
 /// `ON <type> Fc <f> Hz [Gain <g> dB] (Q <q> | BW Oct <o>)`.
+///
+/// Mirrors `fluideq_engine::parse_filter` in `/native/system-apo/src/config_grammar.cpp`.
 pub fn parse_apo_filter_line(body: &str, id: u32, ear: u8) -> Option<EqBandSpec> {
-    let tokens: Vec<&str> = body.split_whitespace().collect();
-    if tokens.len() < 4 || !tokens[0].eq_ignore_ascii_case("ON") {
+    let tokens: Vec<&str> = body
+        .split([' ', '\t'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut i = 0usize;
+    if i >= tokens.len() || !tokens[i].eq_ignore_ascii_case("ON") {
         return None;
     }
-    let filter_type = match tokens[1].to_ascii_uppercase().as_str() {
+    i += 1;
+    if i >= tokens.len() {
+        return None;
+    }
+    let filter_type = match tokens[i].to_ascii_uppercase().as_str() {
         "PK" | "PEQ" | "MODAL" => BandFilterKind::PK,
-        "NO" => BandFilterKind::NO,
+        "NO" | "NOTCH" => BandFilterKind::NO,
         "LSC" | "LS" | "LSQ" => BandFilterKind::LSC,
         "HSC" | "HS" | "HSQ" => BandFilterKind::HSC,
         "LPQ" | "LP" => BandFilterKind::LPQ,
@@ -175,51 +293,47 @@ pub fn parse_apo_filter_line(body: &str, id: u32, ear: u8) -> Option<EqBandSpec>
         "BP" => BandFilterKind::BP,
         _ => return None,
     };
+    i += 1;
 
-    let mut idx = 2;
-    let mut frequency: Option<f64> = None;
+    if i + 1 >= tokens.len() || !tokens[i].eq_ignore_ascii_case("Fc") {
+        return None;
+    }
+    i += 1;
+    let frequency: f64 = tokens[i].parse().ok()?;
+    if !(frequency > 0.0 && frequency.is_finite()) {
+        return None;
+    }
+    i += 1;
+    if i >= tokens.len() || !tokens[i].eq_ignore_ascii_case("Hz") {
+        return None;
+    }
+    i += 1;
+
     let mut gain_db: f64 = 0.0;
-    let mut quality: f64 = 0.7071;
-
-    while idx < tokens.len() {
-        let key = tokens[idx].to_ascii_uppercase();
-        match key.as_str() {
-            "FC" => {
-                let val_str = tokens.get(idx + 1)?.replace(',', ".");
-                frequency = val_str.parse::<f64>().ok();
-                idx += 2;
-                if idx < tokens.len() && tokens[idx].eq_ignore_ascii_case("HZ") {
-                    idx += 1;
-                }
-            }
-            "GAIN" => {
-                let val_str = tokens.get(idx + 1)?.replace(',', ".");
-                gain_db = val_str.parse::<f64>().ok()?;
-                idx += 2;
-                if idx < tokens.len() && tokens[idx].eq_ignore_ascii_case("DB") {
-                    idx += 1;
-                }
-            }
-            "Q" => {
-                let val_str = tokens.get(idx + 1)?.replace(',', ".");
-                quality = val_str.parse::<f64>().ok()?;
-                idx += 2;
-            }
-            "BW" => {
-                if idx + 2 < tokens.len() && tokens[idx + 1].eq_ignore_ascii_case("OCT") {
-                    let bw_val = tokens[idx + 2].replace(',', ".").parse::<f64>().ok()?;
-                    quality = bandwidth_octaves_to_q(bw_val)?;
-                    idx += 3;
-                } else {
-                    return None;
-                }
-            }
-            _ => idx += 1,
+    if i + 2 < tokens.len() && tokens[i].eq_ignore_ascii_case("Gain") {
+        gain_db = tokens[i + 1].parse().ok()?;
+        if !gain_db.is_finite() || !tokens[i + 2].eq_ignore_ascii_case("dB") {
+            return None;
         }
+        i += 3;
     }
 
-    let freq = frequency?;
-    if !(freq > 0.0 && freq.is_finite() && quality > 0.0 && quality.is_finite() && gain_db.is_finite()) {
+    let quality: f64;
+    if i + 1 < tokens.len() && tokens[i].eq_ignore_ascii_case("Q") {
+        quality = tokens[i + 1].parse().ok()?;
+        i += 2;
+    } else if i + 2 < tokens.len()
+        && tokens[i].eq_ignore_ascii_case("BW")
+        && tokens[i + 1].eq_ignore_ascii_case("Oct")
+    {
+        let octaves: f64 = tokens[i + 2].parse().ok()?;
+        quality = bandwidth_octaves_to_q(octaves)?;
+        i += 3;
+    } else {
+        return None;
+    }
+
+    if !(quality > 0.0 && quality.is_finite()) || i != tokens.len() {
         return None;
     }
 
@@ -227,7 +341,7 @@ pub fn parse_apo_filter_line(body: &str, id: u32, ear: u8) -> Option<EqBandSpec>
         id,
         enabled: true,
         filter_type,
-        frequency: freq,
+        frequency,
         gain_db,
         quality,
         dynamic: false,
@@ -236,28 +350,27 @@ pub fn parse_apo_filter_line(body: &str, id: u32, ear: u8) -> Option<EqBandSpec>
     })
 }
 
-/// Parses an Equalizer APO `GraphicEQ:` body (`<freq> <gain>; <freq> <gain>; ...`) all-or-nothing.
+/// Parses an Equalizer APO `GraphicEQ:` body (`<freq> <gain>; <freq> <gain>; ...`) all-or-nothing,
+/// capped at `APO_MAX_GRAPHIC_POINTS` (`16384`) points.
+///
+/// Mirrors `fluideq_engine::parse_graphic` in `/native/system-apo/src/config_grammar.cpp`.
 pub fn parse_apo_graphic_eq(body: &str) -> Vec<ApoGraphicPoint> {
     let mut points = Vec::new();
     for segment in body.split(';') {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.split_whitespace();
-        let Some(f_str) = parts.next() else {
-            return Vec::new();
-        };
-        let Some(g_str) = parts.next() else {
-            return Vec::new();
-        };
-        if parts.next().is_some() {
+        let trimmed = trim_apo_line_ws(segment);
+        let tokens: Vec<&str> = trimmed
+            .split([' ', '\t'])
+            .filter(|s| !s.is_empty())
+            .collect();
+        if tokens.len() != 2 {
             return Vec::new();
         }
-        let (Ok(freq), Ok(gain)) = (f_str.parse::<f64>(), g_str.parse::<f64>()) else {
+        let (Ok(freq), Ok(gain)) = (tokens[0].parse::<f64>(), tokens[1].parse::<f64>()) else {
             return Vec::new();
         };
-        if !(freq > 0.0 && freq.is_finite() && gain.is_finite()) {
+        if !(freq >= 0.0 && freq.is_finite() && gain.is_finite())
+            || points.len() >= APO_MAX_GRAPHIC_POINTS
+        {
             return Vec::new();
         }
         points.push(ApoGraphicPoint {
@@ -268,40 +381,202 @@ pub fn parse_apo_graphic_eq(body: &str) -> Vec<ApoGraphicPoint> {
     points
 }
 
+/// Parses `fluideq-dsp-<guid>.txt` into up to `APO_MAX_DSP_VALUES` (`128`) finite `f64` numbers.
+/// Any non-finite or unparseable token invalidates the entire vector (returns empty).
+///
+/// Mirrors `fluideq_engine::parse_dsp_values` in `/native/system-apo/src/config_grammar.cpp`.
+pub fn parse_apo_dsp_values(text: &str) -> Vec<f64> {
+    let decoded = strip_bom_and_decode_bytes(text.as_bytes());
+    let mut values = Vec::new();
+    for raw_line in decoded.split('\n') {
+        let line = trim_apo_line_ws(raw_line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        for tok in line.split([' ', '\t']).filter(|s| !s.is_empty()) {
+            let Ok(v) = tok.parse::<f64>() else {
+                return Vec::new();
+            };
+            if !v.is_finite() || values.len() >= APO_MAX_DSP_VALUES {
+                return Vec::new();
+            }
+            values.push(v);
+        }
+    }
+    values
+}
+
 /// Checks whether an Equalizer APO `Device:` pattern matches the given endpoint `(guid, friendly_name)`.
+///
+/// Mirrors `fluideq_engine::device_matches` in `/native/system-apo/src/config.cpp`.
 pub fn device_matches_endpoint(pattern: &str, endpoint_guid: &str, friendly_name: &str) -> bool {
-    let pat = pattern.trim();
+    let pat = trim_apo_line_ws(pattern);
     if pat.is_empty() || pat.eq_ignore_ascii_case("all") {
         return true;
     }
     let pat_lower = pat.to_ascii_lowercase();
-    let guid_lower = endpoint_guid.trim().to_ascii_lowercase();
-    let name_lower = friendly_name.trim().to_ascii_lowercase();
+    let guid_lower = trim_apo_line_ws(endpoint_guid).to_ascii_lowercase();
+    let name_lower = trim_apo_line_ws(friendly_name).to_ascii_lowercase();
 
+    if !guid_lower.is_empty() && pat_lower.contains(&guid_lower) {
+        return true;
+    }
+
+    let mut checked_any = false;
     for clause in pat_lower.split(';') {
-        let token = clause.trim();
+        let token = trim_apo_line_ws(clause);
         if token.is_empty() {
             continue;
         }
-        if token == guid_lower || name_lower.contains(token) || token.contains(&guid_lower) {
+        if !guid_lower.is_empty() && token == guid_lower {
             return true;
         }
+        checked_any = true;
+        if name_lower.is_empty() || !name_lower.contains(token) {
+            return false;
+        }
     }
-    false
+    checked_any
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResolvedApoChain {
-    pub preamp_db: f64,
-    pub low_latency: bool,
-    pub bands: Vec<EqBandSpec>,
-    pub graphic_curves: Vec<Vec<ApoGraphicPoint>>,
-    pub files_read: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApoResolvedBand {
+    pub spec: EqBandSpec,
+    pub user_eq: bool,
+    pub curve_layer: bool,
     pub matched: bool,
+    pub channels: ApoChannelSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedApoChain {
+    pub matched: bool,
+    pub convolution_path: String,
+    pub convolution_passes: u32,
+    pub preamp_db: f64,
+    pub output_guard: bool,
+    pub auto_preamp: bool,
+    pub auto_preamp_start_db: f64,
+    pub stable_graphic: bool,
+    pub low_latency: bool,
+    pub minimum_curve_phase: bool,
+    pub minimum_eq_phase: bool,
+    pub classic_eq_treble: bool,
+    pub classic_curve_treble: bool,
+    pub bands: Vec<EqBandSpec>,
+    pub apo_bands: Vec<ApoResolvedBand>,
+    pub graphic_curves: Vec<Vec<ApoGraphicPoint>>,
+    pub comparison_curves: Vec<Vec<ApoGraphicPoint>>,
+    pub eq_graphic_curves: Vec<Vec<ApoGraphicPoint>>,
+    pub files_read: Vec<String>,
+    pub ignored: Vec<String>,
+    pub dsp_values: Vec<f64>,
+}
+
+pub type ApoEndpointChain = ResolvedApoChain;
+
+impl Default for ResolvedApoChain {
+    fn default() -> Self {
+        Self {
+            matched: false,
+            convolution_path: String::new(),
+            convolution_passes: 1,
+            preamp_db: 0.0,
+            output_guard: false,
+            auto_preamp: false,
+            auto_preamp_start_db: 0.0,
+            stable_graphic: false,
+            low_latency: false,
+            minimum_curve_phase: true,
+            minimum_eq_phase: true,
+            classic_eq_treble: false,
+            classic_curve_treble: false,
+            bands: Vec::new(),
+            apo_bands: Vec::new(),
+            graphic_curves: Vec::new(),
+            comparison_curves: Vec::new(),
+            eq_graphic_curves: Vec::new(),
+            files_read: Vec::new(),
+            ignored: Vec::new(),
+            dsp_values: Vec::new(),
+        }
+    }
+}
+
+fn note_ignored(ignored: &mut Vec<String>, command: &str) {
+    if !ignored.iter().any(|existing| existing == command) {
+        ignored.push(command.to_string());
+    }
+}
+
+fn has_dotdot_segment(path: &str) -> bool {
+    path.split(['\\', '/']).any(|seg| seg == "..")
+}
+
+fn has_drive_or_unc_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 2 && bytes[1] == b':')
+        || (!bytes.is_empty() && (bytes[0] == b'\\' || bytes[0] == b'/'))
+}
+
+fn canonical_bare_guid(endpoint_guid: &str) -> Option<String> {
+    let mut g = endpoint_guid.trim();
+    if g.len() == 38 && g.starts_with('{') && g.ends_with('}') {
+        g = &g[1..37];
+    }
+    if g.len() != 36 {
+        return None;
+    }
+    let mut out = String::with_capacity(36);
+    for (idx, b) in g.bytes().enumerate() {
+        if matches!(idx, 8 | 13 | 18 | 23) {
+            if b != b'-' {
+                return None;
+            }
+            out.push('-');
+        } else if b.is_ascii_hexdigit() {
+            out.push(b.to_ascii_lowercase() as char);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn lookup_config_file<'a>(
+    files: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Option<(String, &'a String)> {
+    let trimmed = name.trim_matches('"');
+    if has_dotdot_segment(trimmed) || has_drive_or_unc_prefix(trimmed) {
+        return None;
+    }
+    if let Some((k, v)) = files.get_key_value(trimmed) {
+        return Some((k.clone(), v));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    for (k, v) in files {
+        if k.eq_ignore_ascii_case(&lower) {
+            return Some((k.clone(), v));
+        }
+    }
+    None
+}
+
+#[derive(Clone)]
+struct IncludeFrame {
+    path_key: String,
+    lines: Vec<ApoTokenizedLine>,
+    next_line: usize,
+    matching: bool,
+    curve_layer: bool,
+    eq_layer: bool,
+    matched_design: bool,
+    channels: ApoChannelSelection,
 }
 
 /// Resolves an Equalizer APO configuration tree starting at `root_file` (capped at 8 nested `Include:` frames),
-/// matching `fluideq_engine::resolve_chain` in `/native/system-apo/include/fluideq_engine/config.h`.
+/// matching `fluideq_engine::resolve_chain` in `/native/system-apo/src/config.cpp`.
 pub fn resolve_apo_endpoint_chain(
     root_file: &str,
     endpoint_guid: &str,
@@ -309,113 +584,274 @@ pub fn resolve_apo_endpoint_chain(
     files: &BTreeMap<String, String>,
 ) -> ResolvedApoChain {
     let mut chain = ResolvedApoChain::default();
-    let mut stack = Vec::with_capacity(APO_MAX_INCLUDE_DEPTH);
-    resolve_file_recursive(
-        root_file,
-        endpoint_guid,
-        friendly_name,
-        files,
-        &mut stack,
-        &mut chain,
-    );
-    chain
-}
+    let no_endpoint = endpoint_guid.trim().is_empty() && friendly_name.trim().is_empty();
 
-fn resolve_file_recursive(
-    file_name: &str,
-    endpoint_guid: &str,
-    friendly_name: &str,
-    files: &BTreeMap<String, String>,
-    open_stack: &mut Vec<String>,
-    chain: &mut ResolvedApoChain,
-) {
-    if open_stack.len() >= APO_MAX_INCLUDE_DEPTH || open_stack.iter().any(|f| f == file_name) {
-        return;
-    }
-    let Some(content) = files.get(file_name) else {
-        return;
-    };
-    open_stack.push(file_name.to_string());
-    chain.files_read.push(file_name.to_string());
-
-    let mut device_active = true;
-    let mut current_ear: u8 = 0;
-
-    for raw_line in content.lines() {
-        let trimmed = raw_line.trim().trim_start_matches('\u{feff}');
-        if trimmed.is_empty() {
-            continue;
+    // 1. Read per-endpoint phase, treble, and DSP sidecar files when an endpoint GUID is present (`config.cpp` lines 237–285)
+    if let Some(bare_guid) = canonical_bare_guid(endpoint_guid) {
+        let curve_phase_name = format!("fluideq-curve-phase-{}.txt", bare_guid);
+        if let Some((key, text)) = lookup_config_file(files, &curve_phase_name) {
+            chain.files_read.push(key);
+            chain.minimum_curve_phase = !text.starts_with('A');
         }
-        if let Some(comment) = trimmed.strip_prefix('#') {
-            if device_active
-                && comment
-                    .trim()
-                    .eq_ignore_ascii_case("FluidEQLowLatency: ON")
-            {
-                chain.low_latency = true;
+        let eq_phase_name = format!("fluideq-eq-phase-{}.txt", bare_guid);
+        if let Some((key, text)) = lookup_config_file(files, &eq_phase_name) {
+            chain.files_read.push(key);
+            chain.minimum_eq_phase = !text.starts_with('A');
+        }
+        let read_treble_classic = |stem: &str, chain_files: &mut Vec<String>| -> bool {
+            let file_name = format!("{}-{}.txt", stem, bare_guid);
+            let Some((key, text)) = lookup_config_file(files, &file_name) else {
+                return false;
+            };
+            chain_files.push(key);
+            let mut end = text.len();
+            let bytes = text.as_bytes();
+            while end > 0 && matches!(bytes[end - 1], b' ' | b'\t' | b'\r' | b'\n') {
+                end -= 1;
             }
-            continue;
-        }
-        let Some((cmd_raw, body_raw)) = trimmed.split_once(':') else {
-            continue;
+            text[..end].eq_ignore_ascii_case("classic")
         };
-        let cmd = cmd_raw.trim();
-        let body = body_raw.trim();
+        chain.classic_eq_treble = read_treble_classic("fluideq-eq-treble", &mut chain.files_read);
+        chain.classic_curve_treble =
+            read_treble_classic("fluideq-curve-treble", &mut chain.files_read);
 
-        if cmd.eq_ignore_ascii_case("Device") {
-            device_active = device_matches_endpoint(body, endpoint_guid, friendly_name);
-            continue;
-        }
-        if !device_active {
-            continue;
-        }
-
-        if cmd.eq_ignore_ascii_case("Include") {
-            resolve_file_recursive(body, endpoint_guid, friendly_name, files, open_stack, chain);
-        } else if cmd.eq_ignore_ascii_case("Preamp") {
-            let num_str = body
-                .split_whitespace()
-                .next()
-                .unwrap_or("0")
-                .replace(',', ".");
-            if let Ok(db) = num_str.parse::<f64>() {
-                if db.is_finite() {
-                    chain.preamp_db += db;
-                    chain.matched = true;
+        let dsp_name = format!("fluideq-dsp-{}.txt", bare_guid);
+        if let Some((key, text)) = lookup_config_file(files, &dsp_name) {
+            chain.files_read.push(key);
+            chain.dsp_values = parse_apo_dsp_values(text);
+            for line in tokenize_apo_config(text) {
+                if line.command.eq_ignore_ascii_case("FluidEQLowLatency")
+                    && line.body.eq_ignore_ascii_case("ON")
+                {
+                    chain.low_latency = true;
                 }
             }
-        } else if cmd.eq_ignore_ascii_case("Channel") {
-            let sel = parse_apo_channel_selection(body);
-            current_ear = if sel.all {
+        }
+    }
+
+    let Some((root_key, root_text)) = lookup_config_file(files, root_file) else {
+        return chain;
+    };
+    chain.files_read.push(root_key.clone());
+    chain.matched = true;
+
+    let mut stack: Vec<IncludeFrame> = Vec::with_capacity(APO_MAX_INCLUDE_DEPTH);
+    stack.push(IncludeFrame {
+        path_key: root_key.to_ascii_lowercase(),
+        lines: tokenize_apo_config(root_text),
+        next_line: 0,
+        matching: true,
+        curve_layer: false,
+        eq_layer: false,
+        matched_design: false,
+        channels: ApoChannelSelection::default(),
+    });
+
+    while let Some(top_idx) = stack.len().checked_sub(1) {
+        if stack[top_idx].next_line >= stack[top_idx].lines.len() {
+            stack.pop();
+            continue;
+        }
+        let line = stack[top_idx].lines[stack[top_idx].next_line].clone();
+        stack[top_idx].next_line += 1;
+
+        if line.command.eq_ignore_ascii_case("Device") {
+            let matches = if no_endpoint {
+                let b = trim_apo_line_ws(&line.body);
+                b.is_empty() || b.eq_ignore_ascii_case("all")
+            } else {
+                device_matches_endpoint(&line.body, endpoint_guid, friendly_name)
+            };
+            stack[top_idx].matching = matches;
+            if matches {
+                chain.matched = true;
+            }
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("Channel") {
+            if stack[top_idx].matching {
+                stack[top_idx].channels = parse_apo_channel_selection(&line.body);
+            }
+            continue;
+        }
+
+        if !stack[top_idx].matching {
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("Include") {
+            if stack.len() >= APO_MAX_INCLUDE_DEPTH || line.body.is_empty() {
+                continue;
+            }
+            let Some((child_key, child_text)) = lookup_config_file(files, &line.body) else {
+                continue;
+            };
+            let child_key_lower = child_key.to_ascii_lowercase();
+            if stack.iter().any(|f| f.path_key == child_key_lower) {
+                continue;
+            }
+            if !chain
+                .files_read
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(&child_key))
+            {
+                chain.files_read.push(child_key);
+            }
+            let parent = &stack[top_idx];
+            stack.push(IncludeFrame {
+                path_key: child_key_lower,
+                lines: tokenize_apo_config(child_text),
+                next_line: 0,
+                matching: parent.matching,
+                curve_layer: parent.curve_layer,
+                eq_layer: parent.eq_layer,
+                matched_design: parent.matched_design,
+                channels: parent.channels,
+            });
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("Convolution") {
+            let raw_conv = line.body.trim_matches('"');
+            if !raw_conv.is_empty()
+                && !has_dotdot_segment(raw_conv)
+                && !has_drive_or_unc_prefix(raw_conv)
+            {
+                if !chain.convolution_path.is_empty()
+                    && chain.convolution_path.eq_ignore_ascii_case(raw_conv)
+                {
+                    if chain.convolution_passes < 8 {
+                        chain.convolution_passes += 1;
+                    }
+                } else {
+                    chain.convolution_path = raw_conv.to_string();
+                    chain.convolution_passes = 1;
+                }
+            }
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("FluidEQAutoPreamp") {
+            if line.body.eq_ignore_ascii_case("ON") {
+                if !chain.auto_preamp {
+                    chain.output_guard = true;
+                    chain.auto_preamp = true;
+                    chain.auto_preamp_start_db = chain.preamp_db.min(0.0);
+                    chain.preamp_db = 0.0;
+                }
+            } else if line.body.eq_ignore_ascii_case("OFF") {
+                chain.output_guard = false;
+                chain.auto_preamp = false;
+                chain.auto_preamp_start_db = 0.0;
+            }
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("FluidEQCurveStage") {
+            chain.stable_graphic = line.body.eq_ignore_ascii_case("ON");
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("FluidEQCurveLayer") {
+            stack[top_idx].curve_layer = line.body.eq_ignore_ascii_case("ON");
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("FluidEQEqLayer") {
+            stack[top_idx].eq_layer = line.body.eq_ignore_ascii_case("ON");
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("FluidEQFilterDesign") {
+            if line.body.eq_ignore_ascii_case("MATCHED") {
+                stack[top_idx].matched_design = true;
+            } else if line.body.eq_ignore_ascii_case("COOKBOOK") {
+                stack[top_idx].matched_design = false;
+            }
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("FluidEQLowLatency") {
+            chain.low_latency = line.body.eq_ignore_ascii_case("ON");
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("Preamp") {
+            let tokens: Vec<&str> = line
+                .body
+                .split([' ', '\t'])
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !tokens.is_empty()
+                && (tokens.len() == 1
+                    || (tokens.len() == 2 && tokens[1].eq_ignore_ascii_case("dB")))
+            {
+                if let Ok(val) = tokens[0].parse::<f64>() {
+                    if val.is_finite() {
+                        if chain.auto_preamp {
+                            chain.auto_preamp_start_db = val.min(0.0);
+                            chain.preamp_db = 0.0;
+                        } else {
+                            chain.preamp_db = val;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if line.command.eq_ignore_ascii_case("Filter") {
+            if chain.bands.len() >= APO_MAX_CHAIN_BANDS {
+                note_ignored(&mut chain.ignored, "Filter beyond the band limit");
+                continue;
+            }
+            let channels = stack[top_idx].channels;
+            let ear = if channels.all {
                 0
-            } else if sel.speakers_mask == (1 << 0) {
+            } else if channels.speakers == (1 << 0) {
                 1
-            } else if sel.speakers_mask == (1 << 1) {
+            } else if channels.speakers == (1 << 1) {
                 2
             } else {
                 0
             };
-        } else if cmd.eq_ignore_ascii_case("GraphicEQ") {
-            let pts = parse_apo_graphic_eq(body);
-            if !pts.is_empty() {
-                chain.graphic_curves.push(pts);
-                chain.matched = true;
-            }
-        } else if cmd
-            .get(0..6)
-            .map(|p| p.eq_ignore_ascii_case("Filter"))
-            .unwrap_or(false)
-            && chain.bands.len() < APO_MAX_CHAIN_BANDS
-        {
             let next_id = (chain.bands.len() + 1) as u32;
-            if let Some(band) = parse_apo_filter_line(body, next_id, current_ear) {
-                chain.bands.push(band);
-                chain.matched = true;
+            if let Some(band_spec) = parse_apo_filter_line(&line.body, next_id, ear) {
+                chain.apo_bands.push(ApoResolvedBand {
+                    spec: band_spec.clone(),
+                    user_eq: stack[top_idx].eq_layer,
+                    curve_layer: stack[top_idx].curve_layer,
+                    matched: stack[top_idx].matched_design,
+                    channels,
+                });
+                chain.bands.push(band_spec);
             }
+            continue;
         }
+
+        if line.command.eq_ignore_ascii_case("GraphicEQ") {
+            if chain.graphic_curves.len() >= APO_MAX_GRAPHIC_CURVES {
+                note_ignored(&mut chain.ignored, "GraphicEQ beyond the curve limit");
+                continue;
+            }
+            let pts = parse_apo_graphic_eq(&line.body);
+            if !pts.is_empty() {
+                if stack[top_idx].curve_layer {
+                    chain.comparison_curves.push(pts.clone());
+                }
+                if stack[top_idx].eq_layer {
+                    chain.eq_graphic_curves.push(pts.clone());
+                }
+                chain.graphic_curves.push(pts);
+            }
+            continue;
+        }
+
+        note_ignored(&mut chain.ignored, &line.command);
     }
 
-    open_stack.pop();
+    chain
 }
 
 // ============================================================================

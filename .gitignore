@@ -94,3 +94,6 @@ rust/fluideq-shell/gen/
 # Add-ons: code kept in a developer's own checkout, loaded by pnpm dev only
 # and never shipped (.erb/scripts/addons.ts). Each is a repository of its own.
 /addons/
+
+# Local toolchain install produced by the build scripts.
+/.toolchain/

@@ -94,7 +94,11 @@ interface EqPresetsViewProps {
   activeHeadphoneLabel: string;
   headphoneBands: readonly EqBand[];
   headphoneEnabled: boolean;
-  onApplyHeadphoneCorrection: (label: string, bands: EqBand[]) => void;
+  onApplyHeadphoneCorrection: (
+    label: string,
+    bands: EqBand[],
+    opraMeta?: { vendor: string; product: string; curveId?: string },
+  ) => void;
   onApplyAsEditableEq: (bands: EqBand[]) => void;
 }
 
@@ -264,7 +268,11 @@ export const EqPresetsSubTab: React.FC<EqPresetsViewProps> = ({
                 onClick={() => {
                   if (previewOpraBands.length > 0) {
                     const label = `${formatKeyName(selectedBrand)} ${formatKeyName(selectedModelKey)} (${formatKeyName(selectedTargetKey)})`;
-                    onApplyHeadphoneCorrection(label, previewOpraBands);
+                    onApplyHeadphoneCorrection(label, previewOpraBands, {
+                      vendor: selectedBrand,
+                      product: selectedModelKey,
+                      curveId: selectedTargetKey || undefined,
+                    });
                     setStatusBanner(`Applied OPRA headphone correction: ${label}`);
                   }
                 }}

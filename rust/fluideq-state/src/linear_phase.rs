@@ -336,4 +336,87 @@ mod tests {
         assert!(active_change[mid].abs() > 1e-3);
         assert!((active_change[mid - 5] - active_change[mid + 5]).abs() < 1e-5);
     }
+
+    #[cfg(feature = "link-cpp-core")]
+    #[test]
+    fn linear_phase_kernel_and_change_kernel_match_cpp_core_synthesis() {
+        use fluideq_dsp_sys::{
+            feq_build_linear_phase_change_kernel, feq_build_linear_phase_kernel,
+            FeqLinearPhaseBand, FeqLinearPhaseRack,
+        };
+
+        let mut eq = FeqChainEqSettings::default();
+        eq.model = FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL as i32;
+        eq.model_amount = 0.8;
+        eq.matched = 1;
+        eq.subsonic_hz = 24.0;
+        eq.band_count = 2;
+        eq.bands[0].enabled = 1;
+        eq.bands[0].filter_type = FeqFilterType::FEQ_FILTER_PK;
+        eq.bands[0].frequency = 1200.0;
+        eq.bands[0].gain_db = 5.5;
+        eq.bands[0].quality = 1.4;
+        eq.bands[1].enabled = 1;
+        eq.bands[1].dynamic = 1;
+        eq.bands[1].filter_type = FeqFilterType::FEQ_FILTER_HSC;
+        eq.bands[1].frequency = 6000.0;
+        eq.bands[1].gain_db = -4.0;
+        eq.bands[1].quality = 0.707;
+
+        let rust_kernel = synthesize_linear_phase_kernel_for_ear(&eq, 48_000.0, 1);
+        let rust_change = synthesize_linear_phase_change_kernel(&eq, 1, 48_000.0, 1);
+
+        let lp_bands = [
+            FeqLinearPhaseBand {
+                enabled: eq.bands[0].enabled,
+                dynamic: eq.bands[0].dynamic,
+                filter_type: eq.bands[0].filter_type,
+                frequency: eq.bands[0].frequency,
+                gain_db: eq.bands[0].gain_db,
+                quality: eq.bands[0].quality,
+            },
+            FeqLinearPhaseBand {
+                enabled: eq.bands[1].enabled,
+                dynamic: eq.bands[1].dynamic,
+                filter_type: eq.bands[1].filter_type,
+                frequency: eq.bands[1].frequency,
+                gain_db: eq.bands[1].gain_db,
+                quality: eq.bands[1].quality,
+            },
+        ];
+        let rack = FeqLinearPhaseRack {
+            bands: lp_bands.as_ptr(),
+            band_count: 2,
+            engine: FeqEqEngine::FEQ_EQ_SERIAL,
+            model: FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL,
+            model_amount: 0.8,
+            matched: 1,
+            subsonic_hz: 24.0,
+        };
+
+        let mut cpp_kernel = vec![0.0_f32; FEQ_LINEAR_PHASE_KERNEL_SIZE];
+        let mut cpp_change = vec![0.0_f32; FEQ_LINEAR_PHASE_KERNEL_SIZE];
+        unsafe {
+            feq_build_linear_phase_kernel(&rack, 48_000.0, cpp_kernel.as_mut_ptr());
+            feq_build_linear_phase_change_kernel(&rack, 1, 48_000.0, cpp_change.as_mut_ptr());
+        }
+
+        for i in 0..FEQ_LINEAR_PHASE_KERNEL_SIZE {
+            assert!(
+                (rust_kernel[i] - cpp_kernel[i]).abs() < 1e-6,
+                "Static linear-phase kernel tap {} mismatch: rust={} cpp={}",
+                i,
+                rust_kernel[i],
+                cpp_kernel[i]
+            );
+            assert!(
+                (rust_change[i] - cpp_change[i]).abs() < 1e-6,
+                "Dynamic change linear-phase kernel tap {} mismatch: rust={} cpp={}",
+                i,
+                rust_change[i],
+                cpp_change[i]
+            );
+        }
+    }
 }
+

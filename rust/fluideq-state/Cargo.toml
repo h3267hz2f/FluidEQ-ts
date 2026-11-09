@@ -6,11 +6,11 @@ license.workspace = true
 authors.workspace = true
 description = "Authoritative Rust state center and cold-residency lifecycle controller for FluidEQ 2.1"
 
+[features]
+default = []
+link-cpp-core = ["fluideq-dsp-sys/link-cpp-core"]
+
 [dependencies]
 fluideq-dsp-sys = { path = "../fluideq-dsp-sys" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[features]
-default = []
-link-cpp-core = ["fluideq-dsp-sys/link-cpp-core"]

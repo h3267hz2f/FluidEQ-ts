@@ -20,13 +20,9 @@ use serde::{Deserialize, Serialize};
 use std::os::raw::{c_char, c_double, c_float, c_int};
 
 pub const FEQ_ABI_VERSION: u32 = 1;
+pub const FEQ_PARAMETER_COUNT: usize = 64;
 pub const FEQ_CHAIN_PARAM_LEAD: usize = 158;
 pub const FEQ_CHAIN_BAND_PARAMS: usize = 7;
-// Generated from `src/common/dsp/nativeParameters.ts` by `build.rs`, the same
-// table the generated C++ `parameters.h` comes from. It defines
-// `FEQ_PARAMETER_SCHEMA_VERSION`, `FEQ_PARAMETER_COUNT`, `FEQ_PARAMETER_IDS`,
-// `FEQ_PARAMETER_STRUCTURAL`, and `feq_parameter_slot`.
-include!(concat!(env!("OUT_DIR"), "/parameters.rs"));
 pub const FEQ_CHAIN_MAX_EQ_BANDS: usize = 64;
 pub const FEQ_CHAIN_EXCITER_BANDS: usize = 3;
 pub const FEQ_CHAIN_CHANNELS: usize = 2;
@@ -40,9 +36,19 @@ pub const FEQ_CHAIN_TONE_VERSION: f64 = 1.0;
 pub const FEQ_CHAIN_ROOM_TAG: f64 = 1380929357.0; // 'ROOM'
 pub const FEQ_CHAIN_ROOM_VERSION: f64 = 1.0;
 pub const FEQ_CHAIN_ROOM_FIELDS: f64 = 8.0;
+pub const FEQ_CHAIN_ROOM_TRAILER: usize = 11;
 pub const FEQ_CHAIN_FOOTSTEPS_TAG: f64 = 1179602772.0; // 'FOOT'
 pub const FEQ_CHAIN_FOOTSTEPS_VERSION: f64 = 1.0;
 pub const FEQ_CHAIN_FOOTSTEPS_FIELDS: f64 = 4.0;
+pub const FEQ_CHAIN_FOOTSTEPS_TRAILER: usize = 7;
+pub const FEQ_CHAIN_TONE_HEADER: usize = 4;
+pub const FEQ_CHAIN_TONE_BAND_PARAMS: usize = 4;
+pub const FEQ_CHAIN_MAX_TRAILER: usize = 15
+    + FEQ_CHAIN_FOOTSTEPS_TRAILER
+    + FEQ_CHAIN_TONE_HEADER
+    + FEQ_CHAIN_MAX_TONE_BANDS * FEQ_CHAIN_TONE_BAND_PARAMS;
+pub const FEQ_CHAIN_MAX_PARAMS: usize =
+    FEQ_CHAIN_PARAM_LEAD + FEQ_CHAIN_MAX_EQ_BANDS * FEQ_CHAIN_BAND_PARAMS + FEQ_CHAIN_MAX_TRAILER;
 
 pub const FEQ_DENOISE_BANDS: usize = 24;
 pub const FEQ_DENOISE_PROFILE_BANDS: usize = 40;
@@ -65,18 +71,18 @@ pub const FEQ_ROOM_REPORT_FOLD_DOWN: u32 = 8;
 pub const FEQ_ROOM_REPORT_PROTECTED: u32 = 16;
 pub const FEQ_ROOM_REPORT_SOURCE_BYPASS: u32 = 32;
 
-pub const FEQ_STAGE_DENOISE: u32 = 1 << 0;
-pub const FEQ_STAGE_DEESSER: u32 = 1 << 1;
+pub const FEQ_STAGE_NORMALIZER: u32 = 1 << 0;
+pub const FEQ_STAGE_DENOISE: u32 = 1 << 1;
 pub const FEQ_STAGE_EXCITER: u32 = 1 << 2;
-pub const FEQ_STAGE_EQ: u32 = 1 << 3;
-pub const FEQ_STAGE_BASS_FORGE: u32 = 1 << 4;
+pub const FEQ_STAGE_BASS_FORGE: u32 = 1 << 3;
+pub const FEQ_STAGE_EQ: u32 = 1 << 4;
 pub const FEQ_STAGE_BASS_PUNCH: u32 = 1 << 5;
-pub const FEQ_STAGE_DIMENSION: u32 = 1 << 6;
-pub const FEQ_STAGE_ROOM: u32 = 1 << 7;
+pub const FEQ_STAGE_ROOM: u32 = 1 << 6;
+pub const FEQ_STAGE_DIMENSION: u32 = 1 << 7;
 pub const FEQ_STAGE_MAXIMIZER: u32 = 1 << 8;
-pub const FEQ_STAGE_MASTER: u32 = 1 << 9;
-pub const FEQ_STAGE_NORMALIZER: u32 = 1 << 10;
-pub const FEQ_STAGE_TONE: u32 = 1 << 11;
+pub const FEQ_STAGE_HEADROOM: u32 = 1 << 9;
+pub const FEQ_STAGE_MASTER: u32 = 1 << 10;
+pub const FEQ_STAGE_DEESSER: u32 = 1 << 11;
 pub const FEQ_STAGE_FOOTSTEPS: u32 = 1 << 12;
 
 pub const FEQ_METER_WINDOW: usize = 2048;
@@ -87,6 +93,10 @@ pub const FEQ_METER_SCOPE_PAIRS: usize = 256;
 pub const FEQ_METER_MAX_BANDS: usize = 64;
 pub const FEQ_METER_EXCITER_BANDS: usize = 3;
 pub const FEQ_METER_BASS_FORGE_BANDS: usize = 8;
+
+pub const FEQ_TRUE_PEAK_FACTOR: usize = 4;
+pub const FEQ_TRUE_PEAK_TAPS: usize = 12;
+pub const FEQ_TRUE_PEAK_LATENCY: u32 = (FEQ_TRUE_PEAK_TAPS / 2) as u32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,13 +195,13 @@ pub enum FeqNormalizerMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeqDenoiseProfileSource {
     FEQ_DENOISE_PROFILE_SCANNED = 0,
-    FEQ_DENOISE_PROFILE_CAPTURED = 1,
-    FEQ_DENOISE_PROFILE_ADAPTIVE = 2,
+    FEQ_DENOISE_PROFILE_ADAPTIVE = 1,
 }
 
 impl FeqDenoiseProfileSource {
     pub const FEQ_DENOISE_PROFILE_AUTO: Self = Self::FEQ_DENOISE_PROFILE_SCANNED;
-    pub const FEQ_DENOISE_PROFILE_FROZEN: Self = Self::FEQ_DENOISE_PROFILE_CAPTURED;
+    pub const FEQ_DENOISE_PROFILE_CAPTURED: Self = Self::FEQ_DENOISE_PROFILE_SCANNED;
+    pub const FEQ_DENOISE_PROFILE_FROZEN: Self = Self::FEQ_DENOISE_PROFILE_SCANNED;
 }
 
 #[repr(C)]
@@ -206,27 +216,30 @@ pub enum FeqDenoiseHumMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeqDenoiseVoiceMode {
     FEQ_DENOISE_VOICE_KEEP_VOICE = 0,
-    FEQ_DENOISE_VOICE_REMOVE_VOICE = 1,
-    FEQ_DENOISE_VOICE_NEURAL = 2,
+    FEQ_DENOISE_VOICE_KEEP_BACKGROUND = 1,
 }
 
 impl FeqDenoiseVoiceMode {
+    pub const FEQ_DENOISE_VOICE_REMOVE_VOICE: Self = Self::FEQ_DENOISE_VOICE_KEEP_BACKGROUND;
+    pub const FEQ_DENOISE_VOICE_NEURAL: Self = Self::FEQ_DENOISE_VOICE_KEEP_VOICE;
     pub const FEQ_DENOISE_VOICE_LIGHT: Self = Self::FEQ_DENOISE_VOICE_KEEP_VOICE;
-    pub const FEQ_DENOISE_VOICE_STANDARD: Self = Self::FEQ_DENOISE_VOICE_REMOVE_VOICE;
-    pub const FEQ_DENOISE_VOICE_DEEP: Self = Self::FEQ_DENOISE_VOICE_NEURAL;
+    pub const FEQ_DENOISE_VOICE_STANDARD: Self = Self::FEQ_DENOISE_VOICE_KEEP_BACKGROUND;
+    pub const FEQ_DENOISE_VOICE_DEEP: Self = Self::FEQ_DENOISE_VOICE_KEEP_VOICE;
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeqDeEsserMode {
-    FEQ_DEESSER_SPLIT_BAND = 0,
-    FEQ_DEESSER_WIDEBAND = 1,
-    FEQ_DEESSER_SPECTRAL = 2,
+    FEQ_DEESSER_SPECTRAL = 0,
+    FEQ_DEESSER_TREBLE = 1,
+    FEQ_DEESSER_WHOLE = 2,
 }
 
 impl FeqDeEsserMode {
-    pub const FEQ_DEESSER_SPLIT: Self = Self::FEQ_DEESSER_SPLIT_BAND;
-    pub const FEQ_DEESSER_WIDE: Self = Self::FEQ_DEESSER_WIDEBAND;
+    pub const FEQ_DEESSER_SPLIT_BAND: Self = Self::FEQ_DEESSER_TREBLE;
+    pub const FEQ_DEESSER_WIDEBAND: Self = Self::FEQ_DEESSER_WHOLE;
+    pub const FEQ_DEESSER_SPLIT: Self = Self::FEQ_DEESSER_TREBLE;
+    pub const FEQ_DEESSER_WIDE: Self = Self::FEQ_DEESSER_WHOLE;
     pub const FEQ_DEESSER_FOLLOW: Self = Self::FEQ_DEESSER_SPECTRAL;
 }
 
@@ -627,7 +640,7 @@ pub struct FeqFootstepsReport {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeqChainExciterBand {
     pub enabled: c_int,
     pub freq_hz: c_double,
@@ -638,7 +651,7 @@ pub struct FeqChainExciterBand {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeqChainExciterSettings {
     pub enabled: c_int,
     pub isolate: c_int,
@@ -852,7 +865,7 @@ impl Default for FeqBassPunchSettings {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeqDimensionSettings {
     pub enabled: c_int,
     pub low_width: c_double,
@@ -867,12 +880,6 @@ pub struct FeqDimensionSettings {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FeqRoomSettings {
-    pub size_m: c_double,
-    pub walls: c_double,
-    pub distance_m: c_double,
-    pub centre_db: c_double,
-    pub sub_db: c_double,
-    pub head_scale: c_double,
     pub renderer_version: c_int,
     pub early_reflection_db: c_double,
     pub ambience_mix: c_double,
@@ -881,12 +888,19 @@ pub struct FeqRoomSettings {
     pub preserve_position: c_int,
     pub compare_original: c_int,
     pub source_already_spatial: c_int,
-    pub angle_deg: [c_double; FEQ_ROOM_SPEAKERS],
-    pub level_db: [c_double; FEQ_ROOM_SPEAKERS],
+    pub enabled: c_int,
+    pub size_m: c_double,
+    pub walls: c_double,
+    pub distance_m: c_double,
+    pub centre_db: c_double,
+    pub sub_db: c_double,
     pub bass_management: c_int,
     pub crossover_hz: c_double,
     pub music_upmix: c_int,
     pub upmix_amount: c_double,
+    pub head_scale: c_double,
+    pub angle_deg: [c_double; FEQ_ROOM_SPEAKERS],
+    pub level_db: [c_double; FEQ_ROOM_SPEAKERS],
     pub speaker_distance_m: [c_double; FEQ_ROOM_SPEAKERS],
     pub mute: [c_int; FEQ_ROOM_MUTE_SLOTS],
 }
@@ -894,12 +908,6 @@ pub struct FeqRoomSettings {
 impl Default for FeqRoomSettings {
     fn default() -> Self {
         Self {
-            size_m: 4.2,
-            walls: 0.55,
-            distance_m: 1.8,
-            centre_db: 0.0,
-            sub_db: 0.0,
-            head_scale: 1.0,
             renderer_version: 1,
             early_reflection_db: 0.0,
             ambience_mix: 0.0,
@@ -908,12 +916,19 @@ impl Default for FeqRoomSettings {
             preserve_position: 0,
             compare_original: 0,
             source_already_spatial: 0,
-            angle_deg: [-30.0, 30.0, 0.0, -100.0, 100.0, -140.0, 140.0],
-            level_db: [0.0; FEQ_ROOM_SPEAKERS],
+            enabled: 0,
+            size_m: 4.2,
+            walls: 0.55,
+            distance_m: 1.8,
+            centre_db: 0.0,
+            sub_db: 0.0,
             bass_management: 1,
             crossover_hz: 80.0,
             music_upmix: 0,
             upmix_amount: 0.6,
+            head_scale: 1.0,
+            angle_deg: [-30.0, 30.0, 0.0, -100.0, 100.0, -140.0, 140.0],
+            level_db: [0.0; FEQ_ROOM_SPEAKERS],
             speaker_distance_m: [0.0; FEQ_ROOM_SPEAKERS],
             mute: [0; FEQ_ROOM_MUTE_SLOTS],
         }
@@ -1081,53 +1096,6 @@ pub struct FeqChainSettings {
     pub master: FeqChainMasterSettings,
     pub surround_all_channels: c_int,
     pub low_latency: c_int,
-}
-
-/// The Exciter's resting band: the lowest frequency and range its controls accept,
-/// so a default encode/decode stays bit-identical.
-impl Default for FeqChainExciterBand {
-    fn default() -> Self {
-        Self {
-            enabled: 0,
-            freq_hz: 20.0,
-            range: 0.25,
-            drive: 0.0,
-            mix: 0.0,
-            texture: 0.0,
-        }
-    }
-}
-
-impl Default for FeqChainExciterSettings {
-    fn default() -> Self {
-        Self {
-            enabled: 0,
-            isolate: 0,
-            stereo: 0,
-            align_enabled: 0,
-            align_amount: 0.0,
-            organic_enabled: 0,
-            organic_amount: 0.0,
-            organic_focus_hz: 50.0,
-            organic_range: 0.5,
-            bands: [FeqChainExciterBand::default(); FEQ_CHAIN_EXCITER_BANDS],
-            oversampling: 1,
-        }
-    }
-}
-
-impl Default for FeqDimensionSettings {
-    fn default() -> Self {
-        Self {
-            enabled: 0,
-            low_width: 0.0,
-            mid_width: 0.0,
-            high_width: 0.0,
-            low_hz: 60.0,
-            high_hz: 1200.0,
-            decorrelation: 0.0,
-        }
-    }
 }
 
 impl Default for FeqChainSettings {
@@ -1956,35 +1924,6 @@ impl NativeChainHandle {
         }
     }
 
-    /// Resets the chain's carried state for `reason` (`FEQ_CHAIN_RESET_*`).
-    pub fn reset(&mut self, reason: FeqChainResetReason) {
-        #[cfg(feature = "link-cpp-core")]
-        unsafe {
-            if !self.raw.is_null() {
-                feq_chain_reset(self.raw, reason);
-            }
-        }
-        #[cfg(not(feature = "link-cpp-core"))]
-        {
-            let _ = reason;
-        }
-    }
-
-    /// Applies or clears the denoise profile on the native chain.
-    pub fn set_noise_profile(&mut self, profile: Option<&FeqNoiseProfile>) {
-        #[cfg(feature = "link-cpp-core")]
-        unsafe {
-            if !self.raw.is_null() {
-                let pointer = profile.map_or(std::ptr::null(), |p| p as *const FeqNoiseProfile);
-                feq_chain_set_noise_profile(self.raw, pointer);
-            }
-        }
-        #[cfg(not(feature = "link-cpp-core"))]
-        {
-            let _ = profile;
-        }
-    }
-
     /// Loads the DPDFNet neural voice denoise model and `onnxruntime` shared library into `FeqChain`.
     pub fn load_voice_model(&mut self, model_path: &str, runtime_path: &str) -> bool {
         if model_path.is_empty() || runtime_path.is_empty() {
@@ -2032,6 +1971,35 @@ impl NativeChainHandle {
         }
     }
 
+    pub fn reset(&mut self, reason: FeqChainResetReason) {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                feq_chain_reset(self.raw, reason);
+            }
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = reason;
+        }
+    }
+
+    pub fn set_noise_profile(&mut self, profile: Option<&FeqNoiseProfile>) {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let ptr = profile
+                    .map(|p| p as *const FeqNoiseProfile)
+                    .unwrap_or(std::ptr::null());
+                feq_chain_set_noise_profile(self.raw, ptr);
+            }
+        }
+        #[cfg(not(feature = "link-cpp-core"))]
+        {
+            let _ = profile;
+        }
+    }
+
     pub fn is_voice_model_loaded(&self) -> bool {
         self.voice_model_loaded
     }
@@ -2054,6 +2022,44 @@ impl NativeChainHandle {
 
     pub fn maximum_block_frames(&self) -> u32 {
         self.maximum_block_frames
+    }
+
+    pub fn active_stages(&self) -> u32 {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                return feq_chain_active_stages(self.raw);
+            }
+        }
+        11
+    }
+
+    pub fn latency_frames(&self) -> u32 {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                return feq_chain_latency_frames(self.raw);
+            }
+        }
+        432
+    }
+}
+
+pub fn engine_abi_version() -> String {
+    #[cfg(feature = "link-cpp-core")]
+    unsafe {
+        let ver_ptr = feq_core_version();
+        let ver_str = if !ver_ptr.is_null() {
+            std::ffi::CStr::from_ptr(ver_ptr).to_string_lossy().into_owned()
+        } else {
+            "2.1.0".to_string()
+        };
+        let abi = feq_core_abi_version();
+        return format!("FluidEQ C++20 Core {} (ABI v{})", ver_str, abi);
+    }
+    #[cfg(not(feature = "link-cpp-core"))]
+    {
+        format!("FluidEQ Core 2.1.0 (ABI v{})", FEQ_ABI_VERSION)
     }
 }
 
@@ -2323,6 +2329,134 @@ const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, reserved_tail) 
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, bass_reserved_tail) == 396);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, deesser_reduction_db) == 560);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, footsteps_level_db) == 784);
+
+#[cfg(all(test, feature = "link-cpp-core"))]
+mod cpp_ffi_tests {
+    use super::*;
+
+    #[test]
+    fn cpp_core_abi_and_engine_planar_processing_parity() {
+        unsafe {
+            assert_eq!(feq_core_abi_version(), FEQ_ABI_VERSION);
+            let version_ptr = feq_core_version();
+            assert!(!version_ptr.is_null());
+
+            // Use sample_rate = 160 so `sample_rate / 40 == 4` frames publishes a telemetry record immediately
+            let engine = feq_engine_create(160, 2, 256);
+            assert!(!engine.is_null());
+
+            let params = [0.0_f64; FEQ_PARAMETER_COUNT];
+            let cfg = FeqConfigV1 {
+                abi_version: FEQ_ABI_VERSION,
+                settings_revision: 7,
+                parameter_count: FEQ_PARAMETER_COUNT as u32,
+                parameter_values: params.as_ptr(),
+            };
+            assert_eq!(feq_engine_prepare_config(engine, &cfg), FeqStatus::FEQ_OK);
+            assert_eq!(feq_engine_commit_prepared_config(engine), FeqStatus::FEQ_OK);
+            assert_eq!(feq_engine_latency_frames(engine), 0);
+
+            let in_l = [0.25_f32, -0.5_f32, f32::NAN, 0.75_f32];
+            let in_r = [-0.25_f32, 0.5_f32, 0.125_f32, -0.75_f32];
+            let mut out_l = [0.0_f32; 4];
+            let mut out_r = [0.0_f32; 4];
+            let in_ptrs = [in_l.as_ptr(), in_r.as_ptr()];
+            let out_ptrs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+
+            feq_engine_process_planar(engine, in_ptrs.as_ptr(), out_ptrs.as_ptr(), 4);
+            assert_eq!(out_l[0], 0.25);
+            assert_eq!(out_l[1], -0.5);
+            assert_eq!(out_l[2], 0.0); // NaN sanitized to 0.0
+            assert_eq!(out_l[3], 0.75);
+            assert_eq!(out_r, in_r);
+
+            assert_eq!(feq_engine_reports_published(engine), 1);
+            let mut telemetry = FeqTelemetryV1::default();
+            assert!(feq_engine_try_read_telemetry(engine, &mut telemetry));
+            assert_eq!(telemetry.applied_revision, 7);
+            assert_eq!(telemetry.frames_processed, 4);
+            assert_eq!(telemetry.repaired_samples, 1);
+
+            let mut diag = FeqDiagnosticV1::default();
+            assert!(!feq_engine_try_read_diagnostic(engine, &mut diag));
+
+            feq_engine_destroy(engine);
+        }
+    }
+
+    #[test]
+    fn cpp_core_chain_defaults_and_meters_end_to_end_ffi_parity() {
+        unsafe {
+            let mut cpp_defaults = std::mem::zeroed::<FeqChainSettings>();
+            feq_chain_settings_defaults(&mut cpp_defaults);
+            let rust_defaults = FeqChainSettings::default();
+            assert_eq!(cpp_defaults, rust_defaults);
+
+            let mut doubling = 0;
+            let rate_96 = feq_room_head_rate(96_000.0, &mut doubling);
+            assert!((rate_96 - 96_000.0).abs() < 1e-6);
+            assert_eq!(doubling, 0);
+
+            let rate_192 = feq_room_head_rate(192_000.0, &mut doubling);
+            assert!((rate_192 - 96_000.0).abs() < 1e-6);
+            assert_eq!(doubling, 1);
+
+            assert_eq!(feq_convolver_latency(), 512);
+            assert_eq!(
+                feq_linear_phase_latency() as usize,
+                FEQ_LINEAR_PHASE_KERNEL_LATENCY + feq_convolver_latency() as usize
+            );
+
+            let g_in = feq_crossfade_gain(FeqCrossfadeCurve::FEQ_CROSSFADE_EQUAL_POWER, 0.5, 1);
+            let g_out = feq_crossfade_gain(FeqCrossfadeCurve::FEQ_CROSSFADE_EQUAL_POWER, 0.5, 0);
+            assert!((g_in + g_out - 1.0).abs() < 1e-6);
+            assert!((g_in - 0.5).abs() < 1e-6);
+            assert!((g_out - 0.5).abs() < 1e-6);
+        }
+
+        let mut chain = NativeChainHandle::new(48_000, 2, 256);
+        let mut meters = NativeMetersHandle::new(2, 48_000.0);
+        let mut settings = FeqChainSettings::default();
+        settings.eq.enabled = 1;
+        settings.eq.band_count = 1;
+        settings.eq.bands[0].enabled = 1;
+        settings.eq.bands[0].filter_type = FeqFilterType::FEQ_FILTER_PK;
+        settings.eq.bands[0].frequency = 1000.0;
+        settings.eq.bands[0].gain_db = 6.0;
+        settings.eq.bands[0].quality = 1.0;
+        assert!(chain.configure(&settings));
+
+        unsafe {
+            feq_chain_set_meters(chain.raw, meters.as_mut_ptr());
+            let latency = feq_chain_latency_frames(chain.raw);
+            assert!(latency >= 432, "Expected chain look-ahead latency >= 432 frames, got {}", latency);
+
+            let mut left = [0.0_f32; 256];
+            let mut right = [0.0_f32; 256];
+            let mut sample_idx = 0usize;
+            for _block in 0..6 {
+                for i in 0..256 {
+                    let phase =
+                        2.0 * std::f32::consts::PI * 1000.0 * (sample_idx as f32) / 48_000.0;
+                    left[i] = 0.2 * phase.sin();
+                    right[i] = 0.2 * phase.sin();
+                    sample_idx += 1;
+                }
+                let ptrs = [left.as_mut_ptr(), right.as_mut_ptr()];
+                feq_chain_process(chain.raw, ptrs.as_ptr(), 256);
+            }
+
+            let peak_out = left.iter().fold(0.0_f32, |acc, &x| acc.max(x.abs()));
+            assert!(
+                peak_out > 0.3,
+                "Expected +6 dB boost at 1 kHz after look-ahead latency, peak={}",
+                peak_out
+            );
+            assert_ne!(feq_chain_active_stages(chain.raw) & FEQ_STAGE_EQ, 0);
+        }
+    }
+}
+
 
 
 

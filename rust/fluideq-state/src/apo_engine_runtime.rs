@@ -14,8 +14,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! - `/native/system-apo/src/status_json.cpp` (`EngineStatus`, `status_json`)
 //! - `/native/system-apo/src/config_file.cpp` (`read_config_file` 4 MB cap + case-folded disk `Include:` tree loader)
 
-pub use crate::apo::{ApoGraphicPoint as GraphicEqPoint, ResolvedApoChain as ApoEndpointChain};
-use crate::apo::resolve_apo_endpoint_chain;
+pub use crate::apo::{
+    resolve_apo_endpoint_chain, ApoEndpointChain, ChannelSelection, GraphicEqPoint,
+    LOW_FREQUENCY_SPEAKER,
+};
+pub use crate::apo_watcher::GraphSourceReport as SourceAnalysisReport;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -77,6 +80,9 @@ pub struct SongProgramme {
     pub level_lufs: f64,
     pub peak_db: f64,
 }
+
+/// Alias matching `fluideq_engine::Programme` in `/native/system-apo/src/programme.h`.
+pub type Programme = SongProgramme;
 
 impl Default for SongProgramme {
     fn default() -> Self {
@@ -334,16 +340,8 @@ pub struct SignatureChainInput {
     pub dsp_values: Vec<f64>,
 }
 
-/// The resolved chain a level prediction replays (`ApoEngineChain` in `level_prediction.cpp`).
+/// Alias matching `fluideq_engine::Chain` in `/native/system-apo/src/config.h`.
 pub type ApoEngineChain = SignatureChainInput;
-
-/// Channels a stream's layout selection names (`ChannelSelection` in `channel_layout.cpp`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ChannelSelection {
-    pub all: bool,
-    pub speakers: u32,
-    pub indices: u32,
-}
 
 fn format_number_g17(value: f64) -> String {
     if !value.is_finite() {

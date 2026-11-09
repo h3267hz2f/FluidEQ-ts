@@ -575,10 +575,10 @@ impl MirrorOutputEngine {
         if current_padding >= self.device_frames {
             return Vec::new();
         }
-        let frames = (self.device_frames - current_padding) as usize;
-        let total_samples = frames * (self.channels as usize);
+        let frames_u32 = self.device_frames - current_padding;
+        let total_samples = (frames_u32 as usize) * (self.channels as usize);
         let mut output = vec![0.0f32; total_samples];
-        self.playback.mix(&mut output, frames as u32);
+        self.playback.mix(&mut output, frames_u32);
         for s in &mut output {
             *s *= self.volume;
         }
@@ -1219,6 +1219,9 @@ impl PlaybackRuntimeEngine {
             target_ms: 0.0,
             peak: 0.0,
             rms: 0.0,
+            underruns: 0,
+            discontinuities: 0,
+            trimmed_frames: 0,
         }
     }
 

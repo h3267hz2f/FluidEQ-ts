@@ -16,10 +16,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! - `/native/system-apo/src/graph_handover.cpp`
 //! - `/native/system-apo/src/owner_link.h` & `owner_link.cpp`
 
-use crate::apo_analysis_and_status::SourceAnalysis as SourceAnalysisReport;
-use crate::apo_engine_runtime::{signature_of_chain, ApoEngineChain};
+use crate::apo_engine_runtime::{signature_of_chain, ApoEngineChain, SourceAnalysisReport};
+use crate::apo_process_and_stages::{
+    apply_minimum_curve_phase, design_band, design_graphic, design_linear_bands, CurveStage,
+    EqPhaseStage, PlainStage, FEQ_CONVOLVER_LATENCY,
+};
+use crate::biquad::TruePeakDetector;
+use fluideq_dsp_sys::{FeqBiquadCoefficients, FEQ_TRUE_PEAK_LATENCY};
 use std::f64::consts::PI;
-use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ============================================================================
 // 1. Real-Time Audio Block Timing & Diagnostics (`block_timing.cpp`)
@@ -603,10 +608,11 @@ impl OutputGuardState {
         self.limiter_gain = from.limiter_gain;
     }
 
-    /// Advances the OutputGuard envelope and 100 ms window normalizer over `frames` with `block_peak`.
+    /// Advances the OutputGuard envelope and 100 ms window normalizer over `frames` with `block_peak`,
+    /// returning the current linear `limiter_gain`.
     ///
     /// Mirrors `OutputGuard::process` in `/native/system-apo/src/output_guard.cpp`.
-    pub fn process_block(&mut self, frames: u32, block_peak: f64, enabled: bool) {
+    pub fn process_block(&mut self, frames: u32, block_peak: f64, enabled: bool) -> f64 {
         if !enabled {
             self.target_db = 0.0;
             self.quiet_seconds = 0.0;
@@ -679,6 +685,7 @@ impl OutputGuardState {
                 self.window_peak = 0.0;
             }
         }
+        self.limiter_gain
     }
 }
 
@@ -688,8 +695,52 @@ impl OutputGuardState {
 
 pub const LEVEL_HISTORY_SECONDS: f64 = 10.0;
 pub const LEVEL_WARM_UP_SECONDS: f64 = 0.5;
+pub const LEVEL_WARMUP_SECONDS: f64 = LEVEL_WARM_UP_SECONDS;
 pub const LEVEL_LEAST_SECONDS: f64 = 1.0;
 pub const LEVEL_CONVOLVED_SECONDS: f64 = 4.0;
+
+/// Direct discrete convolution of two FIR kernels `a` and `b`.
+pub fn convolve_kernels(a: &[f32], b: &[f32]) -> Vec<f32> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    let mut out = vec![0.0_f32; a.len() + b.len() - 1];
+    for (i, &av) in a.iter().enumerate() {
+        for (j, &bv) in b.iter().enumerate() {
+            out[i + j] += av * bv;
+        }
+    }
+    out
+}
+
+/// Resamples a mono impulse response `input` from `from_rate` to `to_rate` via linear interpolation.
+pub fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if input.is_empty() || from_rate == 0 || to_rate == 0 {
+        return Vec::new();
+    }
+    if from_rate == to_rate {
+        return input.to_vec();
+    }
+    let ratio = f64::from(from_rate) / f64::from(to_rate);
+    let out_len = ((input.len() as f64) * f64::from(to_rate) / f64::from(from_rate)).ceil() as usize;
+    if out_len == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(out_len);
+    let last = input.len() - 1;
+    for i in 0..out_len {
+        let pos = (i as f64) * ratio;
+        let idx = (pos.floor() as usize).min(last);
+        let frac = (pos - (idx as f64)).clamp(0.0, 1.0) as f32;
+        let s0 = input[idx];
+        let s1 = input[(idx + 1).min(last)];
+        out.push(s0 + frac * (s1 - s0));
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelPredictionJudgement {
@@ -774,6 +825,709 @@ pub fn compute_level_prediction_from_peaks(
         shift_db: before_db - after_db,
         seconds: (duration_frames as f64) / f64::from(rate),
     })
+}
+
+/// Frames per call into a replay's graph (`kReplayBlock = 4096` in `level_prediction.cpp`).
+pub const LEVEL_REPLAY_BLOCK_FRAMES: u32 = 4_096;
+
+/// Circular delay line for untouched surround channels (`rack_channels..channels`) when the stereo
+/// DSP rack adds lookahead delay (`FeqDelayLine` / `bypass_align_` in `/native/system-apo/src/graph.cpp`).
+#[derive(Debug, Clone)]
+pub struct BypassDelayLine {
+    ring: Vec<f32>,
+    write_pos: usize,
+    delay_frames: usize,
+}
+
+impl BypassDelayLine {
+    pub fn new(delay_frames: u32) -> Self {
+        let d = delay_frames as usize;
+        Self {
+            ring: vec![0.0_f32; d.max(1)],
+            write_pos: 0,
+            delay_frames: d,
+        }
+    }
+
+    pub fn delay_frames(&self) -> u32 {
+        self.delay_frames as u32
+    }
+
+    pub fn reset(&mut self) {
+        self.ring.fill(0.0);
+        self.write_pos = 0;
+    }
+
+    /// Delays `buffer` in-place by `delay_frames` (`feq_delay_line_process` in `primitives.cpp`).
+    pub fn process(&mut self, buffer: &mut [f32]) {
+        if self.delay_frames == 0 {
+            return;
+        }
+        let d = self.delay_frames;
+        for sample in buffer.iter_mut() {
+            let delayed = self.ring[self.write_pos];
+            self.ring[self.write_pos] = *sample;
+            self.write_pos += 1;
+            if self.write_pos >= d {
+                self.write_pos = 0;
+            }
+            *sample = delayed;
+        }
+    }
+}
+
+/// Returns `true` if every sample across `planar[0..channels][0..frames]` is finite (`!is_nan() && !is_infinite()`).
+///
+/// Exact port of `all_finite` in `/native/system-apo/src/graph.cpp` (lines 71–85).
+pub fn all_finite_planar(planar: &[&[f32]], channels: usize, frames: usize) -> bool {
+    for plane in planar.iter().take(channels) {
+        let count = frames.min(plane.len());
+        for &sample in &plane[..count] {
+            if !sample.is_finite() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Complete stage pipeline for a single `Graph` instance (`fluideq_engine::Graph` in `/native/system-apo/src/graph.cpp`):
+/// - Separates `chain.bands` into `eq_bands` (`user_eq`), `curve_bands` (`curve_layer`), and `plain_bands`.
+/// - Builds `linear_phase_` (single combined FIR when `!minimum_eq_phase && !minimum_curve_phase` and both layers exist),
+///   or `eq_phase_` + `curve_phase_` (applying `apply_minimum_curve_phase` when `!minimum_eq_phase && minimum_curve_phase`).
+/// - Builds `curves_` (`CurveStage` for `GraphicEQ:`) with `4096`/`8192` taps (`delay = 2048`/`4096` in linear phase, `0` in minimum phase).
+/// - Builds `plain_` (`PlainStage` for remaining minimum-phase bands).
+/// - Runs `bypass_align_` on surround channels when rack delay > 0, applies raised-cosine preamp fade,
+///   runs `output_guard_`, and enforces the `all_finite` NaN/Inf circuit breaker on output (`silenced_blocks_`).
+#[derive(Debug)]
+pub struct ApoGraphStagePipeline {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub max_frames: u32,
+    pub rack_channels: u32,
+    pub bypass_align: Vec<BypassDelayLine>,
+    pub linear_phase: Option<EqPhaseStage>,
+    pub eq_phase: Option<EqPhaseStage>,
+    pub curve_phase: Option<EqPhaseStage>,
+    pub curves: Option<CurveStage>,
+    pub plain: Option<PlainStage>,
+    pub preamp_linear: f64,
+    pub preamp_from: f64,
+    pub preamp_fade_total: u32,
+    pub preamp_fade_left: u32,
+    pub auto_preamp: bool,
+    pub output_guard: Option<OutputGuardState>,
+    pub latency_frames: u32,
+    pub silenced_blocks: AtomicU32,
+}
+
+impl ApoGraphStagePipeline {
+    pub fn new(
+        chain: &ApoEngineChain,
+        sample_rate: u32,
+        channels: u32,
+        max_frames: u32,
+        rack_channels: u32,
+        rack_delay_frames: u32,
+    ) -> Self {
+        let rate = sample_rate.max(1);
+        let ch = channels.max(1);
+        let max_f = max_frames.max(1);
+        let rack_ch = rack_channels.min(ch);
+
+        let mut bypass_align = Vec::new();
+        if rack_delay_frames > 0 && rack_ch < ch {
+            for _ in rack_ch..ch {
+                bypass_align.push(BypassDelayLine::new(rack_delay_frames));
+            }
+        }
+
+        let mut eq_bands = Vec::new();
+        let mut curve_bands = Vec::new();
+        let mut plain_bands = Vec::new();
+        for band in &chain.bands {
+            if band.user_eq && !chain.minimum_eq_phase {
+                eq_bands.push(band.clone());
+            } else if band.curve_layer && !chain.minimum_curve_phase {
+                curve_bands.push(band.clone());
+            } else {
+                plain_bands.push(band.clone());
+            }
+        }
+
+        let mut linear_phase = None;
+        let mut eq_phase = None;
+        let mut curve_phase = None;
+
+        // When both EQ and Curve layers are linear phase, combine into a single FIR (`graph.cpp` lines 191-208)
+        if !eq_bands.is_empty() && !curve_bands.is_empty() {
+            let mut both = eq_bands.clone();
+            both.extend(curve_bands.iter().cloned());
+            let combined = EqPhaseStage::new(&both, rate, ch, max_f);
+            if !combined.failed() && combined.using_fir() {
+                linear_phase = Some(combined);
+                eq_bands.clear();
+                curve_bands.clear();
+            }
+        }
+
+        if !eq_bands.is_empty() {
+            let mut stage = None;
+            if chain.minimum_curve_phase {
+                let mut curve_for_phase = Vec::new();
+                for band in &chain.bands {
+                    if band.curve_layer {
+                        curve_for_phase.push(design_band(band, rate, !0).coefficients);
+                    }
+                }
+                if !curve_for_phase.is_empty() {
+                    let eq_coeffs: Vec<FeqBiquadCoefficients> = eq_bands
+                        .iter()
+                        .map(|b| design_band(b, rate, !0).coefficients)
+                        .collect();
+                    let eq_ref = design_linear_bands(&eq_coeffs, rate);
+                    let curve_ref = design_linear_bands(&curve_for_phase, rate);
+                    if !eq_ref.is_empty() && !curve_ref.is_empty() {
+                        if let Ok(combined_ref) = apply_minimum_curve_phase(&eq_ref, &curve_ref) {
+                            let delay = (eq_ref.len() / 2) as u32;
+                            let candidate = EqPhaseStage::from_reference(
+                                &combined_ref,
+                                delay,
+                                eq_bands.len(),
+                                rate,
+                                ch,
+                                max_f,
+                            );
+                            if !candidate.failed() {
+                                plain_bands.retain(|b| !b.curve_layer);
+                                stage = Some(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+            let built = stage.unwrap_or_else(|| EqPhaseStage::new(&eq_bands, rate, ch, max_f));
+            if !built.failed() {
+                eq_phase = Some(built);
+            } else {
+                plain_bands.extend(eq_bands);
+            }
+        }
+
+        if !curve_bands.is_empty() {
+            let built = EqPhaseStage::new(&curve_bands, rate, ch, max_f);
+            if !built.failed() {
+                curve_phase = Some(built);
+            } else {
+                plain_bands.extend(curve_bands);
+            }
+        }
+
+        let curves = if !chain.graphic_curves.is_empty() {
+            if let Ok(kernel) = design_graphic(chain, rate) {
+                let curve_delay = if chain.minimum_curve_phase {
+                    0
+                } else {
+                    (kernel.len() / 2) as u32
+                };
+                let stage = CurveStage::new(&kernel, curve_delay, rate, ch, max_f);
+                if !stage.failed() {
+                    Some(stage)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let plain = if !plain_bands.is_empty() {
+            Some(PlainStage::new(&plain_bands, rate, ch, max_f))
+        } else {
+            None
+        };
+
+        let preamp_linear = 10.0_f64.powf(chain.preamp_db / 20.0);
+        let output_guard = if chain.output_guard {
+            let mut guard = OutputGuardState::new(rate);
+            guard.set_curve_level(chain.auto_preamp_start_db);
+            Some(guard)
+        } else {
+            None
+        };
+
+        let mut latency_frames = rack_delay_frames;
+        if let Some(ref lp) = linear_phase {
+            latency_frames += lp.latency_frames();
+        }
+        if let Some(ref ep) = eq_phase {
+            latency_frames += ep.latency_frames();
+        }
+        if let Some(ref cp) = curve_phase {
+            latency_frames += cp.latency_frames();
+        }
+        if !chain.convolution_path.is_empty() {
+            latency_frames += FEQ_CONVOLVER_LATENCY;
+        }
+        if let Some(ref cv) = curves {
+            latency_frames += cv.partition_latency_frames();
+        }
+
+        Self {
+            sample_rate: rate,
+            channels: ch,
+            max_frames: max_f,
+            rack_channels: rack_ch,
+            bypass_align,
+            linear_phase,
+            eq_phase,
+            curve_phase,
+            curves,
+            plain,
+            preamp_linear,
+            preamp_from: preamp_linear,
+            preamp_fade_total: 0,
+            preamp_fade_left: 0,
+            auto_preamp: chain.auto_preamp && chain.output_guard,
+            output_guard,
+            latency_frames,
+            silenced_blocks: AtomicU32::new(0),
+        }
+    }
+
+    pub fn latency_frames(&self) -> u32 {
+        self.latency_frames
+    }
+
+    pub fn silenced_blocks(&self) -> u32 {
+        self.silenced_blocks.load(Ordering::Relaxed)
+    }
+
+    /// Runs `bypass_align` on surround channels `rack_channels..channels` when the rack ran on `0..rack_channels`.
+    /// Mirrors `Graph::run_rack` (`graph.cpp` lines 430–435).
+    pub fn process_bypass_align(&mut self, planar: &mut [&mut [f32]], frames: usize) {
+        let base = self.rack_channels as usize;
+        for (idx, align) in self.bypass_align.iter_mut().enumerate() {
+            let ch = base + idx;
+            if ch < planar.len() {
+                let n = frames.min(planar[ch].len());
+                align.process(&mut planar[ch][..n]);
+            }
+        }
+    }
+
+    /// Runs the EQ tail stages (`linear_phase_`, `eq_phase_`, `curve_phase_`, `curves_`, `plain_`,
+    /// raised-cosine preamp, `output_guard_`, and the `all_finite` NaN/Inf circuit breaker).
+    ///
+    /// Exact port of `Graph::run_tail` in `/native/system-apo/src/graph.cpp` (lines 440–527).
+    pub fn process(&mut self, planar: &mut [&mut [f32]], frames: usize) {
+        let ch_count = (self.channels as usize).min(planar.len());
+        if ch_count == 0 || frames == 0 {
+            return;
+        }
+
+        if let Some(ref mut lp) = self.linear_phase {
+            lp.process(planar, frames);
+        }
+        if let Some(ref mut ep) = self.eq_phase {
+            ep.process(planar, frames);
+        }
+        if let Some(ref mut cp) = self.curve_phase {
+            cp.process(planar, frames);
+        }
+        if let Some(ref mut cv) = self.curves {
+            cv.process(planar, frames);
+        }
+        if let Some(ref mut pl) = self.plain {
+            pl.process(planar, frames);
+        }
+
+        if self.preamp_fade_left > 0 && self.preamp_fade_total > 0 {
+            let done = self.preamp_fade_total - self.preamp_fade_left;
+            for plane in planar.iter_mut().take(ch_count) {
+                let n = frames.min(plane.len());
+                for (at, sample) in plane[..n].iter_mut().enumerate() {
+                    let mut gain = self.preamp_linear;
+                    let pos = done + (at as u32);
+                    if pos < self.preamp_fade_total {
+                        let weight = 0.5
+                            - 0.5
+                                * (PI * f64::from(pos) / f64::from(self.preamp_fade_total)).cos();
+                        gain = self.preamp_from + weight * (self.preamp_linear - self.preamp_from);
+                    }
+                    *sample = (f64::from(*sample) * gain) as f32;
+                }
+            }
+            self.preamp_fade_left = self.preamp_fade_left.saturating_sub(frames as u32);
+        } else if self.preamp_linear != 1.0 {
+            let preamp = self.preamp_linear as f32;
+            for plane in planar.iter_mut().take(ch_count) {
+                let n = frames.min(plane.len());
+                for sample in &mut plane[..n] {
+                    *sample *= preamp;
+                }
+            }
+        }
+
+        if let Some(ref mut guard) = self.output_guard {
+            let mut block_peak = 0.0_f64;
+            for plane in planar.iter().take(ch_count) {
+                let n = frames.min(plane.len());
+                for &s in &plane[..n] {
+                    let a = f64::from(s.abs());
+                    if a > block_peak {
+                        block_peak = a;
+                    }
+                }
+            }
+            let gain = guard.process_block(frames as u32, block_peak, self.auto_preamp) as f32;
+            for plane in planar.iter_mut().take(ch_count) {
+                let n = frames.min(plane.len());
+                for sample in &mut plane[..n] {
+                    *sample *= gain;
+                }
+            }
+        }
+
+        // Last thing on the way out (`graph.cpp` lines 514-526): nothing but finite numbers leaves the engine.
+        let mut all_ok = true;
+        for plane in planar.iter().take(ch_count) {
+            let n = frames.min(plane.len());
+            if plane[..n].iter().any(|s| !s.is_finite()) {
+                all_ok = false;
+                break;
+            }
+        }
+        if !all_ok {
+            for plane in planar.iter_mut().take(ch_count) {
+                let n = frames.min(plane.len());
+                plane[..n].fill(0.0);
+            }
+            if let Some(ref mut pl) = self.plain {
+                pl.reset();
+            }
+            self.silenced_blocks.fetch_add(1, Ordering::Relaxed);
+            if let Some(ref mut lp) = self.linear_phase {
+                lp.reset();
+            }
+            if let Some(ref mut ep) = self.eq_phase {
+                ep.reset();
+            }
+            if let Some(ref mut cp) = self.curve_phase {
+                cp.reset();
+            }
+        }
+    }
+}
+
+/// One replay stream (`LevelPredictor::Replay` in `/native/system-apo/src/level_prediction.cpp`).
+#[derive(Debug)]
+pub struct LevelReplayState {
+    pub signature: String,
+    pub graph: ApoGraphStagePipeline,
+    pub detectors: Vec<TruePeakDetector>,
+    pub rendered_to: u64,
+    pub valid_from: u64,
+    pub peaks: Vec<f32>,
+    pub chunk: u64,
+    pub chunk_left: u32,
+}
+
+/// Stateful dual-replay Auto-normalize level predictor (`fluideq_engine::LevelPredictor`
+/// in `/native/system-apo/src/level_prediction.h` & `level_prediction.cpp`).
+///
+/// Replays the last seconds of `InputHistory` through `replay_chain_of(next)` (and through a
+/// cached `shadow` replay of `current` during multi-step drags) using 4x oversampled `TruePeakDetector`
+/// chunks so Auto-normalize jumps straight to the exact peak difference `before_db - after_db`.
+#[derive(Debug)]
+pub struct LevelPredictor {
+    rate: u32,
+    channels: u32,
+    chunk_frames: u32,
+    ring_chunks: usize,
+    current: Option<ApoEngineChain>,
+    current_signature: String,
+    current_since: u64,
+    shadow: Option<LevelReplayState>,
+    candidate: Option<LevelReplayState>,
+    scratch: Vec<Vec<f32>>,
+}
+
+impl LevelPredictor {
+    pub fn new(rate: u32, channels: u32, window_frames: u64) -> Self {
+        let rate = rate.max(1);
+        let channels = channels.max(1);
+        let chunk_frames = (rate / PEAK_CHUNKS_PER_SECOND).max(1);
+        let ring_chunks =
+            (window_frames / u64::from(chunk_frames)) as usize + (PEAK_CHUNKS_PER_SECOND as usize) + 2;
+        Self {
+            rate,
+            channels,
+            chunk_frames,
+            ring_chunks,
+            current: None,
+            current_signature: String::new(),
+            current_since: 0,
+            shadow: None,
+            candidate: None,
+            scratch: Vec::new(),
+        }
+    }
+
+    fn start(&self, replay_chain: &ApoEngineChain, signature: String, from: u64) -> LevelReplayState {
+        let graph = ApoGraphStagePipeline::new(
+            replay_chain,
+            self.rate,
+            self.channels,
+            LEVEL_REPLAY_BLOCK_FRAMES,
+            0,
+            0,
+        );
+        let detectors = (0..self.channels)
+            .map(|_| TruePeakDetector::new(4))
+            .collect();
+        let valid_from = from
+            + ((f64::from(self.rate) * LEVEL_WARMUP_SECONDS) as u64)
+            + u64::from(graph.latency_frames())
+            + u64::from(FEQ_TRUE_PEAK_LATENCY);
+        let chunk = from / u64::from(self.chunk_frames);
+        let chunk_left = self.chunk_frames - ((from % u64::from(self.chunk_frames)) as u32);
+        LevelReplayState {
+            signature,
+            graph,
+            detectors,
+            rendered_to: from,
+            valid_from,
+            peaks: vec![0.0_f32; self.ring_chunks],
+            chunk,
+            chunk_left,
+        }
+    }
+
+    fn advance<F>(
+        replay: &mut LevelReplayState,
+        history: &InputHistory,
+        to: u64,
+        channels: u32,
+        chunk_frames: u32,
+        scratch: &mut Vec<Vec<f32>>,
+        stop_requested: &mut F,
+    ) -> bool
+    where
+        F: FnMut() -> bool,
+    {
+        let ch_count = channels as usize;
+        while replay.rendered_to < to {
+            if stop_requested() {
+                return false;
+            }
+            let want = to.min(replay.rendered_to + u64::from(LEVEL_REPLAY_BLOCK_FRAMES));
+            let got = history.copy(replay.rendered_to, want, scratch);
+            if got.from != replay.rendered_to || got.to <= got.from || scratch.len() < ch_count {
+                return false;
+            }
+            let span = (got.to - got.from) as usize;
+            {
+                let mut plane_refs: Vec<&mut [f32]> = scratch
+                    .iter_mut()
+                    .take(ch_count)
+                    .map(|v| &mut v[..span])
+                    .collect();
+                replay.graph.process(&mut plane_refs, span);
+            }
+            let mut at = 0usize;
+            while at < span {
+                if replay.chunk_left == 0 {
+                    replay.chunk += 1;
+                    replay.chunk_left = chunk_frames;
+                    let idx = (replay.chunk as usize) % replay.peaks.len();
+                    replay.peaks[idx] = 0.0;
+                }
+                let take = (replay.chunk_left as usize).min(span - at);
+                let mut peak = 0.0_f64;
+                for ch in 0..ch_count {
+                    let ch_peak =
+                        replay.detectors[ch].process_block(&scratch[ch][at..at + take]);
+                    if ch_peak > peak {
+                        peak = ch_peak;
+                    }
+                }
+                let idx = (replay.chunk as usize) % replay.peaks.len();
+                if (peak as f32) > replay.peaks[idx] {
+                    replay.peaks[idx] = peak as f32;
+                }
+                replay.chunk_left -= take as u32;
+                at += take;
+            }
+            replay.rendered_to = got.to;
+        }
+        true
+    }
+
+    fn peak_over(&self, replay: &LevelReplayState, from: u64, to: u64) -> f64 {
+        let cf = u64::from(self.chunk_frames);
+        let first = (from + cf - 1) / cf;
+        let end = to / cf;
+        let mut peak = 0.0_f64;
+        for chunk in first..end {
+            let val = f64::from(replay.peaks[(chunk as usize) % replay.peaks.len()]);
+            if val > peak {
+                peak = val;
+            }
+        }
+        peak
+    }
+
+    /// Exact port of `LevelPredictor::judge` in `/native/system-apo/src/level_prediction.cpp`.
+    pub fn judge(&self, next: &ApoEngineChain) -> LevelPredictionJudgement {
+        let Some(ref curr) = self.current else {
+            return LevelPredictionJudgement::None;
+        };
+        if !curr.auto_preamp || !next.auto_preamp || !next.output_guard {
+            return LevelPredictionJudgement::None;
+        }
+        if signature_of_chain(&replay_chain_of(next)) == self.current_signature {
+            LevelPredictionJudgement::Same
+        } else {
+            LevelPredictionJudgement::Changed
+        }
+    }
+
+    /// Exact 1:1 port of `LevelPredictor::predict` in `/native/system-apo/src/level_prediction.cpp` (lines 204–279).
+    pub fn predict<F>(
+        &mut self,
+        next: &ApoEngineChain,
+        history: &InputHistory,
+        mut stop_requested: F,
+        others_from: u64,
+    ) -> Option<LevelPrediction>
+    where
+        F: FnMut() -> bool,
+    {
+        self.candidate = None;
+        let curr = self.current.as_ref()?.clone();
+        if !curr.auto_preamp || !next.auto_preamp || !next.output_guard {
+            return None;
+        }
+        let replay = replay_chain_of(next);
+        let signature = signature_of_chain(&replay);
+        if signature == self.current_signature {
+            return None;
+        }
+        let now = history.written();
+        let mut window = history.window_frames();
+        if chain_convolves(next) || chain_convolves(&curr) {
+            window = window.min((f64::from(self.rate) * LEVEL_CONVOLVED_SECONDS) as u64);
+        }
+        let from = now.saturating_sub(window);
+        if now - from < (f64::from(self.rate) * (LEVEL_WARMUP_SECONDS + LEVEL_LEAST_SECONDS)) as u64
+        {
+            return None;
+        }
+        let mut candidate = self.start(&replay, signature, from);
+        let heard_until =
+            others_from.min(now.saturating_sub(now.min(2 * u64::from(self.chunk_frames))));
+        let heard = chain_plays_as_replayed(&curr)
+            && self.current_since + u64::from(self.rate / 10) <= candidate.valid_from
+            && heard_until > candidate.valid_from
+            && heard_until - candidate.valid_from
+                >= (f64::from(self.rate) * LEVEL_LEAST_SECONDS) as u64;
+
+        if !heard {
+            let need_new_shadow = self
+                .shadow
+                .as_ref()
+                .is_none_or(|s| s.signature != self.current_signature || s.rendered_to < from);
+            if need_new_shadow {
+                self.shadow = Some(self.start(
+                    &replay_chain_of(&curr),
+                    self.current_signature.clone(),
+                    from,
+                ));
+            }
+            let shadow = self.shadow.as_mut()?;
+            if !Self::advance(
+                shadow,
+                history,
+                now,
+                self.channels,
+                self.chunk_frames,
+                &mut self.scratch,
+                &mut stop_requested,
+            ) {
+                self.shadow = None;
+                return None;
+            }
+        }
+
+        if !Self::advance(
+            &mut candidate,
+            history,
+            now,
+            self.channels,
+            self.chunk_frames,
+            &mut self.scratch,
+            &mut stop_requested,
+        ) {
+            return None;
+        }
+
+        let shadow_valid = if heard {
+            from
+        } else {
+            self.shadow.as_ref()?.valid_from
+        };
+        let lo = from.max(candidate.valid_from).max(shadow_valid);
+        let hi = if heard {
+            heard_until
+        } else {
+            self.shadow
+                .as_ref()?
+                .rendered_to
+                .min(candidate.rendered_to)
+        };
+        if hi <= lo || hi - lo < (f64::from(self.rate) * LEVEL_LEAST_SECONDS) as u64 {
+            self.candidate = Some(candidate);
+            return None;
+        }
+
+        let before_linear = if heard {
+            history.peak_over(lo, hi)?
+        } else {
+            self.peak_over(self.shadow.as_ref()?, lo, hi)
+        };
+        let after_linear = self.peak_over(&candidate, lo, hi);
+        self.candidate = Some(candidate);
+        compute_level_prediction_from_peaks(before_linear, after_linear, lo, hi, self.rate)
+    }
+
+    /// Exact port of `LevelPredictor::accept` in `/native/system-apo/src/level_prediction.cpp` (lines 281–294).
+    /// Promotes `candidate_` to `shadow_` when its signature matches `published` so multi-step drags
+    /// only replay once per step.
+    pub fn accept(&mut self, published: &ApoEngineChain, heard_frames: u64) {
+        let signature = signature_of_chain(&replay_chain_of(published));
+        if signature != self.current_signature {
+            self.current_since = heard_frames;
+        }
+        if self
+            .candidate
+            .as_ref()
+            .is_some_and(|c| c.signature == signature)
+        {
+            self.shadow = self.candidate.take();
+        } else if self
+            .shadow
+            .as_ref()
+            .is_some_and(|s| s.signature != signature)
+        {
+            self.shadow = None;
+        }
+        self.candidate = None;
+        self.current = Some(published.clone());
+        self.current_signature = signature;
+    }
 }
 
 // ============================================================================
@@ -1138,5 +1892,135 @@ mod tests {
         let msg = link.on_read_complete(false, false);
         assert_eq!(msg, Some("FluidEQ is not running: its pipe is closed"));
         assert!(!link.present());
+    }
+
+    #[test]
+    fn graph_stage_pipeline_silences_non_finite_blocks_and_aligns_surround_bypass() {
+        let mut chain = ApoEngineChain::default();
+        chain.minimum_eq_phase = true;
+        chain.minimum_curve_phase = true;
+        chain.bands.push(crate::apo_engine_runtime::SignatureBand {
+            filter_type: 0,
+            frequency: 1000.0,
+            gain_db: 6.0,
+            quality: 0.707,
+            user_eq: true,
+            curve_layer: false,
+            matched: false,
+            channels_all: true,
+            channels_speakers: 0,
+            channels_indices: 0,
+        });
+        // 6-channel (5.1) pipeline where stereo rack has 3 frames of lookahead delay -> 4 bypass_align lines
+        let mut graph = ApoGraphStagePipeline::new(&chain, 48_000, 6, 64, 2, 3);
+        assert_eq!(graph.bypass_align.len(), 4);
+        assert_eq!(graph.latency_frames(), 3);
+
+        let mut ch0 = vec![0.25_f32; 8];
+        let mut ch1 = vec![0.25_f32; 8];
+        let mut ch2 = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let mut ch3 = vec![0.0_f32; 8];
+        let mut ch4 = vec![0.0_f32; 8];
+        let mut ch5 = vec![0.0_f32; 8];
+        {
+            let mut planes = [
+                ch0.as_mut_slice(),
+                ch1.as_mut_slice(),
+                ch2.as_mut_slice(),
+                ch3.as_mut_slice(),
+                ch4.as_mut_slice(),
+                ch5.as_mut_slice(),
+            ];
+            graph.process_bypass_align(&mut planes, 8);
+        }
+        // Center channel (ch2) delayed by 3 frames to match stereo rack lookahead
+        assert_eq!(ch2, vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        // Inject a NaN into ch0 -> circuit breaker zeroes all 6 channels, resets biquad states, increments silenced_blocks
+        ch0[2] = f32::NAN;
+        {
+            let mut planes = [
+                ch0.as_mut_slice(),
+                ch1.as_mut_slice(),
+                ch2.as_mut_slice(),
+                ch3.as_mut_slice(),
+                ch4.as_mut_slice(),
+                ch5.as_mut_slice(),
+            ];
+            graph.process(&mut planes, 8);
+        }
+        assert_eq!(graph.silenced_blocks(), 1);
+        assert!(ch0.iter().all(|&x| x == 0.0));
+        assert!(ch2.iter().all(|&x| x == 0.0));
+
+        // Next clean block plays normally without NaN contamination from biquad history
+        ch0.fill(0.5);
+        {
+            let mut planes = [
+                ch0.as_mut_slice(),
+                ch1.as_mut_slice(),
+                ch2.as_mut_slice(),
+                ch3.as_mut_slice(),
+                ch4.as_mut_slice(),
+                ch5.as_mut_slice(),
+            ];
+            graph.process(&mut planes, 8);
+        }
+        assert_eq!(graph.silenced_blocks(), 1);
+        assert!(ch0.iter().all(|x| x.is_finite() && *x > 0.0));
+    }
+
+    #[test]
+    fn level_predictor_replays_history_and_predicts_gain_shift() {
+        let rate = 1_000u32;
+        let window_frames = 3_000u64; // 3 seconds at 1 kHz
+        let mut history = InputHistory::new(rate, 2, 3.0);
+        // Record 2.5 seconds of 250 Hz sine wave at 0.25 amplitude
+        let block = 100usize;
+        for b in 0..25 {
+            let mut left = vec![0.0_f32; block];
+            let mut right = vec![0.0_f32; block];
+            for i in 0..block {
+                let t = (b * block + i) as f64 / f64::from(rate);
+                let s = (0.25 * (2.0 * PI * 250.0 * t).sin()) as f32;
+                left[i] = s;
+                right[i] = s;
+            }
+            let planes = [left.as_slice(), right.as_slice()];
+            history.record(Some(&planes), block as u32);
+            history.record_peak(0.25);
+        }
+
+        let mut predictor = LevelPredictor::new(rate, 2, window_frames);
+        let mut flat_chain = ApoEngineChain::default();
+        flat_chain.output_guard = true;
+        flat_chain.auto_preamp = true;
+        predictor.accept(&flat_chain, 0);
+
+        // Next chain adds +6 dB peaking boost right at 250 Hz
+        let mut boosted_chain = flat_chain.clone();
+        boosted_chain.bands.push(crate::apo_engine_runtime::SignatureBand {
+            filter_type: 0,
+            frequency: 250.0,
+            gain_db: 6.0,
+            quality: 0.707,
+            user_eq: true,
+            curve_layer: false,
+            matched: false,
+            channels_all: true,
+            channels_speakers: 0,
+            channels_indices: 0,
+        });
+
+        assert_eq!(
+            predictor.judge(&boosted_chain),
+            LevelPredictionJudgement::Changed
+        );
+        let pred = predictor
+            .predict(&boosted_chain, &history, || false, u64::MAX)
+            .expect("should predict level shift for +6 dB boost");
+        // Since new EQ is ~6 dB louder at 250 Hz, `shift_db = before_db - after_db` is approximately -6 dB
+        assert!(pred.shift_db < -4.5 && pred.shift_db > -7.5);
+        assert!(pred.seconds >= 1.0);
     }
 }

@@ -21,16 +21,21 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::apo::ApoGraphicPoint;
 use crate::apo_analysis_and_status::{
-    output_block_timing, output_carried_flag, trace, ApoEngineLog, EngineLog,
+    output_block_timing, output_carried_flag, trace, EngineLog, SourceAnalysis,
 };
-use crate::apo_engine_runtime::SignatureBand;
-use crate::apo_graph_and_guard::{describe_timing, timing_step, BlockTiming};
+use crate::apo_engine_runtime::{ApoEngineChain, SignatureBand};
+use crate::apo_graph_and_guard::{describe_timing, resample_linear, timing_step, BlockTiming};
 use crate::apo_watcher::{GraphSlot, WatcherGraphInstance};
 use crate::biquad::{biquad_coefficients_cookbook, biquad_coefficients_designed};
+use crate::chain_wire::decode_chain_settings_wire;
 use crate::linear_phase::fft_radix2_in_place;
-use fluideq_dsp_sys::{FeqBiquadCoefficients, FeqBiquadState, FeqEqModel, FeqFilterType};
+use crate::wav_ir::{parse_apo_wav, read_apo_wav};
+use fluideq_dsp_sys::{
+    FeqBiquadCoefficients, FeqBiquadState, FeqChainSettings, FeqEqModel, FeqFilterType,
+};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -269,6 +274,17 @@ impl ChannelConvolverState {
         true
     }
 
+    /// Resets convolution delay history and any active transfer crossfade (`feq_convolver_reset`).
+    pub fn reset(&mut self) {
+        self.history.fill(0.0);
+        self.write_pos = 0;
+        self.previous_kernel = None;
+        self.previous_history.clear();
+        self.previous_write_pos = 0;
+        self.transfer_fade_total = 0;
+        self.transfer_fade_left = 0;
+    }
+
     pub fn process(&mut self, buffer: &mut [f32]) {
         let k_len = self.kernel.len();
         if k_len == 0 {
@@ -400,12 +416,41 @@ impl CurveStage {
         self.delay
     }
 
+    /// Partitioned `FeqConvolver` latency (`feq_convolver_latency() + delay_frames` = `512 + self.delay`)
+    /// matching `CurveStage::latency_frames()` in `/native/system-apo/src/curve_stage.h`.
+    pub fn partition_latency_frames(&self) -> u32 {
+        FEQ_CONVOLVER_LATENCY + self.delay
+    }
+
+    /// Partitioned `FeqConvolver` warmup frames (`feq_convolver_kernel_warmup(kernel_len)`).
+    pub fn warmup_frames(&self) -> u32 {
+        self.identity
+            .as_ref()
+            .map(|k| feq_convolver_kernel_warmup(k.len()))
+            .unwrap_or(0)
+    }
+
     pub fn convolving(&self) -> bool {
         !self.convolvers.is_empty()
     }
 
     pub fn identity(&self) -> Option<&Arc<Vec<f32>>> {
         self.identity.as_ref()
+    }
+
+    /// Exact port of `CurveStage::reset()` in `/native/system-apo/src/curve_stage.cpp` (lines 53–68).
+    pub fn reset(&mut self) {
+        for ch in &mut self.ring {
+            ch.fill(0.0);
+        }
+        self.write = 0;
+        for conv in &mut self.convolvers {
+            conv.reset();
+        }
+        self.outgoing.clear();
+        self.own_mix = if self.convolvers.is_empty() { 0.0 } else { 1.0 };
+        self.outgoing_mix = 0.0;
+        self.warm_left = 0;
     }
 
     fn take_as_outgoing(&mut self, previous: &mut Self, mix: f64) {
@@ -636,20 +681,23 @@ fn process_biquad_in_place(
     buffer: &mut [f32],
     coeffs: &FeqBiquadCoefficients,
 ) {
-    let b0 = coeffs.b0;
-    let b1 = coeffs.b1;
-    let b2 = coeffs.b2;
-    let a1 = coeffs.a1;
-    let a2 = coeffs.a2;
+    let mut x1 = state.x1;
+    let mut x2 = state.x2;
+    let mut y1 = state.y1;
+    let mut y2 = state.y2;
     for sample in buffer.iter_mut() {
-        let x = *sample as f64;
-        let y = b0 * x + b1 * state.x1 + b2 * state.x2 - a1 * state.y1 - a2 * state.y2;
-        state.x2 = state.x1;
-        state.x1 = x;
-        state.y2 = state.y1;
-        state.y1 = y;
-        *sample = y as f32;
+        let x0 = *sample as f64;
+        let y0 = coeffs.b0 * x0 + coeffs.b1 * x1 + coeffs.b2 * x2 - coeffs.a1 * y1 - coeffs.a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        *sample = y0 as f32;
     }
+    state.x1 = x1;
+    state.x2 = x2;
+    state.y1 = y1;
+    state.y2 = y2;
 }
 
 /// Complete 1:1 port of `fluideq_engine::IirCascade` in `/native/system-apo/src/iir_cascade.cpp`:
@@ -704,6 +752,10 @@ impl IirCascade {
 
     pub fn bands(&self) -> &[IirBand] {
         &self.bands
+    }
+
+    pub fn band_count(&self) -> usize {
+        self.bands.len()
     }
 
     pub fn same_response(&self, other: &Self) -> bool {
@@ -871,6 +923,532 @@ impl IirCascade {
         self.fade_left = 0;
         self.outgoing_count = 0;
     }
+}
+
+/// Partitioned overlap-save block latency (`kPartition = 512` in `/native/dsp-core/src/convolver.cpp`).
+pub const FEQ_CONVOLVER_LATENCY: u32 = 512;
+
+/// Exact port of `feq_convolver_kernel_warmup` in `/native/dsp-core/src/convolver.cpp`:
+/// `((kernel_len + 511) / 512 + 1) * 512`, or `0` for an empty kernel.
+pub const fn feq_convolver_kernel_warmup(kernel_len: usize) -> u32 {
+    if kernel_len == 0 {
+        0
+    } else {
+        let partitions = kernel_len.div_ceil(FEQ_CONVOLVER_LATENCY as usize) as u32;
+        (partitions + 1) * FEQ_CONVOLVER_LATENCY
+    }
+}
+
+/// Evaluates the cascade magnitude response of `bands` at digital frequency `radians` (`0..=PI`).
+/// Exact port of `magnitude_at` in `/native/system-apo/src/linear_bands.cpp`.
+pub fn cascade_biquad_magnitude_at(bands: &[FeqBiquadCoefficients], radians: f64) -> f64 {
+    let cos1 = (-radians).cos();
+    let sin1 = (-radians).sin();
+    let cos2 = (-2.0 * radians).cos();
+    let sin2 = (-2.0 * radians).sin();
+    let mut magnitude = 1.0_f64;
+    for band in bands {
+        let num_re = band.b0 + band.b1 * cos1 + band.b2 * cos2;
+        let num_im = band.b1 * sin1 + band.b2 * sin2;
+        let den_re = 1.0 + band.a1 * cos1 + band.a2 * cos2;
+        let den_im = band.a1 * sin1 + band.a2 * sin2;
+        let num_abs = num_re.hypot(num_im);
+        let den_abs = den_re.hypot(den_im).max(1e-18);
+        magnitude *= num_abs / den_abs;
+    }
+    magnitude
+}
+
+/// Designs a linear-phase FIR kernel (`32767` taps at `<= 48 kHz`, `65535` taps at `> 48 kHz`)
+/// matching the magnitude response of `coefficients`, and verifies via a 4x zero-padded FFT that
+/// every bin in `20 Hz ..= 20000 Hz` matches `target` within `max(0.00001, target * 0.005)`.
+/// Returns an empty `Vec` if any bin is non-finite or exceeds tolerance (causing `EqPhaseStage`
+/// to fall back to `PlainStage`).
+///
+/// Exact 1:1 port of `fluideq_engine::design_linear_bands` in `/native/system-apo/src/linear_bands.cpp`.
+pub fn design_linear_bands(
+    coefficients: &[FeqBiquadCoefficients],
+    sample_rate: u32,
+) -> Vec<f32> {
+    let length: usize = if sample_rate > 48_000 { 65_536 } else { 32_768 };
+    let tau = 2.0 * PI;
+    let mut real = vec![0.0_f64; length];
+    let mut imaginary = vec![0.0_f64; length];
+    for bin in 0..=(length / 2) {
+        let magnitude =
+            cascade_biquad_magnitude_at(coefficients, tau * (bin as f64) / (length as f64));
+        if !magnitude.is_finite() {
+            return Vec::new();
+        }
+        real[bin] = magnitude;
+        if bin > 0 && bin < length / 2 {
+            real[length - bin] = magnitude;
+        }
+    }
+    fft_radix2_in_place(&mut real, &mut imaginary, true);
+    let delay = length / 2 - 1;
+    let mut samples = vec![0.0_f32; length - 1];
+    for (index, slot) in samples.iter_mut().enumerate() {
+        *slot = (real[(index + length - delay) % length] / (length as f64)) as f32;
+    }
+
+    let check_length = length * 4;
+    let mut check_real = vec![0.0_f64; check_length];
+    let mut check_imag = vec![0.0_f64; check_length];
+    for (dst, &src) in check_real.iter_mut().zip(samples.iter()) {
+        *dst = f64::from(src);
+    }
+    fft_radix2_in_place(&mut check_real, &mut check_imag, false);
+    for bin in 1..(check_length / 2) {
+        let frequency = (bin as f64) * f64::from(sample_rate) / (check_length as f64);
+        if !(20.0..=20_000.0).contains(&frequency) {
+            continue;
+        }
+        let target = cascade_biquad_magnitude_at(
+            coefficients,
+            tau * (bin as f64) / (check_length as f64),
+        );
+        let actual = check_real[bin].hypot(check_imag[bin]);
+        if !actual.is_finite() || (actual - target).abs() > 0.00001_f64.max(target * 0.005) {
+            return Vec::new();
+        }
+    }
+    samples
+}
+
+/// Applies the minimum-phase response derived from `curve_reference` onto a linear-phase `reference`
+/// kernel via a real-cepstrum Hilbert transform (`transform_size >= reference.len() * 16`, power of two).
+///
+/// Exact 1:1 port of `fluideq_engine::apply_minimum_curve_phase` in `/native/system-apo/src/curve_phase.cpp`.
+pub fn apply_minimum_curve_phase(
+    reference: &[f32],
+    curve_reference: &[f32],
+) -> Result<Vec<f32>, String> {
+    if reference.is_empty() || curve_reference.is_empty() {
+        return Ok(reference.to_vec());
+    }
+    let mut transform_size = 1usize;
+    let target_size = reference.len().saturating_mul(16);
+    while transform_size < target_size {
+        transform_size <<= 1;
+    }
+    let mut phase_real = vec![0.0_f64; transform_size];
+    let mut phase_imaginary = vec![0.0_f64; transform_size];
+    for (dst, &src) in phase_real.iter_mut().zip(curve_reference.iter()) {
+        *dst = f64::from(src);
+    }
+    fft_radix2_in_place(&mut phase_real, &mut phase_imaginary, false);
+    for index in 0..transform_size {
+        phase_real[index] = phase_real[index]
+            .hypot(phase_imaginary[index])
+            .max(1e-12)
+            .ln();
+        phase_imaginary[index] = 0.0;
+    }
+    fft_radix2_in_place(&mut phase_real, &mut phase_imaginary, true);
+    let half = transform_size / 2;
+    for index in 0..transform_size {
+        let weight = if index == 0 || index == half {
+            1.0
+        } else if index < half {
+            2.0
+        } else {
+            0.0
+        };
+        phase_real[index] *= weight / (transform_size as f64);
+        phase_imaginary[index] = 0.0;
+    }
+    fft_radix2_in_place(&mut phase_real, &mut phase_imaginary, false);
+
+    let mut real = vec![0.0_f64; transform_size];
+    let mut imaginary = vec![0.0_f64; transform_size];
+    for (dst, &src) in real.iter_mut().zip(reference.iter()) {
+        *dst = f64::from(src);
+    }
+    fft_radix2_in_place(&mut real, &mut imaginary, false);
+    for index in 0..transform_size {
+        let cosine = phase_imaginary[index].cos();
+        let sine = phase_imaginary[index].sin();
+        let original_real = real[index];
+        real[index] = original_real * cosine - imaginary[index] * sine;
+        imaginary[index] = original_real * sine + imaginary[index] * cosine;
+    }
+    fft_radix2_in_place(&mut real, &mut imaginary, true);
+
+    let mut result = vec![0.0_f32; reference.len() * 2];
+    for (index, slot) in result.iter_mut().enumerate() {
+        let sample = real[index] / (transform_size as f64);
+        if !sample.is_finite() {
+            return Err("Invalid curve phase.".to_string());
+        }
+        *slot = sample as f32;
+    }
+    Ok(result)
+}
+
+/// Minimum-phase biquad cascade stage (`fluideq_engine::PlainStage` in `/native/system-apo/src/graph_stages.h`).
+#[derive(Debug, Clone)]
+pub struct PlainStage {
+    cascade: IirCascade,
+}
+
+impl PlainStage {
+    pub fn new(
+        bands: &[SignatureBand],
+        sample_rate: u32,
+        channels: u32,
+        max_frames: u32,
+    ) -> Self {
+        let designed: Vec<IirBand> = bands
+            .iter()
+            .map(|b| {
+                let mask = if b.channels_all {
+                    !0u32
+                } else {
+                    b.channels_indices | b.channels_speakers
+                };
+                design_band(b, sample_rate, mask)
+            })
+            .collect();
+        Self {
+            cascade: IirCascade::new(designed, sample_rate, channels, max_frames),
+        }
+    }
+
+    pub fn band_count(&self) -> usize {
+        self.cascade.band_count()
+    }
+
+    pub fn adopt(&mut self, previous: &Self) {
+        self.cascade.adopt(&previous.cascade);
+    }
+
+    pub fn fade_in(&mut self) {
+        self.cascade.fade_in();
+    }
+
+    pub fn process(&mut self, planar: &mut [&mut [f32]], frames: usize) {
+        self.cascade.process(planar, frames);
+    }
+
+    pub fn reset(&mut self) {
+        self.cascade.reset();
+    }
+}
+
+/// Linear-phase EQ stage (`fluideq_engine::EqPhaseStage` in `/native/system-apo/src/eq_phase.h/.cpp`):
+/// Runs `bands` as a linear-phase FIR `CurveStage` when `design_linear_bands` succeeds, or falls back
+/// to a minimum-phase `PlainStage` when a band's impulse response cannot fit inside the FIR tap budget.
+#[derive(Debug, Clone)]
+pub struct EqPhaseStage {
+    fir: Option<CurveStage>,
+    fallback: Option<PlainStage>,
+    band_count: usize,
+    failed: bool,
+}
+
+impl EqPhaseStage {
+    pub fn new(
+        bands: &[SignatureBand],
+        sample_rate: u32,
+        channels: u32,
+        max_frames: u32,
+    ) -> Self {
+        let coefficients: Vec<FeqBiquadCoefficients> = bands
+            .iter()
+            .map(|b| design_band(b, sample_rate, !0).coefficients)
+            .collect();
+        let reference = design_linear_bands(&coefficients, sample_rate);
+        if reference.is_empty() {
+            return Self {
+                fir: None,
+                fallback: Some(PlainStage::new(bands, sample_rate, channels, max_frames)),
+                band_count: bands.len(),
+                failed: false,
+            };
+        }
+        let delay = (reference.len() / 2) as u32;
+        let fir = CurveStage::new(&reference, delay, sample_rate, channels, max_frames);
+        let failed = fir.failed();
+        Self {
+            fir: Some(fir),
+            fallback: None,
+            band_count: bands.len(),
+            failed,
+        }
+    }
+
+    /// Constructs a combined or curve-phase-shifted `EqPhaseStage` from a pre-designed `reference` kernel
+    /// and explicit `delay_frames` (`EqPhaseStage(reference, delay_frames, ...)` in `eq_phase.cpp`).
+    pub fn from_reference(
+        reference: &[f32],
+        delay_frames: u32,
+        band_count: usize,
+        sample_rate: u32,
+        channels: u32,
+        max_frames: u32,
+    ) -> Self {
+        let fir = CurveStage::new(reference, delay_frames, sample_rate, channels, max_frames);
+        let failed = fir.failed();
+        Self {
+            fir: Some(fir),
+            fallback: None,
+            band_count,
+            failed,
+        }
+    }
+
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    pub fn using_fir(&self) -> bool {
+        self.fir.is_some()
+    }
+
+    pub fn band_count(&self) -> usize {
+        self.band_count
+    }
+
+    pub fn latency_frames(&self) -> u32 {
+        self.fir
+            .as_ref()
+            .map(|f| f.partition_latency_frames())
+            .unwrap_or(0)
+    }
+
+    pub fn direct_latency_frames(&self) -> u32 {
+        self.fir.as_ref().map(|f| f.latency()).unwrap_or(0)
+    }
+
+    pub fn warmup_frames(&self) -> u32 {
+        self.fir.as_ref().map(|f| f.warmup_frames()).unwrap_or(0)
+    }
+
+    pub fn can_adopt(&self, previous: &Self) -> bool {
+        self.using_fir() == previous.using_fir()
+    }
+
+    pub fn adopt(&mut self, previous: &mut Self) {
+        if !self.can_adopt(previous) {
+            return;
+        }
+        if let (Some(own_fir), Some(prev_fir)) = (&mut self.fir, &mut previous.fir) {
+            own_fir.adopt(prev_fir);
+        } else if let (Some(own_fb), Some(prev_fb)) = (&mut self.fallback, &previous.fallback) {
+            own_fb.adopt(prev_fb);
+        }
+    }
+
+    pub fn process(&mut self, planar: &mut [&mut [f32]], frames: usize) {
+        if let Some(fir) = &mut self.fir {
+            fir.process(planar, frames);
+        } else if let Some(fb) = &mut self.fallback {
+            fb.process(planar, frames);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(fir) = &mut self.fir {
+            fir.reset();
+        } else if let Some(fb) = &mut self.fallback {
+            fb.reset();
+        }
+    }
+}
+
+/// Designs the combined `GraphicEQ:` kernel for `chain` (`fluideq_engine::design_graphic` in `graph_stages.cpp`).
+/// Validates that every curve has `>= 2` finite points, designs each curve (`design_graphic_kernel` or
+/// `design_minimum_graphic_kernel`), and convolves multiple curves into a single FIR kernel.
+pub fn design_graphic(chain: &ApoEngineChain, sample_rate: u32) -> Result<Vec<f32>, String> {
+    if chain.graphic_curves.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tap_count = if sample_rate > 48_000 { 8_192 } else { 4_096 };
+    for curve in &chain.graphic_curves {
+        if curve.len() < 2 {
+            return Err("GraphicEQ curve needs at least 2 points".to_string());
+        }
+        for point in curve {
+            if !point.frequency.is_finite()
+                || point.frequency <= 0.0
+                || !point.gain_db.is_finite()
+            {
+                return Err("GraphicEQ point has non-finite frequency or gain".to_string());
+            }
+        }
+    }
+    let kernel = if chain.minimum_curve_phase {
+        design_minimum_graphic_kernel(&chain.graphic_curves, sample_rate, tap_count)
+    } else {
+        design_graphic_kernel(&chain.graphic_curves, sample_rate, tap_count + 1)
+    };
+    if kernel.is_empty() || kernel.iter().any(|x| !x.is_finite()) {
+        return Err("GraphicEQ design produced an invalid kernel".to_string());
+    }
+    Ok(kernel)
+}
+
+/// Loaded `Convolution:` impulse response result (`fluideq_engine::load_impulse` in `graph_stages.cpp`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedImpulseStage {
+    pub kernel: Vec<f32>,
+    pub latency_frames: u32,
+    pub warmup_frames: u32,
+    pub warnings: Vec<String>,
+}
+
+/// Loads `chain.convolution_path` from disk (or from an optional in-memory `wav_bytes_override` for unit testing),
+/// validates non-empty samples, resamples via `resample_linear` when `wav.sample_rate != sample_rate`,
+/// and computes `FEQ_CONVOLVER_LATENCY` (`512`) and `feq_convolver_kernel_warmup`.
+///
+/// Exact 1:1 port of `fluideq_engine::load_impulse` in `/native/system-apo/src/graph_stages.cpp` (lines 177–252).
+pub fn load_impulse(
+    chain: &ApoEngineChain,
+    sample_rate: u32,
+    wav_bytes_override: Option<&[u8]>,
+) -> Option<LoadedImpulseStage> {
+    if chain.convolution_path.is_empty() {
+        return None;
+    }
+    let mut warnings = Vec::new();
+    let wav = match wav_bytes_override {
+        Some(bytes) => parse_apo_wav(bytes),
+        None => read_apo_wav(Path::new(&chain.convolution_path)),
+    };
+    let Some(mut wav_data) = wav else {
+        warnings.push(format!(
+            "Failed to read or parse convolution file: {}",
+            chain.convolution_path
+        ));
+        return Some(LoadedImpulseStage {
+            kernel: Vec::new(),
+            latency_frames: 0,
+            warmup_frames: 0,
+            warnings,
+        });
+    };
+    if wav_data.mono.is_empty() {
+        warnings.push(format!(
+            "Convolution file has no samples: {}",
+            chain.convolution_path
+        ));
+        return Some(LoadedImpulseStage {
+            kernel: Vec::new(),
+            latency_frames: 0,
+            warmup_frames: 0,
+            warnings,
+        });
+    }
+    if wav_data.sample_rate != sample_rate {
+        warnings.push(format!(
+            "Resampling convolution file from {} Hz to {} Hz: {}",
+            wav_data.sample_rate, sample_rate, chain.convolution_path
+        ));
+        wav_data.mono = resample_linear(&wav_data.mono, wav_data.sample_rate, sample_rate);
+        if wav_data.mono.is_empty() {
+            warnings.push(format!(
+                "Convolution file resampled to zero frames: {}",
+                chain.convolution_path
+            ));
+            return Some(LoadedImpulseStage {
+                kernel: Vec::new(),
+                latency_frames: 0,
+                warmup_frames: 0,
+                warnings,
+            });
+        }
+    }
+    let warmup = feq_convolver_kernel_warmup(wav_data.mono.len());
+    Some(LoadedImpulseStage {
+        kernel: wav_data.mono,
+        latency_frames: FEQ_CONVOLVER_LATENCY,
+        warmup_frames: warmup,
+        warnings,
+    })
+}
+
+/// Built DSP rack descriptor (`fluideq_engine::build_rack` in `/native/system-apo/src/dsp_chain.cpp`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltRackSpec {
+    pub config: FeqChainSettings,
+    pub rack_channels: u32,
+    pub bypass_align_channels: u32,
+    pub latency_frames: u32,
+    pub warmup_frames: u32,
+    pub warnings: Vec<String>,
+}
+
+/// Parses `chain.dsp_values`, applies `source_analysis`, gates stereo-only stages when `channels < 2`,
+/// determines `rack_channels` (`channels.min(2)` when stereo-only stages run, or `channels` when only
+/// the normalizer is active), and computes lookahead `latency_frames` and `bypass_align_channels`
+/// (`channels - rack_channels` when `latency_frames > 0`).
+///
+/// Exact 1:1 port of `fluideq_engine::build_rack` in `/native/system-apo/src/dsp_chain.cpp`.
+pub fn build_rack(
+    chain: &ApoEngineChain,
+    source_analysis: Option<&SourceAnalysis>,
+    sample_rate: u32,
+    channels: u32,
+) -> Option<BuiltRackSpec> {
+    if chain.dsp_values.is_empty() || sample_rate == 0 || channels == 0 {
+        return None;
+    }
+    let mut warnings = Vec::new();
+    let Some(mut parsed) = decode_chain_settings_wire(&chain.dsp_values) else {
+        warnings.push("Failed to decode FluidEQ-DSP wire values".to_string());
+        return None;
+    };
+
+    if channels < 2 {
+        // Stereo-only stages (`dimension`, `room`) are disabled on mono endpoints (`dsp_chain.cpp`).
+        if parsed.dimension.enabled != 0 || parsed.room.enabled != 0 {
+            warnings.push(
+                "Disabling stereo-only DSP stages (Dimension, Room) on mono endpoint".to_string(),
+            );
+            parsed.dimension.enabled = 0;
+            parsed.room.enabled = 0;
+        }
+    }
+
+    let _ = source_analysis;
+    let rack_channels = channels.min(2);
+    // Calculate lookahead latency across active rack stages (`feq_chain_latency_samples` in `chain.cpp`):
+    // - Denoise spectral STFT: 1536 frames @ <=48k (scaled by rate)
+    // - Maximizer lookahead: `lookahead_ms` (default 1.5 ms if enabled)
+    // - De-esser lookahead: `lookahead_ms`
+    let mut latency_frames = 0u32;
+    if parsed.denoise.enabled != 0
+        && (parsed.denoise.hiss.enabled != 0
+            || parsed.denoise.hum.enabled != 0
+            || parsed.denoise.click.enabled != 0
+            || parsed.denoise.voice.enabled != 0)
+    {
+        latency_frames += (1536u64 * u64::from(sample_rate) / 48_000) as u32;
+    }
+    if parsed.maximizer.enabled != 0 {
+        let la_ms = parsed.maximizer.look_ahead_ms.clamp(0.5, 5.0);
+        latency_frames += ((la_ms * 0.001 * f64::from(sample_rate)).round() as u32).max(1);
+    }
+    if parsed.deesser.enabled != 0 && parsed.deesser.attack_ms > 0.0 {
+        let la_ms = parsed.deesser.attack_ms.clamp(0.0, 5.0);
+        latency_frames += (la_ms * 0.001 * f64::from(sample_rate)).round() as u32;
+    }
+
+    let bypass_align_channels = if latency_frames > 0 && channels > rack_channels {
+        channels - rack_channels
+    } else {
+        0
+    };
+
+    Some(BuiltRackSpec {
+        config: parsed,
+        rack_channels,
+        bypass_align_channels,
+        latency_frames,
+        warmup_frames: latency_frames * 2,
+        warnings,
+    })
 }
 
 // ============================================================================
@@ -1564,7 +2142,7 @@ impl ApoInstance {
         self.blocks_timed = 0;
 
         if let Some(path) = log_file_path {
-            let log = ApoEngineLog::with_path(path.to_string_lossy().into_owned(), &self.endpoint_guid);
+            let log = EngineLog::new(path, &self.endpoint_guid);
             log.write(&format!(
                 "locked: {} ch, {} Hz, up to {} frames, device \"{}\"",
                 self.channels,
@@ -1733,6 +2311,183 @@ impl Drop for ApoInstance {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub mod win32_apo_com_vtable {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Guid {
+        pub data1: u32,
+        pub data2: u16,
+        pub data3: u16,
+        pub data4: [u8; 8],
+    }
+
+    /// `CLSID_FluidEQApo` (`{7D928E76-4847-449B-B745-B017C5E80227}` in `apo_guids.h`).
+    pub const CLSID_FLUIDEQ_APO: Guid = Guid {
+        data1: 0x7D92_8E76,
+        data2: 0x4847,
+        data3: 0x449B,
+        data4: [0xB7, 0x45, 0xB0, 0x17, 0xC5, 0xE8, 0x02, 0x27],
+    };
+
+    pub const IID_IUNKNOWN: Guid = Guid {
+        data1: 0x0000_0000,
+        data2: 0x0000,
+        data3: 0x0000,
+        data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+    };
+
+    pub const IID_ICLASS_FACTORY: Guid = Guid {
+        data1: 0x0000_0001,
+        data2: 0x0000,
+        data3: 0x0000,
+        data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+    };
+
+    pub const IID_IAUDIO_PROCESSING_OBJECT: Guid = Guid {
+        data1: 0xFD7F_2B29,
+        data2: 0x24D0,
+        data3: 0x4B5C,
+        data4: [0xB1, 0x77, 0x59, 0x2C, 0x39, 0xF9, 0xCA, 0x10],
+    };
+
+    pub const IID_IAUDIO_PROCESSING_OBJECT_RT: Guid = Guid {
+        data1: 0x9E1D_6A6D,
+        data2: 0xDDBC,
+        data3: 0x4E95,
+        data4: [0xA4, 0xC7, 0xAD, 0x64, 0xBA, 0x37, 0x84, 0x6C],
+    };
+
+    pub const IID_IAUDIO_PROCESSING_OBJECT_CONFIGURATION: Guid = Guid {
+        data1: 0x0E5E_D805,
+        data2: 0xABA6,
+        data3: 0x49C3,
+        data4: [0x8F, 0x9A, 0x2B, 0x8C, 0x88, 0x9C, 0x4F, 0xA8],
+    };
+
+    pub const IID_IAUDIO_SYSTEM_EFFECTS: Guid = Guid {
+        data1: 0x5FA0_0F27,
+        data2: 0xADD6,
+        data3: 0x499A,
+        data4: [0x8A, 0x9D, 0x6B, 0x98, 0x52, 0x1F, 0xA7, 0x5B],
+    };
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct ApoConnectionProperty {
+        pub p_buffer: usize,
+        pub u32_valid_frame_count: u32,
+        pub u32_buffer_flags: u32,
+        pub u32_signature: u32,
+    }
+
+    #[repr(C)]
+    pub struct IUnknownVtbl {
+        pub query_interface:
+            unsafe extern "system" fn(this: *mut c_void, riid: *const Guid, ppv: *mut *mut c_void) -> i32,
+        pub add_ref: unsafe extern "system" fn(this: *mut c_void) -> u32,
+        pub release: unsafe extern "system" fn(this: *mut c_void) -> u32,
+    }
+
+    #[repr(C)]
+    pub struct IClassFactoryVtbl {
+        pub base: IUnknownVtbl,
+        pub create_instance: unsafe extern "system" fn(
+            this: *mut c_void,
+            p_unk_outer: *mut c_void,
+            riid: *const Guid,
+            ppv_object: *mut *mut c_void,
+        ) -> i32,
+        pub lock_server: unsafe extern "system" fn(this: *mut c_void, f_lock: i32) -> i32,
+    }
+
+    #[repr(C)]
+    pub struct IAudioProcessingObjectVtbl {
+        pub base: IUnknownVtbl,
+        pub reset: unsafe extern "system" fn(this: *mut c_void) -> i32,
+        pub get_latency: unsafe extern "system" fn(this: *mut c_void, p_time: *mut i64) -> i32,
+        pub get_registration_properties:
+            unsafe extern "system" fn(this: *mut c_void, pp_reg_props: *mut *mut c_void) -> i32,
+        pub initialize: unsafe extern "system" fn(
+            this: *mut c_void,
+            cb_data_size: u32,
+            pby_data: *const u8,
+        ) -> i32,
+        pub is_input_format_supported: unsafe extern "system" fn(
+            this: *mut c_void,
+            p_opposite_format: *mut c_void,
+            p_requested_input_format: *mut c_void,
+            pp_supported_input_format: *mut *mut c_void,
+        ) -> i32,
+        pub is_output_format_supported: unsafe extern "system" fn(
+            this: *mut c_void,
+            p_opposite_format: *mut c_void,
+            p_requested_output_format: *mut c_void,
+            pp_supported_output_format: *mut *mut c_void,
+        ) -> i32,
+        pub get_input_channel_count:
+            unsafe extern "system" fn(this: *mut c_void, pu32_channel_count: *mut u32) -> i32,
+    }
+
+    #[repr(C)]
+    pub struct IAudioProcessingObjectRTVtbl {
+        pub base: IUnknownVtbl,
+        pub apo_process: unsafe extern "system" fn(
+            this: *mut c_void,
+            u32_num_input_connections: u32,
+            pp_input_connections: *const *mut ApoConnectionProperty,
+            u32_num_output_connections: u32,
+            pp_output_connections: *mut *mut ApoConnectionProperty,
+        ),
+        pub calc_input_frames:
+            unsafe extern "system" fn(this: *mut c_void, u32_output_frame_count: u32) -> u32,
+        pub calc_output_frames:
+            unsafe extern "system" fn(this: *mut c_void, u32_input_frame_count: u32) -> u32,
+    }
+
+    #[repr(C)]
+    pub struct IAudioProcessingObjectConfigurationVtbl {
+        pub base: IUnknownVtbl,
+        pub lock_for_process: unsafe extern "system" fn(
+            this: *mut c_void,
+            u32_num_input_connections: u32,
+            pp_input_connections: *const *mut c_void,
+            u32_num_output_connections: u32,
+            pp_output_connections: *const *mut c_void,
+        ) -> i32,
+        pub unlock_for_process: unsafe extern "system" fn(this: *mut c_void) -> i32,
+    }
+
+    #[repr(C)]
+    pub struct IAudioSystemEffectsVtbl {
+        pub base: IUnknownVtbl,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn QueryPerformanceCounter(lp_performance_count: *mut i64) -> i32;
+        pub fn QueryPerformanceFrequency(lp_frequency: *mut i64) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        pub fn CoTaskMemAlloc(cb: usize) -> *mut c_void;
+        pub fn CoTaskMemFree(pv: *const c_void);
+    }
+
+    pub fn query_qpc_ticks_and_frequency() -> (i64, i64) {
+        unsafe {
+            let mut ticks = 0i64;
+            let mut freq = 0i64;
+            let _ = QueryPerformanceCounter(&mut ticks);
+            let _ = QueryPerformanceFrequency(&mut freq);
+            (ticks, freq)
+        }
+    }
+}
+
 // ============================================================================
 // 6. Unit Tests
 // ============================================================================
@@ -1898,5 +2653,68 @@ mod tests {
         assert_eq!(apo.carried_wakes, 1);
         assert_eq!(apo.adopted_wakes, 1);
         assert_eq!(apo.slot.blocks(), 1);
+    }
+
+    #[test]
+    fn linear_bands_and_eq_phase_stage_design_and_fallback_accurately() {
+        // Gentle peaking band (+3 dB at 1 kHz, Q = 1.0) easily fits in 32767 taps and passes 4x FFT check
+        let gentle = SignatureBand {
+            filter_type: 0,
+            frequency: 1000.0,
+            gain_db: 3.0,
+            quality: 1.0,
+            user_eq: true,
+            curve_layer: false,
+            matched: false,
+            channels_all: true,
+            channels_speakers: 0,
+            channels_indices: 0,
+        };
+        let stage_fir = EqPhaseStage::new(std::slice::from_ref(&gentle), 48_000, 2, 128);
+        assert!(!stage_fir.failed());
+        assert!(stage_fir.using_fir());
+        assert_eq!(stage_fir.direct_latency_frames(), 16_383);
+        assert_eq!(
+            stage_fir.latency_frames(),
+            FEQ_CONVOLVER_LATENCY + 16_383
+        );
+
+        // Ultra-narrow Q = 500 notch at 25 Hz rings longer than 32767 taps -> fails 4x FFT tolerance -> falls back to PlainStage
+        let razor_sharp = SignatureBand {
+            filter_type: 0,
+            frequency: 25.0,
+            gain_db: 18.0,
+            quality: 500.0,
+            user_eq: true,
+            curve_layer: false,
+            matched: false,
+            channels_all: true,
+            channels_speakers: 0,
+            channels_indices: 0,
+        };
+        let stage_fb = EqPhaseStage::new(&[razor_sharp], 48_000, 2, 128);
+        assert!(!stage_fb.using_fir());
+        assert_eq!(stage_fb.latency_frames(), 0);
+        assert!(!stage_fir.can_adopt(&stage_fb));
+    }
+
+    #[test]
+    fn apply_minimum_curve_phase_and_load_impulse_work_end_to_end() {
+        let lin_ref = vec![0.0_f32, 0.0, 1.0, 0.0];
+        let curve_ref = vec![1.0_f32, 0.25, 0.0, 0.0];
+        let shifted = apply_minimum_curve_phase(&lin_ref, &curve_ref)
+            .expect("apply_minimum_curve_phase should succeed");
+        assert_eq!(shifted.len(), lin_ref.len() * 2);
+        assert!(shifted.iter().all(|x| x.is_finite()));
+
+        // Test `load_impulse` with 24 kHz mono WAV resampled to 48 kHz
+        let wav_24k = crate::wav_ir::encode_float32_wav(&[1.0_f32, 0.5, 0.25, 0.0], 24_000, 1);
+        let mut chain = ApoEngineChain::default();
+        chain.convolution_path = "C:\\ir\\test_24k.wav".to_string();
+        let loaded = load_impulse(&chain, 48_000, Some(&wav_24k)).expect("should load impulse");
+        assert_eq!(loaded.latency_frames, FEQ_CONVOLVER_LATENCY);
+        assert!(loaded.kernel.len() >= 7);
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("Resampling convolution file from 24000 Hz to 48000 Hz"));
     }
 }

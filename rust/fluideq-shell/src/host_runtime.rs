@@ -15,7 +15,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 use fluideq_dsp_sys::{
     FeqWireAckFrame, FeqWireAnalysisFrame, FeqWireHandshake, FeqWireStatus, FEQ_ABI_VERSION,
-    FEQ_CHAIN_BAND_PARAMS, FEQ_CHAIN_MAX_EQ_BANDS, FEQ_CHAIN_MAX_TONE_BANDS, FEQ_CHAIN_PARAM_LEAD,
     FEQ_MAGIC_ACK, FEQ_MAGIC_HANDSHAKE, FEQ_WIRE_PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -39,19 +38,13 @@ pub const ENGINE_CHANNELS: u32 = 2;
 pub const MAX_WIRE_PATH_BYTES: u32 = 32 * 1024;
 
 /// Maximum chain parameter count in `f64` words (`FEQ_CHAIN_MAX_PARAMS` in `chain.h` / `host.h`):
-/// `158` lead + `64 * 7` EQ bands + `15` room/de-esser trailer + `7` Footsteps trailer +
-/// `4` tone header + `48 * 4` tone bands = `824`.
-pub const MAX_WIRE_CHAIN_PARAMS: u32 = (FEQ_CHAIN_PARAM_LEAD
-    + FEQ_CHAIN_MAX_EQ_BANDS * FEQ_CHAIN_BAND_PARAMS
-    + 15
-    + 7
-    + 4
-    + FEQ_CHAIN_MAX_TONE_BANDS * 4) as u32;
+/// `158` lead + `64 * 7` EQ bands + `15` (Normalizer 3 + LowLatency 1 + Room 11) + `7` Footsteps + `4 + 48 * 4` Tone = `824`.
+pub const MAX_WIRE_CHAIN_PARAMS: u32 = fluideq_dsp_sys::FEQ_CHAIN_MAX_PARAMS as u32;
 
 /// Schema version of the core parameter block (`FEQ_PARAMETER_SCHEMA_VERSION`).
-pub const PARAMETER_SCHEMA_VERSION: u32 = fluideq_dsp_sys::FEQ_PARAMETER_SCHEMA_VERSION;
-/// Core parameter count (`FEQ_PARAMETER_COUNT`), from the shared parameter table.
-pub const CORE_PARAMETER_COUNT: u32 = fluideq_dsp_sys::FEQ_PARAMETER_COUNT as u32;
+pub const PARAMETER_SCHEMA_VERSION: u32 = 1;
+/// Legacy core parameter count (`FEQ_PARAMETER_COUNT`).
+pub const CORE_PARAMETER_COUNT: u32 = 64;
 
 /// Reads exactly `into.len()` bytes from `reader`, looping across short pipe reads (`read_exact` in `host_wire.cpp`).
 /// Returns `false` only on true EOF (`0` bytes read) or unrecoverable I/O error.
@@ -513,6 +506,101 @@ pub fn cpu_seconds_from_win32_filetimes(
     (kernel_100ns.saturating_add(user_100ns) as f64) / 1.0e7
 }
 
+#[cfg(target_os = "windows")]
+pub mod win32_host_ffi {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct FileTime {
+        pub dw_low_date_time: u32,
+        pub dw_high_date_time: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct ProcessMemoryCounters {
+        pub cb: u32,
+        pub page_fault_count: u32,
+        pub peak_working_set_size: usize,
+        pub working_set_size: usize,
+        pub quota_peak_paged_pool_usage: usize,
+        pub quota_paged_pool_usage: usize,
+        pub quota_peak_non_paged_pool_usage: usize,
+        pub quota_non_paged_pool_usage: usize,
+        pub pagefile_usage: usize,
+        pub peak_pagefile_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetCurrentProcess() -> *mut c_void;
+        pub fn GetProcessTimes(
+            h_process: *mut c_void,
+            lp_creation_time: *mut FileTime,
+            lp_exit_time: *mut FileTime,
+            lp_kernel_time: *mut FileTime,
+            lp_user_time: *mut FileTime,
+        ) -> i32;
+        pub fn K32GetProcessMemoryInfo(
+            process: *mut c_void,
+            ppsmem_counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+        pub fn CreateNamedPipeW(
+            lp_name: *const u16,
+            dw_open_mode: u32,
+            dw_pipe_mode: u32,
+            n_max_instances: u32,
+            n_out_buffer_size: u32,
+            n_in_buffer_size: u32,
+            n_default_time_out: u32,
+            lp_security_attributes: *const c_void,
+        ) -> *mut c_void;
+        pub fn ConnectNamedPipe(h_named_pipe: *mut c_void, lp_overlapped: *mut c_void) -> i32;
+        pub fn DisconnectNamedPipe(h_named_pipe: *mut c_void) -> i32;
+        pub fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+    }
+
+    pub fn sample_process_stats_win32() -> Option<super::HostProcessStatsSample> {
+        unsafe {
+            let process = GetCurrentProcess();
+            let mut mem = ProcessMemoryCounters {
+                cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+                ..Default::default()
+            };
+            if K32GetProcessMemoryInfo(process, &mut mem as *mut ProcessMemoryCounters, mem.cb) == 0
+            {
+                return None;
+            }
+            let mut created = FileTime::default();
+            let mut exited = FileTime::default();
+            let mut kernel = FileTime::default();
+            let mut user = FileTime::default();
+            if GetProcessTimes(
+                process,
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            ) == 0
+            {
+                return None;
+            }
+            let cpu_seconds = super::cpu_seconds_from_win32_filetimes(
+                kernel.dw_low_date_time,
+                kernel.dw_high_date_time,
+                user.dw_low_date_time,
+                user.dw_high_date_time,
+            );
+            Some(super::HostProcessStatsSample {
+                working_set_bytes: mem.working_set_size as u64,
+                cpu_seconds,
+            })
+        }
+    }
+}
+
 /// Samples the current process's working set and running CPU seconds (`feq_sample_process_stats` in `process_stats.h`).
 /// Returns `None` on platforms without a sampler so the host sends nothing rather than a false zero (`host_telemetry.cpp`).
 pub fn sample_current_process_stats() -> Option<HostProcessStatsSample> {
@@ -538,7 +626,11 @@ pub fn sample_current_process_stats() -> Option<HostProcessStatsSample> {
             cpu_seconds,
         })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        win32_host_ffi::sample_process_stats_win32()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         None
     }
@@ -754,12 +846,12 @@ impl ProcessingLatency {
             total_frames,
             parts.eq,
             parts.restoration,
+            parts.deesser,
             parts.leveler,
             parts.room,
             parts.bass_punch,
             parts.maximizer,
             parts.headroom,
-            parts.deesser,
             active_stages,
         ];
         let mut unchanged = true;
@@ -773,13 +865,11 @@ impl ProcessingLatency {
             return;
         }
         let gen = self.generation.load(Ordering::Relaxed);
-        self.generation
-            .store(gen.wrapping_add(1), Ordering::Release);
+        self.generation.store(gen.wrapping_add(1), Ordering::Release);
         for (i, &val) in next.iter().enumerate() {
             self.words[i].store(val, Ordering::Relaxed);
         }
-        self.generation
-            .store(gen.wrapping_add(2), Ordering::Release);
+        self.generation.store(gen.wrapping_add(2), Ordering::Release);
     }
 
     pub fn read(&self) -> (u32, [u32; 8], u32) {
@@ -955,24 +1045,25 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
         let request_id = u32::from_le_bytes([cmd_buf[8], cmd_buf[9], cmd_buf[10], cmd_buf[11]]);
         let settings_revision =
             u32::from_le_bytes([cmd_buf[12], cmd_buf[13], cmd_buf[14], cmd_buf[15]]);
-        let parameter_id = u32::from_le_bytes([cmd_buf[16], cmd_buf[17], cmd_buf[18], cmd_buf[19]]);
+        let parameter_id =
+            u32::from_le_bytes([cmd_buf[16], cmd_buf[17], cmd_buf[18], cmd_buf[19]]);
         let parameter_index =
             i32::from_le_bytes([cmd_buf[20], cmd_buf[21], cmd_buf[22], cmd_buf[23]]);
         let value = f64::from_le_bytes([
-            cmd_buf[24],
-            cmd_buf[25],
-            cmd_buf[26],
-            cmd_buf[27],
-            cmd_buf[28],
-            cmd_buf[29],
-            cmd_buf[30],
-            cmd_buf[31],
+            cmd_buf[24], cmd_buf[25], cmd_buf[26], cmd_buf[27], cmd_buf[28], cmd_buf[29],
+            cmd_buf[30], cmd_buf[31],
         ]);
 
         if magic != fluideq_dsp_sys::FEQ_MAGIC_COMMAND
             || protocol_version != FEQ_WIRE_PROTOCOL_VERSION
         {
-            let ack = build_ack_frame(request_id, FeqWireStatus::FEQ_WIRE_UNSUPPORTED, 0, 0, 0.0);
+            let ack = build_ack_frame(
+                request_id,
+                FeqWireStatus::FEQ_WIRE_UNSUPPORTED,
+                0,
+                0,
+                0.0,
+            );
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
             continue;
         }
@@ -1017,7 +1108,13 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
                 session.backend_running = true;
                 (FeqWireStatus::FEQ_WIRE_APPLIED, session.sample_rate as f64)
             };
-            let ack = build_ack_frame(request_id, status, settings_revision, 0, reported_rate);
+            let ack = build_ack_frame(
+                request_id,
+                status,
+                settings_revision,
+                0,
+                reported_rate,
+            );
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
         } else if command_raw == FeqWireCommand::FEQ_CMD_STOP as u16 {
             // `stop_device` (`host_commands.cpp` lines 86–92): releases hardware so DAC noise floor is silent.
@@ -1045,7 +1142,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
         } else if command_raw == FeqWireCommand::FEQ_CMD_APPLY_SNAPSHOT as u16 {
             // `FEQ_CMD_APPLY_SNAPSHOT` (`host_commands.cpp` lines 165–186):
-            // Must equal `FEQ_PARAMETER_COUNT`, otherwise reject without reading payload.
+            // Must equal `FEQ_PARAMETER_COUNT` (64), otherwise reject without reading payload.
             if (parameter_id as usize) != fluideq_dsp_sys::FEQ_PARAMETER_COUNT {
                 let ack = build_ack_frame(
                     request_id,
@@ -1487,10 +1584,7 @@ mod tests {
 
     #[test]
     fn wire_guards_refuse_oversized_or_nan_lengths_before_allocation() {
-        assert_eq!(
-            payload_within(824, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN"),
-            Ok(824)
-        );
+        assert_eq!(payload_within(824, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN"), Ok(824));
         assert!(payload_within(825, MAX_WIRE_CHAIN_PARAMS, "APPLY_CHAIN").is_err());
 
         assert_eq!(wire_length_from_double(256.0, MAX_WIRE_PATH_BYTES), Ok(256));
@@ -1522,8 +1616,11 @@ mod tests {
         coord.room_head_loaded = 1;
 
         // 1. Outage window: first failure logs once, second failure suppresses duplicate log
-        let out1 =
-            coord.handle_reopen_attempt(true, Err("no default endpoint".to_string()), Ok(()));
+        let out1 = coord.handle_reopen_attempt(
+            true,
+            Err("no default endpoint".to_string()),
+            Ok(()),
+        );
         assert_eq!(
             out1,
             DeviceReopenOutcome::OutageAwaitingEndpoint {
@@ -1531,8 +1628,11 @@ mod tests {
                 error: "no default endpoint".to_string()
             }
         );
-        let out2 =
-            coord.handle_reopen_attempt(true, Err("no default endpoint".to_string()), Ok(()));
+        let out2 = coord.handle_reopen_attempt(
+            true,
+            Err("no default endpoint".to_string()),
+            Ok(()),
+        );
         assert_eq!(
             out2,
             DeviceReopenOutcome::OutageAwaitingEndpoint {

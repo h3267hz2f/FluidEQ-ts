@@ -105,6 +105,16 @@ pub struct AppStateSnapshot {
     pub matched_treble: bool,
     pub tone: ToneSettings,
     pub bands: Vec<EqBandSpec>,
+    #[serde(default)]
+    pub eq_curve_db: Vec<f64>,
+    #[serde(default)]
+    pub native_abi_version: String,
+    #[serde(default)]
+    pub native_active_stages: u32,
+    #[serde(default)]
+    pub native_latency_frames: u32,
+    #[serde(default)]
+    pub native_working_set_bytes: u64,
     pub chain_settings: FeqChainSettings,
     pub models: NeuralModelStatus,
     pub residency: MemoryFootprintEstimate,
@@ -146,7 +156,7 @@ impl AppStateStore {
             6300.0, 10000.0, 16000.0,
         ];
         let default_gains = [
-            3.5, 2.8, 1.6, 0.4, -0.8, -1.2, -0.5, 0.2, 0.8, 1.5, 2.2, 1.8, 2.6, 3.2, 2.4,
+            0.0, 0.0, 0.0, 0.0, 1.4, 0.0, 0.0, -1.1, 0.0, 0.0, 0.0, 1.8, 0.0, 0.0, 0.0,
         ];
         let bands: Vec<EqBandSpec> = iso_freqs
             .iter()
@@ -180,8 +190,8 @@ impl AppStateStore {
             sample_rate,
             master_power: true,
             auto_headroom: true,
-            preamp_db: 0.0,
-            active_preset_name: "Harman Target 2018".to_string(),
+            preamp_db: -1.5,
+            active_preset_name: "Modern Country".to_string(),
             eq_model: FeqEqModel::FEQ_EQ_MODEL_CLEAN,
             eq_model_amount: 1.0,
             matched_treble: true,
@@ -200,6 +210,24 @@ impl AppStateStore {
         store.sync_eq_and_tone_into_chain_settings();
         store.commit_chain_and_linear_phase_kernel();
         store
+    }
+
+    fn eq_model_name(&self) -> &'static str {
+        match self.eq_model {
+            FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL => "proportional",
+            FeqEqModel::FEQ_EQ_MODEL_WIDE => "wide",
+            FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC => "asymmetric",
+            FeqEqModel::FEQ_EQ_MODEL_CLEAN => "clean",
+        }
+    }
+
+    fn parse_eq_model(name: &str) -> FeqEqModel {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "proportional" => FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL,
+            "wide" => FeqEqModel::FEQ_EQ_MODEL_WIDE,
+            "asymmetric" => FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
+            _ => FeqEqModel::FEQ_EQ_MODEL_CLEAN,
+        }
     }
 
     /// Synchronizes the high-level `bands` and `tone` state into `self.chain_settings`
@@ -251,26 +279,6 @@ impl AppStateStore {
         let _ = self.native_chain.configure(&self.chain_settings);
     }
 
-    /// Turns the whole chain on or off without discarding the current bands.
-    pub fn set_master_power(&mut self, enabled: bool) {
-        self.master_power = enabled;
-        self.revision += 1;
-        self.sync_eq_and_tone_into_chain_settings();
-        self.commit_chain_and_linear_phase_kernel();
-    }
-
-    /// Sets the preamp trim in dB, clamped to the range the UI exposes.
-    pub fn set_preamp_db(&mut self, preamp_db: f64) {
-        self.preamp_db = if preamp_db.is_finite() {
-            preamp_db.clamp(-24.0, 24.0)
-        } else {
-            0.0
-        };
-        self.revision += 1;
-        self.sync_eq_and_tone_into_chain_settings();
-        self.commit_chain_and_linear_phase_kernel();
-    }
-
     pub fn update_band_gain(&mut self, band_id: u32, frequency: f64, gain_db: f64, quality: f64) {
         if let Some(band) = self.bands.iter_mut().find(|b| b.id == band_id) {
             band.frequency = frequency.clamp(20.0, 20000.0);
@@ -280,6 +288,43 @@ impl AppStateStore {
             self.sync_eq_and_tone_into_chain_settings();
             self.commit_chain_and_linear_phase_kernel();
         }
+    }
+
+    /// Synchronizes full EQ bands, character model, analog-matched treble mode, power, preamp,
+    /// and Tone settings from the UI into the native Rust + C++20 state store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_eq_bands_and_config(
+        &mut self,
+        bands: Vec<EqBandSpec>,
+        eq_model: &str,
+        matched_treble: bool,
+        master_power: bool,
+        auto_headroom: bool,
+        manual_preamp_db: f64,
+        tone: ToneSettings,
+    ) -> AppStateSnapshot {
+        self.bands = bands
+            .into_iter()
+            .take(FEQ_CHAIN_MAX_EQ_BANDS)
+            .enumerate()
+            .map(|(idx, mut b)| {
+                b.id = (idx + 1) as u32;
+                b.frequency = b.frequency.clamp(10.0, 20000.0);
+                b.gain_db = b.gain_db.clamp(-24.0, 24.0);
+                b.quality = b.quality.clamp(0.1, 18.0);
+                b
+            })
+            .collect();
+        self.eq_model = Self::parse_eq_model(eq_model);
+        self.matched_treble = matched_treble;
+        self.master_power = master_power;
+        self.auto_headroom = auto_headroom;
+        self.preamp_db = manual_preamp_db.clamp(-24.0, 24.0);
+        self.tone = tone;
+        self.revision += 1;
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
     }
 
     /// Resolves and applies an OPRA headphone curve from `/opra/curves/<vendor_slug>.json`
@@ -521,15 +566,13 @@ impl AppStateStore {
     }
 
     pub fn enter_cold_standby(&mut self) -> MemoryFootprintEstimate {
-        self.native_meters.set_enabled(false);
-        self.evict_transient_caches();
-        self.residency.enter_cold_standby()
+        let mut hooks = residency::NativeResidencyHookBridge::new();
+        self.apply_residency_transition_with_hooks(WindowResidencyMode::ColdStandby, &mut hooks)
     }
 
     pub fn wake_to_active(&mut self) -> AppStateSnapshot {
-        self.residency.wake_to_active();
-        let should_meter = self.residency.should_enable_native_meters();
-        self.native_meters.set_enabled(should_meter);
+        let mut hooks = residency::NativeResidencyHookBridge::new();
+        let _ = self.apply_residency_transition_with_hooks(WindowResidencyMode::Active, &mut hooks);
         self.snapshot()
     }
 
@@ -578,12 +621,48 @@ impl AppStateStore {
         compute_auto_preamp_db(&coeffs, self.sample_rate)
     }
 
+    pub fn evaluate_eq_curve_160_points(&self) -> Vec<f64> {
+        let coeffs: Vec<_> = self
+            .bands
+            .iter()
+            .filter(|b| b.enabled)
+            .map(|b| {
+                biquad_coefficients_designed(
+                    b.filter_type.to_feq_type(),
+                    b.frequency,
+                    b.gain_db,
+                    b.quality,
+                    self.sample_rate,
+                    self.eq_model,
+                    self.eq_model_amount,
+                    self.matched_treble,
+                )
+            })
+            .collect();
+        let min_log = 20.0_f64.log10();
+        let max_log = 20000.0_f64.log10();
+        (0..160)
+            .map(|idx| {
+                let t = idx as f64 / 159.0;
+                let freq = 10.0_f64.powf(min_log + t * (max_log - min_log));
+                let mut sum_db = 0.0_f64;
+                for c in &coeffs {
+                    sum_db += biquad::evaluate_biquad_magnitude_db(c, freq, self.sample_rate);
+                }
+                sum_db
+            })
+            .collect()
+    }
+
     pub fn native_meters_mut(&mut self) -> &mut NativeMetersHandle {
         &mut self.native_meters
     }
 
     pub fn snapshot(&self) -> AppStateSnapshot {
         let auto_preamp_db = self.compute_current_auto_preamp_db();
+        let eq_curve_db = self.evaluate_eq_curve_160_points();
+        let native_working_set_bytes =
+            residency::query_current_process_working_set_bytes().unwrap_or(0);
         AppStateSnapshot {
             revision: self.revision,
             master_power: self.master_power,
@@ -593,11 +672,16 @@ impl AppStateStore {
             active_preset_name: self.active_preset_name.clone(),
             active_device_guid: self.device_profiles.active_device_guid.clone(),
             active_device_name: self.device_profiles.active_device_name.clone(),
-            eq_model: "Clean".to_string(),
+            eq_model: self.eq_model_name().to_string(),
             eq_model_amount: self.eq_model_amount,
             matched_treble: self.matched_treble,
             tone: self.tone.clone(),
             bands: self.bands.clone(),
+            eq_curve_db,
+            native_abi_version: fluideq_dsp_sys::engine_abi_version().to_string(),
+            native_active_stages: self.native_chain.active_stages(),
+            native_latency_frames: self.native_chain.latency_frames(),
+            native_working_set_bytes,
             chain_settings: self.chain_settings,
             models: self.models.clone(),
             residency: self.residency.estimate_memory(),

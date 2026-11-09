@@ -453,7 +453,9 @@ pub fn detect_cover_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
         return Some("image/jpeg");
     }
-    if bytes.len() >= 8 && bytes[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+    if bytes.len() >= 8
+        && bytes[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+    {
         return Some("image/png");
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
@@ -500,11 +502,7 @@ impl MediaWatchCoordinator {
     /// Processes a line from `media-watch`, deduplicating whole-second timeline ticks
     /// and updating `AppStateStore::set_online_media_playing` so Cold-Residency never
     /// interrupts active online media sessions.
-    pub fn handle_line(
-        &mut self,
-        line: &str,
-        store: &mut AppStateStore,
-    ) -> Option<MediaWatchEvent> {
+    pub fn handle_line(&mut self, line: &str, store: &mut AppStateStore) -> Option<MediaWatchEvent> {
         let ev = parse_media_watch_line(line)?;
         match &ev {
             MediaWatchEvent::Cleared => {
@@ -657,7 +655,10 @@ pub struct ProcessSnapshotItem {
 /// Expands all descendant PIDs of `root_pid` using BFS while guarding against Windows PID reuse
 /// (`child_created >= parent_created` whenever both creation times are non-zero),
 /// matching `children_of` in `/native/process-meter/src/main.cpp` (lines 97–137).
-pub fn expand_process_tree_children(root_pid: u32, snapshot: &[ProcessSnapshotItem]) -> Vec<u32> {
+pub fn expand_process_tree_children(
+    root_pid: u32,
+    snapshot: &[ProcessSnapshotItem],
+) -> Vec<u32> {
     if root_pid == 0 {
         return Vec::new();
     }
@@ -867,10 +868,7 @@ pub enum PlaybackReplyEvent {
 }
 
 /// Decodes a reply packet (`PlaybackHeader` + optional payload) emitted by `remote-audio-playback`.
-pub fn parse_playback_reply_packet(
-    header: &PlaybackHeader,
-    payload: &[u8],
-) -> Option<PlaybackReplyEvent> {
+pub fn parse_playback_reply_packet(header: &PlaybackHeader, payload: &[u8]) -> Option<PlaybackReplyEvent> {
     if header.magic != PLAYBACK_HEADER_MAGIC || payload.len() < (header.bytes as usize) {
         return None;
     }
@@ -1011,7 +1009,10 @@ impl OutputWatchCoordinator {
             Vec::new()
         };
 
-        let new_default = parsed.iter().find(|d| d.is_default).map(|d| d.guid.clone());
+        let new_default = parsed
+            .iter()
+            .find(|d| d.is_default)
+            .map(|d| d.guid.clone());
         let switched = if new_default != self.default_device_guid {
             self.default_device_guid = new_default.clone();
             new_default
@@ -1063,10 +1064,7 @@ pub struct LightingColoursFrame {
 
 /// Encodes a `ColoursFrame` (`FLH1`, 12-byte header + `u32 device` + `u32 lamp_count` + `R,G,B` triplets)
 /// matching `/native/lighting-host/src/wire.h`.
-pub fn encode_lighting_colours_frame(
-    device_index: u32,
-    rgb_triplets: &[[u8; 3]],
-) -> Option<Vec<u8>> {
+pub fn encode_lighting_colours_frame(device_index: u32, rgb_triplets: &[[u8; 3]]) -> Option<Vec<u8>> {
     let lamp_count = rgb_triplets.len() as u32;
     if lamp_count > LIGHTING_MAX_LAMPS {
         return None;
@@ -1276,7 +1274,11 @@ pub fn desktop_cover_of(
 /// Exact port of `wallpaper::stacked_between` in `/native/wallpaper/desktop.h` (lines 14–37):
 /// Returns the z-order slice strictly between `top` and `bottom` in `order`.
 /// Returns an empty `Vec` if `top == 0`, `bottom == 0`, `top == bottom`, or if `top` does not precede `bottom`.
-pub fn stacked_between<T: Copy + PartialEq + Default>(top: T, bottom: T, order: &[T]) -> Vec<T> {
+pub fn stacked_between<T: Copy + PartialEq + Default>(
+    top: T,
+    bottom: T,
+    order: &[T],
+) -> Vec<T> {
     let zero = T::default();
     if top == zero || bottom == zero || top == bottom {
         return Vec::new();
@@ -1406,12 +1408,12 @@ pub fn parse_wallpaper_cli_args(args: &[&str]) -> Option<(u64, u32)> {
 // 11. `dsp-host` Binary Command & Telemetry Frame Codec (`/native/dsp-host/src/wire.h`)
 // ============================================================================
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use fluideq_dsp_sys::{
     FeqChainLatencyParts, FeqRoomReport, FeqWireAckFrame, FeqWireCommand, FeqWireCommandFrame,
     FeqWireStatsFrame, FEQ_MAGIC_ACK, FEQ_MAGIC_ANALYSIS, FEQ_MAGIC_COMMAND, FEQ_MAGIC_STATS,
     FEQ_ROOM_REPORT_TAG, FEQ_WIRE_PROTOCOL_VERSION,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Bounded, lock-free 10-word seqlock snapshot from the audio callback.
 /// Exact port of `ProcessingLatency` in `/native/dsp-host/src/processing_latency.h`.
@@ -1450,7 +1452,12 @@ impl ProcessingLatencySnapshot {
     }
 
     /// Publishes `[total_frames, eq, restoration, leveler, room, bass_punch, maximizer, headroom, deesser, processed_stages]`.
-    pub fn publish(&self, total_frames: u32, parts: &FeqChainLatencyParts, processed_stages: u32) {
+    pub fn publish(
+        &self,
+        total_frames: u32,
+        parts: &FeqChainLatencyParts,
+        processed_stages: u32,
+    ) {
         let words: [u32; 10] = [
             total_frames,
             parts.eq,
@@ -1596,7 +1603,8 @@ pub fn validate_analysis_packet_layout(packet: &[u8]) -> Option<(u32, u32, usize
     let pairs = u32::from_le_bytes([packet[16], packet[17], packet[18], packet[19]]);
     let bands = u32::from_le_bytes([packet[20], packet[21], packet[22], packet[23]]);
     // `eq_detail_bins` sits at byte offset 88 in `FeqWireAnalysisFrame` (`wire.h` line 659)
-    let eq_detail_bins = u32::from_le_bytes([packet[88], packet[89], packet[90], packet[91]]);
+    let eq_detail_bins =
+        u32::from_le_bytes([packet[88], packet[89], packet[90], packet[91]]);
 
     let payload_bytes =
         compute_analysis_frame_payload_bytes(stage_mask, bins, pairs, bands, eq_detail_bins);
@@ -1690,6 +1698,11 @@ pub const FLUIDEQ_LIGHTING_MAIN_PACKAGE_NAME: &str = "FluidEQ.Lighting.Main";
 pub const FLUIDEQ_LIGHTING_PUBLISHER_ID: &str = "r0s8b6jr3efv6";
 pub const RAZER_USB_VENDOR_ID: u16 = 0x1532; // 5426
 
+/// Exit codes defined in `/native/lighting-host/src/identity.h`.
+pub const LIGHTING_EXIT_OK: i32 = 0;
+pub const LIGHTING_EXIT_USAGE: i32 = 1;
+pub const LIGHTING_EXIT_FAILED: i32 = 3;
+
 /// Exact 1:1 port of `fluideq_lighting::JsonLine` in `/native/lighting-host/src/json_text.h`.
 /// Escapes control characters `< 0x20` as `\u00XX` and clamps non-finite or `> 1e9` floats to `0`.
 #[derive(Debug, Default, Clone)]
@@ -1757,12 +1770,11 @@ impl LightingJsonLine {
         } else {
             let formatted = format!("{:.3}", value);
             let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
-            self.text
-                .push_str(if trimmed.is_empty() || trimmed == "-0" {
-                    "0"
-                } else {
-                    trimmed
-                });
+            self.text.push_str(if trimmed.is_empty() || trimmed == "-0" {
+                "0"
+            } else {
+                trimmed
+            });
         }
         self
     }
@@ -1782,62 +1794,213 @@ impl LightingJsonLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LightingHostCliCommand {
     RunDaemon,
-    Status,
+    Status {
+        package_name: String,
+    },
     Register {
-        external_dir: String,
-        sparse_msix: String,
+        msix_uri: String,
+        external_folder_uri: String,
     },
     RegisterDev {
-        manifest_path: String,
+        manifest_uri: String,
+        external_folder_uri: String,
     },
-    Remove,
+    Remove {
+        package_name: String,
+    },
     InvalidArgs,
 }
 
-/// Parses command-line arguments identically to `wmain` in `/native/lighting-host/src/main.cpp`.
+/// Parses command-line arguments identically to `wmain` in `/native/lighting-host/src/main.cpp`
+/// and `run_identity_command` in `/native/lighting-host/src/identity.cpp`:
+/// Supports both `identity <subcommand> ...` (`wmain` lines 136–139) and direct `<subcommand> ...`.
 pub fn parse_lighting_host_cli_args(args: &[String]) -> LightingHostCliCommand {
-    match args.len() {
-        0 => LightingHostCliCommand::RunDaemon,
-        1 if args[0] == "status" => LightingHostCliCommand::Status,
-        1 if args[0] == "remove" => LightingHostCliCommand::Remove,
-        2 if args[0] == "register-dev" => LightingHostCliCommand::RegisterDev {
-            manifest_path: args[1].clone(),
+    if args.is_empty() {
+        return LightingHostCliCommand::RunDaemon;
+    }
+    let slice = if args[0] == "identity" {
+        &args[1..]
+    } else {
+        args
+    };
+    if slice.is_empty() {
+        return LightingHostCliCommand::InvalidArgs;
+    }
+    match (slice[0].as_str(), slice.len()) {
+        ("status", 2) => LightingHostCliCommand::Status {
+            package_name: slice[1].clone(),
         },
-        3 if args[0] == "register" => LightingHostCliCommand::Register {
-            external_dir: args[1].clone(),
-            sparse_msix: args[2].clone(),
+        ("status", 1) => LightingHostCliCommand::Status {
+            package_name: FLUIDEQ_LIGHTING_PACKAGE_NAME.to_string(),
+        },
+        ("register", 3) => LightingHostCliCommand::Register {
+            msix_uri: slice[1].clone(),
+            external_folder_uri: slice[2].clone(),
+        },
+        ("register-dev", 3) => LightingHostCliCommand::RegisterDev {
+            manifest_uri: slice[1].clone(),
+            external_folder_uri: slice[2].clone(),
+        },
+        ("register-dev", 2) => LightingHostCliCommand::RegisterDev {
+            manifest_uri: slice[1].clone(),
+            external_folder_uri: String::new(),
+        },
+        ("remove", 2) => LightingHostCliCommand::Remove {
+            package_name: slice[1].clone(),
+        },
+        ("remove", 1) => LightingHostCliCommand::Remove {
+            package_name: FLUIDEQ_LIGHTING_PACKAGE_NAME.to_string(),
         },
         _ => LightingHostCliCommand::InvalidArgs,
     }
 }
 
-/// Formats `{"type":"identity","active":...,"registered":...,"packageFullName":"..."}\n`
-/// matching `write_identity_line` in `/native/lighting-host/src/identity.cpp`.
-pub fn format_lighting_identity_line(
-    active: bool,
-    registered: bool,
-    package_full_name: &str,
+/// Formats `{"type":"ready","protocol":1,"identity":true|false[,"familyName":"..."]}\n`
+/// matching `wmain` in `/native/lighting-host/src/main.cpp` (lines 148–159).
+pub fn format_lighting_ready_line(
+    protocol: u32,
+    identity: bool,
+    family_name: Option<&str>,
 ) -> String {
     let mut line = LightingJsonLine::new();
     line.ch('{')
         .key("type")
-        .string("identity")
+        .string("ready")
         .ch(',')
-        .key("active")
-        .boolean(active)
+        .key("protocol")
+        .number_u32(protocol)
         .ch(',')
-        .key("registered")
-        .boolean(registered)
+        .key("identity")
+        .boolean(identity);
+    if let Some(fam) = family_name {
+        if !fam.is_empty() {
+            line.ch(',').key("familyName").string(fam);
+        }
+    }
+    line.ch('}');
+    line.finish_line()
+}
+
+/// Formats `{"type":"enumerated","source":"lamparray"|"razer"}\n`
+/// matching `lamp_arrays.cpp` (lines 245–247) and `razer_devices.cpp` (lines 223–225).
+pub fn format_lighting_enumerated_line(source: &str) -> String {
+    let mut line = LightingJsonLine::new();
+    line.ch('{')
+        .key("type")
+        .string("enumerated")
         .ch(',')
-        .key("packageFullName")
-        .string(package_full_name)
+        .key("source")
+        .string(source)
         .ch('}');
     line.finish_line()
 }
 
-/// Evaluates `register-dev` prerequisites from `/native/lighting-host/src/identity.cpp` (lines 147–172):
-/// Windows `RegisterPackageByFullName` refuses loose `AppxManifest.xml` files unless Developer Mode
-/// (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock\AllowDevelopmentWithoutDevLicense == 1`) is enabled.
+/// Registered sparse package details inspected by `identity_status` in `/native/lighting-host/src/identity.cpp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredLightingIdentity {
+    pub full_name: String,
+    pub family_name: String,
+    pub version: String,
+    pub location: String,
+}
+
+/// Formats `{"type":"identity","registered":true,"fullName":"...","familyName":"...","version":"...","location":"...","developerMode":...}\n`
+/// or `{"type":"identity","registered":false,"developerMode":...}\n`,
+/// matching `identity_status` in `/native/lighting-host/src/identity.cpp` (lines 80–116).
+pub fn format_lighting_identity_status_line(
+    registered: Option<&RegisteredLightingIdentity>,
+    developer_mode: bool,
+) -> String {
+    let mut line = LightingJsonLine::new();
+    line.ch('{').key("type").string("identity").ch(',');
+    if let Some(pkg) = registered {
+        line.key("registered")
+            .boolean(true)
+            .ch(',')
+            .key("fullName")
+            .string(&pkg.full_name)
+            .ch(',')
+            .key("familyName")
+            .string(&pkg.family_name)
+            .ch(',')
+            .key("version")
+            .string(&pkg.version)
+            .ch(',')
+            .key("location")
+            .string(&pkg.location)
+            .ch(',')
+            .key("developerMode")
+            .boolean(developer_mode);
+    } else {
+        line.key("registered")
+            .boolean(false)
+            .ch(',')
+            .key("developerMode")
+            .boolean(developer_mode);
+    }
+    line.ch('}');
+    line.finish_line()
+}
+
+/// Legacy compatibility helper wrapping `format_lighting_identity_status_line`.
+pub fn format_lighting_identity_line(
+    developer_mode: bool,
+    registered: bool,
+    package_full_name: &str,
+) -> String {
+    if registered {
+        let info = RegisteredLightingIdentity {
+            full_name: package_full_name.to_string(),
+            family_name: format!(
+                "{}_{}",
+                FLUIDEQ_LIGHTING_PACKAGE_NAME, FLUIDEQ_LIGHTING_PUBLISHER_ID
+            ),
+            version: "2.1.0.0".to_string(),
+            location: String::new(),
+        };
+        format_lighting_identity_status_line(Some(&info), developer_mode)
+    } else {
+        format_lighting_identity_status_line(None, developer_mode)
+    }
+}
+
+/// Formats `{"type":"identity-registered"}\n` (`identity.cpp` line 154).
+pub fn format_lighting_identity_registered_line() -> String {
+    let mut line = LightingJsonLine::new();
+    line.ch('{').key("type").string("identity-registered").ch('}');
+    line.finish_line()
+}
+
+/// Formats `{"type":"identity-removed"}\n` (`identity.cpp` line 213).
+pub fn format_lighting_identity_removed_line() -> String {
+    let mut line = LightingJsonLine::new();
+    line.ch('{').key("type").string("identity-removed").ch('}');
+    line.finish_line()
+}
+
+/// Formats `{"type":"identity-failed","step":"...","code":...,"detail":"..."}\n`
+/// matching `write_identity_failure` in `/native/lighting-host/src/identity.cpp` (lines 62–72).
+pub fn format_lighting_identity_failed_line(step: &str, code: i32, detail: &str) -> String {
+    let mut line = LightingJsonLine::new();
+    line.ch('{')
+        .key("type")
+        .string("identity-failed")
+        .ch(',')
+        .key("step")
+        .string(step)
+        .ch(',')
+        .key("code")
+        .number_i64(code as i64)
+        .ch(',')
+        .key("detail")
+        .string(detail)
+        .ch('}');
+    line.finish_line()
+}
+
+/// Evaluates `register-dev` prerequisites from `/native/lighting-host/src/identity.cpp`:
+/// Windows `RegisterPackageByUriAsync` with `AllowUnsigned` requires Developer Mode
+/// (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock\AllowDevelopmentWithoutDevLicense != 0`).
 pub fn validate_lighting_register_dev(
     developer_mode_enabled: bool,
     manifest_exists: bool,
@@ -1863,6 +2026,7 @@ pub struct LightingDeviceOverride {
 /// Snapshot of `HKCU\Software\Microsoft\Lighting` read by `/native/lighting-host/src/lighting_settings.cpp`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LightingSettingsSnapshot {
+    pub present: bool,
     pub ambient_lighting_enabled: Option<bool>,
     pub controlled_by_foreground: Option<bool>,
     pub global_providers: BTreeMap<u32, String>,
@@ -1870,24 +2034,26 @@ pub struct LightingSettingsSnapshot {
 }
 
 impl LightingSettingsSnapshot {
-    /// Formats `{"type":"lighting-settings","ambientLightingEnabled":...,"controlledByForeground":...,"providers":[...],"devices":[...]}\n`
-    /// with providers ordered by numeric value name (`1, 2, 3...`), matching `read_lighting_settings_line` in `lighting_settings.cpp`.
+    /// Formats `{"type":"lighting-settings","present":true|false[,"enabled":...][,"foregroundFirst":...],"providers":[...],"devices":[...]}\n`
+    /// with providers ordered by numeric value name (`1, 2, 3...`), matching `read_lighting_settings_line` in `lighting_settings.cpp` (lines 138–182).
     pub fn to_json_line(&self) -> String {
         let mut line = LightingJsonLine::new();
         line.ch('{')
             .key("type")
             .string("lighting-settings")
             .ch(',')
-            .key("ambientLightingEnabled");
-        match self.ambient_lighting_enabled {
-            Some(v) => line.boolean(v),
-            None => line.raw("null"),
-        };
-        line.ch(',').key("controlledByForeground");
-        match self.controlled_by_foreground {
-            Some(v) => line.boolean(v),
-            None => line.raw("null"),
-        };
+            .key("present")
+            .boolean(self.present);
+        if !self.present {
+            line.ch('}');
+            return line.finish_line();
+        }
+        if let Some(enabled) = self.ambient_lighting_enabled {
+            line.ch(',').key("enabled").boolean(enabled);
+        }
+        if let Some(fg) = self.controlled_by_foreground {
+            line.ch(',').key("foregroundFirst").boolean(fg);
+        }
         line.ch(',').key("providers").ch('[');
         for (idx, provider) in self.global_providers.values().enumerate() {
             if idx > 0 {
@@ -1900,15 +2066,10 @@ impl LightingSettingsSnapshot {
             if d_idx > 0 {
                 line.ch(',');
             }
-            line.ch('{')
-                .key("id")
-                .string(&dev.device_id)
-                .ch(',')
-                .key("controlled");
-            match dev.controlled {
-                Some(v) => line.boolean(v),
-                None => line.raw("null"),
-            };
+            line.ch('{').key("id").string(&dev.device_id);
+            if let Some(controlled) = dev.controlled {
+                line.ch(',').key("controlled").boolean(controlled);
+            }
             line.ch(',').key("providers").ch('[');
             for (p_idx, provider) in dev.providers.values().enumerate() {
                 if p_idx > 0 {
@@ -2003,7 +2164,8 @@ pub struct RazerContainerTracker {
 }
 
 impl RazerContainerTracker {
-    /// Processes a PnP interface addition/update; returns `Some(json_line)` if a `"razer-added"` line should be emitted.
+    /// Processes a PnP interface addition/update; returns `Some(json_line)` if a `"razer"` line should be emitted
+    /// (`write_razer_container` in `/native/lighting-host/src/razer_devices.cpp` lines 102–111).
     pub fn upsert_interface(
         &mut self,
         interface_id: &str,
@@ -2030,9 +2192,9 @@ impl RazerContainerTracker {
         let key = container_id.to_ascii_lowercase();
         let entry = self
             .containers
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| RazerContainerEntry {
-                container_id: container_id.to_string(),
+                container_id: key,
                 ..Default::default()
             });
         entry.interface_ids.insert(interface_id.to_string());
@@ -2055,16 +2217,13 @@ impl RazerContainerTracker {
         let mut line = LightingJsonLine::new();
         line.ch('{')
             .key("type")
-            .string("razer-added")
+            .string("razer")
             .ch(',')
-            .key("id")
+            .key("container")
             .string(&entry.container_id)
             .ch(',')
             .key("name")
             .string(&entry.name)
-            .ch(',')
-            .key("vendorId")
-            .number_u32(RAZER_USB_VENDOR_ID as u32)
             .ch(',')
             .key("productId")
             .number_u32(first_pid as u32)
@@ -2081,8 +2240,8 @@ impl RazerContainerTracker {
         Some(line.finish_line())
     }
 
-    /// Removes a PnP interface; emits `{"type":"razer-removed","id":"..."}\n` only when the last
-    /// interface belonging to that physical container leaves (`razer_devices.cpp` lines 253–269).
+    /// Removes a PnP interface; emits `{"type":"razer-removed","container":"..."}\n` only when the last
+    /// interface belonging to that physical container leaves (`razer_devices.cpp` lines 135–150).
     pub fn remove_interface(&mut self, interface_id: &str) -> Option<String> {
         let mut emptied_key = None;
         let mut removed_container_id = String::new();
@@ -2103,7 +2262,7 @@ impl RazerContainerTracker {
                     .key("type")
                     .string("razer-removed")
                     .ch(',')
-                    .key("id")
+                    .key("container")
                     .string(&removed_container_id)
                     .ch('}');
                 return Some(line.finish_line());
@@ -2126,6 +2285,7 @@ pub struct LampPositionMeters {
 pub struct OpenedLampArrayDevice {
     pub index: u32,
     pub id: String,
+    pub container: String,
     pub name: String,
     pub kind: i32,
     pub vendor_id: u16,
@@ -2143,12 +2303,24 @@ pub struct OpenedLampArrayDevice {
 
 /// Async `LampArray` discovery, `FromIdAsync` in-flight cancellation guard, and `MinUpdateInterval`
 /// frame rate limiter matching `/native/lighting-host/src/lamp_arrays.cpp`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LampArrayRegistry {
     next_index: u32,
     opening_ids: BTreeSet<String>,
     failed_ids: BTreeMap<String, String>,
     devices: Vec<OpenedLampArrayDevice>,
+}
+
+impl Default for LampArrayRegistry {
+    fn default() -> Self {
+        Self {
+            // `lamp_arrays.cpp` line 64: `uint32_t next_index = 1;`
+            next_index: 1,
+            opening_ids: BTreeSet::new(),
+            failed_ids: BTreeMap::new(),
+            devices: Vec::new(),
+        }
+    }
 }
 
 impl LampArrayRegistry {
@@ -2164,6 +2336,8 @@ impl LampArrayRegistry {
     /// Completes an async `LampArray::FromIdAsync` open; if `remove_device` was called while the
     /// async open was in flight (`!opening_ids.remove(id)`), discards the opened handle immediately
     /// (`lamp_arrays.cpp` lines 166–170).
+    /// Formats `{"type":"lamparray","index":...,"id":"...","container":"...","name":"...","kind":...,"vendorId":...,"productId":...,"lampCount":...,"width":...,"height":...,"positions":[x,y,z,...],"minUpdateMs":...,"available":...}\n`
+    /// matching `open_lamp_array` in `/native/lighting-host/src/lamp_arrays.cpp` (lines 187–204).
     pub fn complete_open(&mut self, mut dev: OpenedLampArrayDevice) -> Option<String> {
         if !self.opening_ids.remove(&dev.id) {
             return None;
@@ -2174,16 +2348,20 @@ impl LampArrayRegistry {
         dev.index = index;
         dev.last_send_us = None;
 
+        let count = dev.lamp_count.clamp(0, 4096) as usize;
         let mut line = LightingJsonLine::new();
         line.ch('{')
             .key("type")
-            .string("added")
+            .string("lamparray")
             .ch(',')
             .key("index")
             .number_u32(dev.index)
             .ch(',')
             .key("id")
             .string(&dev.id)
+            .ch(',')
+            .key("container")
+            .string(&dev.container.to_ascii_lowercase())
             .ch(',')
             .key("name")
             .string(&dev.name)
@@ -2198,82 +2376,79 @@ impl LampArrayRegistry {
             .number_u32(dev.product_id as u32)
             .ch(',')
             .key("lampCount")
-            .number_i64(dev.lamp_count as i64)
+            .number_i64(count as i64)
             .ch(',')
-            .key("minIntervalMs")
-            .number_f64(dev.min_update_ms)
-            .ch(',')
-            .key("available")
-            .boolean(dev.available)
-            .ch(',')
-            .key("supportsSet")
-            .boolean(dev.supports_set)
-            .ch(',')
-            .key("bounds")
-            .ch('{')
             .key("width")
             .number_f64(dev.width_m)
             .ch(',')
             .key("height")
             .number_f64(dev.height_m)
             .ch(',')
-            .key("depth")
-            .number_f64(dev.depth_m)
-            .ch('}')
-            .ch(',')
-            .key("lamps")
+            .key("positions")
             .ch('[');
-        for (i, lamp) in dev.lamps.iter().enumerate() {
+        for (i, lamp) in dev.lamps.iter().take(count).enumerate() {
             if i > 0 {
                 line.ch(',');
             }
-            line.ch('{')
-                .key("i")
-                .number_i64(lamp.index as i64)
+            line.number_f64(lamp.x)
                 .ch(',')
-                .key("x")
-                .number_f64(lamp.x)
-                .ch(',')
-                .key("y")
                 .number_f64(lamp.y)
                 .ch(',')
-                .key("z")
-                .number_f64(lamp.z)
-                .ch(',')
-                .key("purposes")
-                .number_u32(lamp.purposes)
-                .ch('}');
+                .number_f64(lamp.z);
         }
-        line.ch(']').ch('}');
+        line.ch(']')
+            .ch(',')
+            .key("minUpdateMs")
+            .number_f64(dev.min_update_ms)
+            .ch(',')
+            .key("available")
+            .boolean(dev.available)
+            .ch('}');
         self.devices.push(dev);
         Some(line.finish_line())
     }
 
-    /// Records a failed `FromIdAsync` open, deduplicating identical failure reasons per device ID.
-    pub fn record_open_failure(&mut self, id: &str, name: &str, reason: &str) -> Option<String> {
+    /// Records a failed `FromIdAsync` open, deduplicating identical failure reasons per device ID
+    /// (`report_open_failure` in `lamp_arrays.cpp` lines 88–103).
+    pub fn record_open_failure(
+        &mut self,
+        id: &str,
+        container: &str,
+        name: &str,
+        code: i32,
+        detail: &str,
+    ) -> Option<String> {
         self.opening_ids.remove(id);
-        if self.failed_ids.get(id).map(|s| s.as_str()) == Some(reason) {
+        let dedup_key = format!("{}:{}", code, detail);
+        if self.failed_ids.get(id).map(|s| s.as_str()) == Some(dedup_key.as_str()) {
             return None;
         }
-        self.failed_ids.insert(id.to_string(), reason.to_string());
+        self.failed_ids.insert(id.to_string(), dedup_key);
         let mut line = LightingJsonLine::new();
         line.ch('{')
             .key("type")
-            .string("open-failed")
+            .string("lamparray-failed")
             .ch(',')
             .key("id")
             .string(id)
             .ch(',')
+            .key("container")
+            .string(&container.to_ascii_lowercase())
+            .ch(',')
             .key("name")
             .string(name)
             .ch(',')
-            .key("reason")
-            .string(reason)
+            .key("code")
+            .number_i64(code as i64)
+            .ch(',')
+            .key("detail")
+            .string(detail)
             .ch('}');
         Some(line.finish_line())
     }
 
-    /// Removes a device when `DeviceWatcher::Removed` fires, cancelling any in-flight `opening_ids` entry.
+    /// Removes a device when `DeviceWatcher::Removed` fires, cancelling any in-flight `opening_ids` entry
+    /// and emitting `{"type":"lamparray-removed","index":...}\n` (`remove_lamp_array` in `lamp_arrays.cpp` lines 138–150).
     pub fn remove_device(&mut self, id: &str) -> Option<String> {
         self.opening_ids.remove(id);
         self.failed_ids.remove(id);
@@ -2282,18 +2457,16 @@ impl LampArrayRegistry {
         let mut line = LightingJsonLine::new();
         line.ch('{')
             .key("type")
-            .string("removed")
+            .string("lamparray-removed")
             .ch(',')
             .key("index")
             .number_u32(removed.index)
-            .ch(',')
-            .key("id")
-            .string(&removed.id)
             .ch('}');
         Some(line.finish_line())
     }
 
-    /// Updates `IsAvailable` on `AvailabilityChanged` and emits `{"type":"available",...}\n` only when changed.
+    /// Updates `IsAvailable` on `AvailabilityChanged` and emits `{"type":"available","index":...,"available":...}\n`
+    /// (`lamp_arrays.cpp` lines 173–179).
     pub fn update_availability(&mut self, index: u32, available: bool) -> Option<String> {
         let dev = self.devices.iter_mut().find(|d| d.index == index)?;
         if dev.available == available {
@@ -2340,6 +2513,149 @@ impl LampArrayRegistry {
         }
         dev.last_send_us = Some(now_us);
         Some(count)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub mod win32_daemon_ffi {
+    use std::ffi::c_void;
+
+    pub type Hwnd = *mut c_void;
+    pub type Handle = *mut c_void;
+    pub type Hkey = isize;
+
+    pub const HKEY_CURRENT_USER: Hkey = -2147483647isize; // 0x80000001
+    pub const KEY_READ: u32 = 0x20019;
+    pub const SMTO_NORMAL: u32 = 0x0000;
+    pub const PROGMAN_SPAWN_WORKERW_MSG: u32 = 0x052C;
+    pub const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+    pub const DWMWA_CLOAKED: u32 = 14;
+    pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Win32Rect {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        pub fn FindWindowW(lp_class_name: *const u16, lp_window_name: *const u16) -> Hwnd;
+        pub fn FindWindowExW(
+            hwnd_parent: Hwnd,
+            hwnd_child_after: Hwnd,
+            lpsz_class: *const u16,
+            lpsz_window: *const u16,
+        ) -> Hwnd;
+        pub fn SendMessageTimeoutW(
+            hwnd: Hwnd,
+            msg: u32,
+            w_param: usize,
+            l_param: isize,
+            fu_flags: u32,
+            u_timeout: u32,
+            lpdw_result: *mut usize,
+        ) -> isize;
+        pub fn SetParent(hwnd_child: Hwnd, hwnd_new_parent: Hwnd) -> Hwnd;
+        pub fn GetForegroundWindow() -> Hwnd;
+        pub fn GetWindowThreadProcessId(hwnd: Hwnd, lpdw_process_id: *mut u32) -> u32;
+        pub fn GetClassNameW(hwnd: Hwnd, lp_class_name: *mut u16, n_max_count: i32) -> i32;
+        pub fn GetWindowRect(hwnd: Hwnd, lp_rect: *mut Win32Rect) -> i32;
+        pub fn IsWindowVisible(hwnd: Hwnd) -> i32;
+        pub fn IsIconic(hwnd: Hwnd) -> i32;
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        pub fn DwmGetWindowAttribute(
+            hwnd: Hwnd,
+            dw_attribute: u32,
+            pv_attribute: *mut c_void,
+            cb_attribute: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn OpenProcess(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_process_id: u32,
+        ) -> Handle;
+        pub fn QueryFullProcessImageNameW(
+            h_process: Handle,
+            dw_flags: u32,
+            lp_exe_name: *mut u16,
+            lpdw_size: *mut u32,
+        ) -> i32;
+        pub fn CloseHandle(h_object: Handle) -> i32;
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        pub fn RegOpenKeyExW(
+            h_key: Hkey,
+            lp_sub_key: *const u16,
+            ul_options: u32,
+            sam_desired: u32,
+            phk_result: *mut Hkey,
+        ) -> i32;
+        pub fn RegQueryValueExW(
+            h_key: Hkey,
+            lp_value_name: *const u16,
+            lp_reserved: *mut u32,
+            lp_type: *mut u32,
+            lp_data: *mut u8,
+            lpcb_data: *mut u32,
+        ) -> i32;
+        pub fn RegNotifyChangeKeyValue(
+            h_key: Hkey,
+            b_watch_subtree: i32,
+            dw_notify_filter: u32,
+            h_event: Handle,
+            f_asynchronous: i32,
+        ) -> i32;
+        pub fn RegCloseKey(h_key: Hkey) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        pub fn CoInitializeEx(pv_reserved: *mut c_void, dw_co_init: u32) -> i32;
+        pub fn CoUninitialize();
+    }
+
+    /// Sends the `0x052C` message to `Progman` so Explorer spawns the background `WorkerW` host
+    /// behind `SHELLDLL_DefView` (`wallpaper.cpp` lines 55–66).
+    pub fn request_progman_workerw_win32() -> Hwnd {
+        unsafe {
+            let progman_class: [u16; 8] = [
+                b'P' as u16,
+                b'r' as u16,
+                b'o' as u16,
+                b'g' as u16,
+                b'm' as u16,
+                b'a' as u16,
+                b'n' as u16,
+                0,
+            ];
+            let progman = FindWindowW(progman_class.as_ptr(), std::ptr::null());
+            if !progman.is_null() {
+                let mut result = 0usize;
+                let _ = SendMessageTimeoutW(
+                    progman,
+                    PROGMAN_SPAWN_WORKERW_MSG,
+                    0xD,
+                    0x1,
+                    SMTO_NORMAL,
+                    1000,
+                    &mut result,
+                );
+            }
+            progman
+        }
     }
 }
 
@@ -2409,18 +2725,18 @@ mod tests {
         let mut store = AppStateStore::new(48_000.0);
         let mut media = MediaWatchCoordinator::default();
         let line_1 = r#"{"app":"Spotify.exe","title":"Holocene","artist":"Bon Iver","isPlaying":true,"positionMs":12150,"durationMs":336000,"canNext":true,"canPrevious":true,"canSeek":true,"playing":["Spotify.exe"],"coverId":"0123456789abcdef"}"#;
-        let line_2 = r#"{"app":"Spotify.exe","title":"Holocene","artist":"Bon Iver","isPlaying":true,"positionMs":12300,"durationMs":336000,"canNext":true,"canPrevious":true,"canSeek":true,"playing":["Spotify.exe"],"coverId":"0123456789abcdef"}"#;
+        let line_2 = r#"{"app":"Spotify.exe","title":"Holocene","artist":"Bon Iver","isPlaying":true,"positionMs":12420,"durationMs":336000,"canNext":true,"canPrevious":true,"canSeek":true,"playing":["Spotify.exe"],"coverId":"0123456789abcdef"}"#;
 
         assert!(media.handle_line(line_1, &mut store).is_some());
-        assert!(store.snapshot().residency.online_media_playing);
-        // Same whole second (12s) -> deduplicated
+        assert!(store.snapshot().residency.online_media_protected);
+        // Same whole second (12s under nearbyint rounding) -> deduplicated
         assert!(media.handle_line(line_2, &mut store).is_none());
 
         assert_eq!(
             media.handle_line("null\n", &mut store),
             Some(MediaWatchEvent::Cleared)
         );
-        assert!(!store.snapshot().residency.online_media_playing);
+        assert!(!store.snapshot().residency.online_media_protected);
     }
 
     #[test]
@@ -2496,14 +2812,14 @@ mod tests {
 
     #[test]
     fn lighting_frame_reader_decodes_flh1_rgb_packet() {
-        let packet = encode_lighting_colours_frame(0, &[[255, 0, 128], [0, 255, 64]])
+        let packet = encode_lighting_colours_frame(1, &[[255, 0, 128], [0, 255, 64]])
             .expect("valid FLH1 frame");
         let mut reader = LightingFrameReader::default();
         reader.feed(&packet);
         assert_eq!(
             reader.next_frame(),
             LightingReadResult::Colours(LightingColoursFrame {
-                device_index: 0,
+                device_index: 1,
                 lamp_count: 2,
                 rgb_bytes: vec![255, 0, 128, 0, 255, 64],
             })
@@ -2535,15 +2851,25 @@ mod tests {
             WallpaperCoverState::Owner
         );
         assert_eq!(
-            desktop_cover_of(monitor, &[left_half, right_half], &[left_half, right_half]),
+            desktop_cover_of(
+                monitor,
+                &[left_half, right_half],
+                &[left_half, right_half]
+            ),
             WallpaperCoverState::Others
         );
     }
 
     #[test]
     fn dsp_host_command_and_stats_frame_roundtrip() {
-        let cmd_bytes =
-            encode_dsp_host_command_frame(FeqWireCommand::FEQ_CMD_SET_VOLUME, 7, 42, 0, 0, 0.85);
+        let cmd_bytes = encode_dsp_host_command_frame(
+            FeqWireCommand::FEQ_CMD_SET_VOLUME,
+            7,
+            42,
+            0,
+            0,
+            0.85,
+        );
         assert_eq!(
             u32::from_le_bytes([cmd_bytes[0], cmd_bytes[1], cmd_bytes[2], cmd_bytes[3]]),
             FEQ_MAGIC_COMMAND
@@ -2586,7 +2912,22 @@ mod tests {
 
     #[test]
     fn lighting_host_razer_container_and_lamp_array_state_machines_match_native() {
-        // 1. Razer container groups dual-PID interfaces and prefers specific "Razer ..." name over "Razer Control" / "DSV2Pro TKL"
+        // 1. CLI argument parser handles `identity <subcommand>` prefix and exit constants match `identity.h`
+        assert_eq!(LIGHTING_EXIT_OK, 0);
+        assert_eq!(LIGHTING_EXIT_USAGE, 1);
+        assert_eq!(LIGHTING_EXIT_FAILED, 3);
+        assert_eq!(
+            parse_lighting_host_cli_args(&[
+                "identity".to_string(),
+                "status".to_string(),
+                "FluidEQ.Lighting".to_string()
+            ]),
+            LightingHostCliCommand::Status {
+                package_name: "FluidEQ.Lighting".to_string()
+            }
+        );
+
+        // 2. Razer container groups dual-PID interfaces and prefers specific "Razer ..." name over "Razer Control" / "DSV2Pro TKL"
         let mut razer = RazerContainerTracker::default();
         let line1 = razer
             .upsert_interface(
@@ -2596,6 +2937,8 @@ mod tests {
                 None,
             )
             .expect("initial container add");
+        assert!(line1.contains("\"type\":\"razer\""));
+        assert!(line1.contains("\"container\":\"{aaaa-bbbb}\""));
         assert!(line1.contains("\"name\":\"DSV2Pro TKL\""));
         assert!(line1.contains("\"productIds\":[3872]"));
 
@@ -2611,25 +2954,21 @@ mod tests {
         assert!(line2.contains("\"productIds\":[3872,18672]"));
 
         // Removing first interface does NOT emit razer-removed while second interface remains
-        assert!(razer
-            .remove_interface("\\\\?\\HID#VID_1532&PID_0F20&MI_00#1")
-            .is_none());
+        assert!(razer.remove_interface("\\\\?\\HID#VID_1532&PID_0F20&MI_00#1").is_none());
         let removed = razer
             .remove_interface("\\\\?\\HID#VID_1532&PID_48F0&MI_01#1")
             .expect("last interface removed");
-        assert_eq!(
-            removed,
-            "{\"type\":\"razer-removed\",\"id\":\"{aaaa-bbbb}\"}\n"
-        );
+        assert_eq!(removed, "{\"type\":\"razer-removed\",\"container\":\"{aaaa-bbbb}\"}\n");
 
-        // 2. LampArrayRegistry cancels in-flight open if device is removed before FromIdAsync finishes,
-        //    and enforces min_update_ms frame rate limiting.
+        // 3. LampArrayRegistry starts at 1, cancels in-flight open if device is removed before FromIdAsync finishes,
+        //    emits `"type":"lamparray"` with flat `"positions"`, and enforces min_update_ms frame rate limiting.
         let mut lamps = LampArrayRegistry::default();
         assert!(lamps.begin_open("\\\\?\\LAMP#1"));
         assert!(lamps.remove_device("\\\\?\\LAMP#1").is_none());
         let discarded = lamps.complete_open(OpenedLampArrayDevice {
             index: 0,
             id: "\\\\?\\LAMP#1".to_string(),
+            container: "{1111-2222}".to_string(),
             name: "Keyboard".to_string(),
             kind: 1,
             vendor_id: 0x1532,
@@ -2651,6 +2990,7 @@ mod tests {
             .complete_open(OpenedLampArrayDevice {
                 index: 0,
                 id: "\\\\?\\LAMP#2".to_string(),
+                container: "{3333-4444}".to_string(),
                 name: "Mousepad".to_string(),
                 kind: 3,
                 vendor_id: 0x1532,
@@ -2662,14 +3002,31 @@ mod tests {
                 depth_m: 0.01,
                 available: true,
                 supports_set: true,
-                lamps: vec![],
+                lamps: vec![
+                    LampPositionMeters {
+                        index: 0,
+                        x: 0.1,
+                        y: 0.2,
+                        z: 0.0,
+                        purposes: 1,
+                    },
+                    LampPositionMeters {
+                        index: 1,
+                        x: 0.3,
+                        y: 0.2,
+                        z: 0.0,
+                        purposes: 1,
+                    },
+                ],
                 last_send_us: None,
             })
             .expect("completed open");
-        assert!(added.contains("\"type\":\"added\""));
+        assert!(added.contains("\"type\":\"lamparray\""));
+        assert!(added.contains("\"index\":1"));
+        assert!(added.contains("\"positions\":[0.1,0.2,0,0.3,0.2,0]"));
 
         let frame = LightingColoursFrame {
-            device_index: 0,
+            device_index: 1,
             lamp_count: 2,
             rgb_bytes: vec![255, 0, 0, 0, 255, 0],
         };
@@ -2728,10 +3085,7 @@ mod tests {
             resolve_uwp_frame_host_pid(
                 1100,
                 "C:\\Windows\\System32\\ApplicationFrameHost.exe",
-                &[
-                    ("ApplicationFrameInputSinkWindow", 1100),
-                    ("Windows.UI.Core.CoreWindow", 8420)
-                ]
+                &[("ApplicationFrameInputSinkWindow", 1100), ("Windows.UI.Core.CoreWindow", 8420)]
             ),
             8420
         );

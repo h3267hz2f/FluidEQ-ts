@@ -3,6 +3,7 @@
 #ifndef FLUIDEQ_ROOM_AMBIENCE_H
 #define FLUIDEQ_ROOM_AMBIENCE_H
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 struct RoomReflection {

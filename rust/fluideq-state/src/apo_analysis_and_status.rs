@@ -141,48 +141,49 @@ impl SourceAnalysis {
     /// Exact port of `SourceAnalysis::processing_identity()` in `/native/system-apo/src/source_analysis.cpp`.
     /// Encodes DSP facts only: an ACK `revision` or route `endpoint` move must not rebuild a rack.
     pub fn processing_identity(&self) -> String {
-        let mut out = String::from(if self.library { "library" } else { "live" });
-        let integer_part = |out: &mut String, value: u64| {
+        fn push_integer_part(out: &mut String, value: u64) {
             out.push('|');
             out.push_str(&value.to_string());
-        };
-        let number_part = |out: &mut String, value: f64| {
+        }
+        fn push_number_part(out: &mut String, value: f64) {
             out.push('|');
             if value == 0.0 {
                 out.push('0');
             } else {
                 out.push_str(&format!("{}", value));
             }
-        };
-
-        integer_part(&mut out, if self.engine_owner { 1 } else { 0 });
-        integer_part(&mut out, self.source);
-        integer_part(&mut out, self.epoch);
-        integer_part(&mut out, if self.has_level { 1 } else { 0 });
-        if self.has_level {
-            number_part(&mut out, self.level);
-            number_part(&mut out, self.peak);
         }
-        integer_part(&mut out, if self.noise.is_some() { 1 } else { 0 });
+
+        let mut out = String::from(if self.library { "library" } else { "live" });
+
+        push_integer_part(&mut out, if self.engine_owner { 1 } else { 0 });
+        push_integer_part(&mut out, self.source);
+        push_integer_part(&mut out, self.epoch);
+        push_integer_part(&mut out, if self.has_level { 1 } else { 0 });
+        if self.has_level {
+            push_number_part(&mut out, self.level);
+            push_number_part(&mut out, self.peak);
+        }
+        push_integer_part(&mut out, if self.noise.is_some() { 1 } else { 0 });
         if let Some(noise) = &self.noise {
             for &band in &noise.bands_db {
-                number_part(&mut out, band);
+                push_number_part(&mut out, band);
             }
-            number_part(&mut out, noise.floor_dbfs);
-            number_part(&mut out, noise.hum_hz);
-            integer_part(&mut out, noise.hum_partial_count as u64);
+            push_number_part(&mut out, noise.floor_dbfs);
+            push_number_part(&mut out, noise.hum_hz);
+            push_integer_part(&mut out, noise.hum_partial_count as u64);
             for &hz in &noise.hum_partial_hz {
-                number_part(&mut out, hz);
+                push_number_part(&mut out, hz);
             }
             for &excess in &noise.hum_partial_excess_db {
-                number_part(&mut out, excess);
+                push_number_part(&mut out, excess);
             }
         }
-        integer_part(&mut out, if self.voice_available { 1 } else { 0 });
-        integer_part(&mut out, if self.voice_model_verified { 1 } else { 0 });
-        integer_part(&mut out, self.voice_model.len() as u64);
+        push_integer_part(&mut out, if self.voice_available { 1 } else { 0 });
+        push_integer_part(&mut out, if self.voice_model_verified { 1 } else { 0 });
+        push_integer_part(&mut out, self.voice_model.len() as u64);
         out.push_str(&self.voice_model);
-        integer_part(&mut out, self.voice_runtime.len() as u64);
+        push_integer_part(&mut out, self.voice_runtime.len() as u64);
         out.push_str(&self.voice_runtime);
         out
     }
@@ -839,10 +840,7 @@ pub fn parent_of(path: &str) -> String {
         return String::new();
     };
     let bytes = path.as_bytes();
-    if cut == 2 && bytes.len() > 2 && bytes[1] == b':' {
-        if bytes.len() == 3 {
-            return String::new();
-        }
+    if cut == 2 && bytes.len() > 3 && bytes[1] == b':' {
         return path[..3].to_string();
     }
     if cut < 3 {
@@ -979,14 +977,22 @@ pub fn guid_text(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> String {
 /// Exact port of `Log` in `/native/system-apo/src/log.h/.cpp`.
 /// Appends timestamped, PID-tagged, endpoint-tagged lines (`\r\n`) and truncates the file
 /// whenever its existing size exceeds `MAX_ENGINE_LOG_BYTES` (1 MB).
+#[derive(Debug)]
 pub struct ApoEngineLog {
     mutex: Mutex<()>,
     path: String,
     tag: String,
 }
 
+/// Alias matching `fluideq_engine::Log` in `/native/system-apo/src/log.h`.
+pub type EngineLog = ApoEngineLog;
+
 impl ApoEngineLog {
-    pub fn new(endpoint_guid: &str) -> Self {
+    pub fn new(path: impl AsRef<Path>, endpoint_guid: &str) -> Self {
+        Self::with_path(path.as_ref().to_string_lossy().into_owned(), endpoint_guid)
+    }
+
+    pub fn for_default_path(endpoint_guid: &str) -> Self {
         Self::with_path(log_path(), endpoint_guid)
     }
 
@@ -1039,17 +1045,14 @@ impl ApoEngineLog {
     }
 }
 
-/// Exact port of `trace` in `/native/system-apo/src/log.cpp`.
-pub fn trace_in_path(log_file_path: &str, endpoint_guid: &str, message: &str) {
-    ApoEngineLog::with_path(log_file_path.to_string(), endpoint_guid).write(message);
+/// Exact port of `trace(endpoint, message)` in `/native/system-apo/src/log.cpp`.
+pub fn trace(endpoint_guid: &str, message: &str) {
+    ApoEngineLog::for_default_path(endpoint_guid).write(message);
 }
 
-/// The engine log type under its C++ name.
-pub type EngineLog = ApoEngineLog;
-
-/// `trace` against the engine's own log path (`log.h`).
-pub fn trace(endpoint_guid: &str, message: &str) {
-    trace_in_path(&log_path(), endpoint_guid, message);
+/// Exact port of `trace` in `/native/system-apo/src/log.cpp` with explicit log file path.
+pub fn trace_in_path(log_file_path: &str, endpoint_guid: &str, message: &str) {
+    ApoEngineLog::with_path(log_file_path.to_string(), endpoint_guid).write(message);
 }
 
 /// Exact port of `trace_built` in `/native/system-apo/src/log.h`:

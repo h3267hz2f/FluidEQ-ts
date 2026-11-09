@@ -268,25 +268,6 @@ pub struct SplitReader {
     last: [f32; SPLIT_RING_STRIDE],
 }
 
-/// Adds `weight` to the route from source channel `from` to the output channel
-/// that carries `speaker`, if this output has it.
-fn route_into(
-    matrix: &mut [[f32; SPLIT_RING_STRIDE]; SPLIT_RING_STRIDE],
-    to: &[i32; ROOM_SPEAKERS],
-    from: usize,
-    speaker: i32,
-    weight: f32,
-) -> bool {
-    if speaker >= 0 && (speaker as usize) < ROOM_SPEAKERS {
-        let target = to[speaker as usize];
-        if target >= 0 {
-            matrix[target as usize][from] += weight;
-            return true;
-        }
-    }
-    false
-}
-
 impl SplitReader {
     pub fn new(rate: u32, channels: u32, mask: u32) -> Self {
         let mut reader = Self {
@@ -408,6 +389,23 @@ impl SplitReader {
             return;
         }
 
+        fn route_to_speaker(
+            matrix: &mut [[f32; SPLIT_RING_STRIDE]; SPLIT_RING_STRIDE],
+            to: &[i32; ROOM_SPEAKERS],
+            from: usize,
+            speaker: i32,
+            weight: f32,
+        ) -> bool {
+            if speaker >= 0 && (speaker as usize) < ROOM_SPEAKERS {
+                let target = to[speaker as usize];
+                if target >= 0 {
+                    matrix[target as usize][from] += weight;
+                    return true;
+                }
+            }
+            false
+        }
+
         let lfe = lfe_channel_of(clock.mask, in_ch);
         for ch in 0..u32::from(in_ch) {
             if (ch as i32) == lfe {
@@ -421,8 +419,8 @@ impl SplitReader {
             let from = ch as usize;
             if speaker == -2 {
                 // Mono: both fronts, at half power each.
-                route_into(&mut self.matrix, &to, from, 0, HALF_POWER);
-                route_into(&mut self.matrix, &to, from, 1, HALF_POWER);
+                route_to_speaker(&mut self.matrix, &to, from, 0, HALF_POWER);
+                route_to_speaker(&mut self.matrix, &to, from, 1, HALF_POWER);
                 continue;
             }
             if speaker < 0 {
@@ -432,28 +430,28 @@ impl SplitReader {
                 }
                 continue;
             }
-            if route_into(&mut self.matrix, &to, from, speaker, 1.0) {
+            if route_to_speaker(&mut self.matrix, &to, from, speaker, 1.0) {
                 continue;
             }
             // The second output has no such speaker: the nearest one it has.
             let left = speaker == 0 || speaker == 3 || speaker == 5;
             match speaker {
                 2 => {
-                    route_into(&mut self.matrix, &to, from, 0, HALF_POWER);
-                    route_into(&mut self.matrix, &to, from, 1, HALF_POWER);
+                    route_to_speaker(&mut self.matrix, &to, from, 0, HALF_POWER);
+                    route_to_speaker(&mut self.matrix, &to, from, 1, HALF_POWER);
                 }
                 3 | 4 => {
-                    if !route_into(&mut self.matrix, &to, from, speaker + 2, 1.0) {
-                        route_into(&mut self.matrix, &to, from, if left { 0 } else { 1 }, HALF_POWER);
+                    if !route_to_speaker(&mut self.matrix, &to, from, speaker + 2, 1.0) {
+                        route_to_speaker(&mut self.matrix, &to, from, if left { 0 } else { 1 }, HALF_POWER);
                     }
                 }
                 5 | 6 => {
-                    if !route_into(&mut self.matrix, &to, from, speaker - 2, 1.0) {
-                        route_into(&mut self.matrix, &to, from, if left { 0 } else { 1 }, HALF_POWER);
+                    if !route_to_speaker(&mut self.matrix, &to, from, speaker - 2, 1.0) {
+                        route_to_speaker(&mut self.matrix, &to, from, if left { 0 } else { 1 }, HALF_POWER);
                     }
                 }
                 _ => {
-                    route_into(&mut self.matrix, &to, from, 2, HALF_POWER);
+                    route_to_speaker(&mut self.matrix, &to, from, 2, HALF_POWER);
                 }
             }
         }
@@ -1207,15 +1205,14 @@ mod tests {
         {
             let mut planes: [&mut [f32]; 2] = [&mut left, &mut right];
             let woke = sec_tap.mix(&mut planes, 480, 62_000);
-            assert!(woke); // Asked for a kernel at the writer's 48 kHz rate
+            assert!(woke); // Requested 48kHz kernel from watcher thread
         }
-        // The watcher thread answers that request before the next block
         sec_tap.prepare();
-
         sec_tap.begin();
         {
             let mut planes: [&mut [f32]; 2] = [&mut left, &mut right];
-            assert!(sec_tap.mix(&mut planes, 480, 62_000));
+            let woke = sec_tap.mix(&mut planes, 480, 62_000);
+            assert!(woke); // Transitioned Waiting -> Playing with prepared 48kHz kernel
             sec_tap.trim_output(&mut planes, 480);
         }
 

@@ -4,170 +4,150 @@ Copyright (C) <2026>  <Ivan Carmenates Garcia>
 SPDX-License-Identifier: GPL-3.0-or-later
 */
 
-//! The desktop shell.
-//!
-//! A Tauri window hosts the view; the authoritative state and the audio work
-//! stay in Rust. The web view is disposable — closing it does not lose the
-//! chain, the bands, or the device selection.
-
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-pub mod audio_endpoint;
-pub mod engine_host;
-pub mod engine_setup;
 pub mod host_runtime;
 pub mod ipc;
 pub mod spectrum_bridge;
 pub mod system_daemons;
 
-use fluideq_state::{AppStateSnapshot, AppStateStore};
-use serde_json::Value;
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
-use tauri::{Manager, State};
+use fluideq_state::AppStateStore;
+use ipc::{dispatch_ipc_command, ShellIpcCommand, ShellIpcResponse};
+use spectrum_bridge::SpectrumBridge;
+use std::io::{BufRead, Write};
+use system_daemons::{
+    desktop_cover_of, encode_lighting_colours_frame, encode_playback_open_output,
+    summarize_process_meter_reply, DesktopBoxRect, ForegroundGameSupervisor, GameProfileRule,
+    LightingFrameReader, MediaWatchCoordinator, OutputWatchCoordinator, VolumeWatchCoordinator,
+};
 
-struct ShellState {
-    store: Mutex<AppStateStore>,
-    state_path: PathBuf,
-    host: engine_host::EngineHost,
-}
-
-fn store_of(state: &ShellState) -> Result<MutexGuard<'_, AppStateStore>, String> {
-    state
-        .store
-        .lock()
-        .map_err(|_| "the state store was poisoned by an earlier failure".to_string())
-}
-
-fn save(store: &AppStateStore, state: &ShellState) {
-    // Persistence is best-effort: a read-only profile must not make a slider
-    // stop working. The next successful write repairs the file.
-    let _ = store.save_to_file(&state.state_path);
-}
-
-/// Every store mutation re-sends the whole chain snapshot, so the host never
-/// holds a partial opinion about the sound.
-fn push_chain(store: &AppStateStore, state: &ShellState, revision: u64) {
-    state.host.apply_chain(&store.export_wire_parameters(), revision as u32);
-}
-
-#[tauri::command]
-fn get_snapshot(state: State<'_, ShellState>) -> Result<AppStateSnapshot, String> {
-    Ok(store_of(&state)?.snapshot())
-}
-
-#[tauri::command]
-fn set_master_power(
-    state: State<'_, ShellState>,
-    enabled: bool,
-) -> Result<AppStateSnapshot, String> {
-    let mut store = store_of(&state)?;
-    store.set_master_power(enabled);
-    let snapshot = store.snapshot();
-    save(&store, &state);
-    push_chain(&store, &state, snapshot.revision);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn set_preamp_db(state: State<'_, ShellState>, preamp_db: f64) -> Result<AppStateSnapshot, String> {
-    let mut store = store_of(&state)?;
-    store.set_preamp_db(preamp_db);
-    let snapshot = store.snapshot();
-    save(&store, &state);
-    push_chain(&store, &state, snapshot.revision);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn set_band_gain(
-    state: State<'_, ShellState>,
-    band_id: u32,
-    frequency: f64,
-    gain_db: f64,
-    quality: f64,
-) -> Result<AppStateSnapshot, String> {
-    let mut store = store_of(&state)?;
-    store.update_band_gain(band_id, frequency, gain_db, quality);
-    let snapshot = store.snapshot();
-    save(&store, &state);
-    push_chain(&store, &state, snapshot.revision);
-    Ok(snapshot)
-}
-
-#[tauri::command]
-fn get_output_volume() -> Result<f64, String> {
-    audio_endpoint::get_master_volume()
-}
-
-#[tauri::command]
-fn set_output_volume(volume: f64) -> Result<f64, String> {
-    audio_endpoint::set_master_volume(volume)
-}
-
-#[tauri::command]
-fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
-    engine_setup::status(&app)
-}
-
-#[tauri::command]
-fn install_engine(app: tauri::AppHandle) -> Result<Value, String> {
-    engine_setup::install(&app)
-}
-
-#[tauri::command]
-fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
-    Ok(state.host.status())
+fn run_stdio_ipc_loop(store: &mut AppStateStore) {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(raw) = line else {
+            break;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<ShellIpcCommand>(trimmed) {
+            Ok(cmd) => dispatch_ipc_command(store, cmd),
+            Err(err) => ShellIpcResponse::Error {
+                message: format!("IPC decode error: {}", err),
+            },
+        };
+        if let Ok(encoded) = serde_json::to_string(&response) {
+            let mut out = stdout.lock();
+            let _ = writeln!(out, "{}", encoded);
+            let _ = out.flush();
+        }
+    }
 }
 
 fn main() {
-    let app = tauri::Builder::default()
-        .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            let state_path = data_dir.join("state.json");
-            let mut store = AppStateStore::new(48_000.0);
-            if state_path.exists() {
-                // A corrupt file leaves the defaults in place; the first
-                // successful save replaces it.
-                let _ = store.load_from_file(&state_path);
-            }
-            let host_exe = app
-                .path()
-                .resolve(
-                    engine_host::ENGINE_HOST_RESOURCE,
-                    tauri::path::BaseDirectory::Resource,
-                )
-                .unwrap_or_else(|_| PathBuf::from(engine_host::ENGINE_HOST_RESOURCE));
-            let host = engine_host::EngineHost::new(host_exe);
-            let snapshot = store.snapshot();
-            host.apply_chain(&store.export_wire_parameters(), snapshot.revision as u32);
-            // A dev build without the staged engine records the failure in the
-            // host status; the window still opens.
-            let _ = host.start();
-            app.manage(ShellState {
-                store: Mutex::new(store),
-                state_path,
-                host,
-            });
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            get_snapshot,
-            set_master_power,
-            set_preamp_db,
-            set_band_gain,
-            get_output_volume,
-            set_output_volume,
-            engine_status,
-            install_engine,
-            engine_host_status,
-        ])
-        .build(tauri::generate_context!())
-        .expect("FluidEQ failed to start");
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            app.state::<ShellState>().host.shutdown();
-        }
-    });
+    let mut store = AppStateStore::new(48_000.0);
+    if std::env::args().any(|arg| arg == "--ipc-stdio") {
+        run_stdio_ipc_loop(&mut store);
+        return;
+    }
+    let mut spectrum = SpectrumBridge::new(64);
+    let mut game_supervisor = ForegroundGameSupervisor::new(vec![GameProfileRule {
+        profile_id: "esports-footsteps".to_string(),
+        executable_match: "valorant.exe".to_string(),
+        footsteps_lift: 0.70,
+        footsteps_calm: 0.55,
+        enable_low_latency: true,
+    }]);
+    let mut volume_watch = VolumeWatchCoordinator::default();
+    let mut media_watch = MediaWatchCoordinator::default();
+    let mut output_watch = OutputWatchCoordinator::default();
+    let mut lighting_reader = LightingFrameReader::default();
+
+    let _ = volume_watch.handle_line("ready\t2\n");
+    let _ = volume_watch.handle_line("volume\t0.8000\t0\n");
+    let _ = media_watch.handle_line("null\n", &mut store);
+    let _ = output_watch.handle_line("outputs\n");
+    let _ = output_watch.update_devices_and_switch_store(
+        r#"[{"id":"{0.0.0.00000000}.{11111111-2222-3333-4444-555555555555}","name":"Headphones (USB DAC)","guid":"{11111111-2222-3333-4444-555555555555}","isDefault":true,"isActive":true,"isEqualizerApoAttached":false,"isFluidEngineAttached":true,"canHostEffects":true,"effectsEnabled":true,"sampleRate":48000,"channels":2,"batteryPercent":90}]"#,
+        &mut store,
+    );
+    if let Some(lighting_pkt) = encode_lighting_colours_frame(0, &[[0, 180, 255]]) {
+        lighting_reader.feed(&lighting_pkt);
+        let _ = lighting_reader.next_frame();
+    }
+    let _cover = desktop_cover_of(
+        DesktopBoxRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        },
+        &[],
+        &[],
+    );
+    let _open_pkt = encode_playback_open_output(1, "{11111111-2222-3333-4444-555555555555}");
+    let _meter = summarize_process_meter_reply(
+        "4120 18350080 29360128 950000 fluideq-shell.exe\n",
+    );
+
+    let initial = dispatch_ipc_command(&mut store, ShellIpcCommand::GetSnapshot);
+    let _opra = dispatch_ipc_command(
+        &mut store,
+        ShellIpcCommand::ApplyOpraHeadphoneCurve {
+            opra_dir: "opra/curves".to_string(),
+            vendor: "sennheiser".to_string(),
+            product: "hd_600".to_string(),
+            curve_id: None,
+        },
+    );
+    let _swift = dispatch_ipc_command(
+        &mut store,
+        ShellIpcCommand::VerifySwiftF0Model {
+            path: "assets/models/swift-f0.onnx".to_string(),
+        },
+    );
+    let _wire = dispatch_ipc_command(&mut store, ShellIpcCommand::ExportWireParameters);
+    let _hold = game_supervisor.handle_line(
+        "front\t7712\t0,0,1920,1080\tVALORANT\tC:\\Riot Games\\VALORANT\\valorant.exe\n",
+        &mut store,
+    );
+    let _release = game_supervisor.handle_line("gone\t7712\n", &mut store);
+
+    let _active_frame = spectrum.poll_frame(
+        store.snapshot().residency.residency_mode,
+        true,
+        -14.0,
+    );
+    let mut residency_hooks = fluideq_state::residency::NativeResidencyHookBridge::new();
+    let _standby = store.apply_residency_transition_with_hooks(
+        fluideq_state::residency::WindowResidencyMode::ColdStandby,
+        &mut residency_hooks,
+    );
+    let _restored = store.apply_residency_transition_with_hooks(
+        fluideq_state::residency::WindowResidencyMode::Active,
+        &mut residency_hooks,
+    );
+
+    let mut cadence = host_runtime::TelemetryCadenceTracker::new();
+    let shutdown_cmd = system_daemons::encode_dsp_host_command_frame(
+        fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_SHUTDOWN,
+        1,
+        1,
+        0,
+        0,
+        0.0,
+    );
+    let mut pipe_in = std::io::Cursor::new(shutdown_cmd);
+    let mut pipe_out = Vec::new();
+    let _ = host_runtime::run_supervised_pipe_command_loop(
+        &mut pipe_in,
+        &mut pipe_out,
+        &mut store,
+        false,
+        &mut cadence,
+    );
+
+    if let Ok(json) = serde_json::to_string(&initial) {
+        println!("{}", json);
+    }
 }

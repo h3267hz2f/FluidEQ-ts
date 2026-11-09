@@ -7,10 +7,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! Biquad filter synthesis (RBJ Audio EQ Cookbook + Martin Vicanek analog-matched),
 //! character model Q shaping, and worst-case auto-headroom calculation in Rust.
 
-// The Rust matched-biquad solver is the no-C++ fallback. When the native core
-// is linked, its C++ counterpart is authoritative and these helpers are unused.
-#![cfg_attr(feature = "link-cpp-core", allow(dead_code))]
-
 use fluideq_dsp_sys::{FeqBiquadCoefficients, FeqEqModel, FeqFilterType};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::{LN_2, PI, SQRT_2};
@@ -245,52 +241,69 @@ const BUTTERWORTH_Q: f64 = 0.707_106_781_186_547_5;
 const BUTTERWORTH_TOLERANCE: f64 = 0.02;
 
 #[derive(Debug, Clone, Copy)]
+struct Denominator {
+    a1: f64,
+    a2: f64,
+    cap_a0: f64,
+    cap_a1: f64,
+    cap_a2: f64,
+}
+
+/// Exact port of `matched_poles` in `/native/dsp-core/src/biquad_matched.cpp` (lines 58–69).
+fn matched_poles(w: f64, zeta: f64) -> Denominator {
+    let decay = (-zeta * w).exp();
+    let a1 = if zeta <= 1.0 {
+        -2.0 * decay * (w * (1.0 - zeta * zeta).sqrt()).cos()
+    } else {
+        -2.0 * decay * (w * (zeta * zeta - 1.0).sqrt()).cosh()
+    };
+    let a2 = (-2.0 * zeta * w).exp();
+    let cap_a0 = (1.0 + a1 + a2) * (1.0 + a1 + a2);
+    let cap_a1 = (1.0 - a1 + a2) * (1.0 - a1 + a2);
+    let cap_a2 = -4.0 * a2;
+    Denominator {
+        a1,
+        a2,
+        cap_a0,
+        cap_a1,
+        cap_a2,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct Phis {
-    p0: f64,
-    p1: f64,
-    p2: f64,
+    phi0: f64,
+    phi1: f64,
+    phi2: f64,
 }
 
 impl Phis {
-    fn at(omega: f64) -> Self {
-        let s = (0.5 * omega).sin();
-        let p1 = s * s;
-        Self {
-            p0: 1.0 - p1,
-            p1,
-            p2: 4.0 * p1 * (1.0 - p1),
-        }
-    }
-
-    fn dot(self, w0: f64, w1: f64, w2: f64) -> f64 {
-        w0 * self.p0 + w1 * self.p1 + w2 * self.p2
+    fn at(w: f64) -> Self {
+        let half = (w / 2.0).sin();
+        let phi1 = half * half;
+        let phi0 = 1.0 - phi1;
+        let phi2 = 4.0 * phi0 * phi1;
+        Self { phi0, phi1, phi2 }
     }
 }
 
-/// Impulse-invariant denominator from the continuous-time pole pair `s^2 + (w0/q)s + w0^2`.
-fn matched_poles(omega: f64, q: f64) -> (f64, f64) {
-    let q = q.max(1e-4);
-    let alpha = omega / (2.0 * q);
-    if alpha >= 100.0 {
-        return (0.0, 0.0);
-    }
-    let decay = (-alpha).exp();
-    let a1 = if q >= 0.5 {
-        let discriminant = (1.0 - 1.0 / (4.0 * q * q)).max(0.0);
-        -2.0 * decay * (omega * discriminant.sqrt()).cos()
+#[inline]
+fn root(value: f64) -> f64 {
+    if value > 0.0 {
+        value.sqrt()
     } else {
-        let discriminant = (1.0 / (4.0 * q * q) - 1.0).max(0.0);
-        -2.0 * decay * (omega * discriminant.sqrt()).cosh()
-    };
-    let a2 = decay * decay;
-    (a1, a2)
+        0.0
+    }
 }
 
-fn denominator_weights(a1: f64, a2: f64) -> (f64, f64, f64) {
-    let a0 = (1.0 + a1 + a2) * (1.0 + a1 + a2);
-    let a1_w = (1.0 - a1 + a2) * (1.0 - a1 + a2);
-    let a2_w = -4.0 * a2;
-    (a0, a1_w, a2_w)
+#[inline]
+fn is_finite_coeffs(k: &FeqBiquadCoefficients) -> bool {
+    k.b0.is_finite()
+        && k.b1.is_finite()
+        && k.b2.is_finite()
+        && k.a1.is_finite()
+        && k.a2.is_finite()
+        && k.b0 != 0.0
 }
 
 fn unity_on(a1: f64, a2: f64) -> FeqBiquadCoefficients {
@@ -303,177 +316,189 @@ fn unity_on(a1: f64, a2: f64) -> FeqBiquadCoefficients {
     }
 }
 
-fn matched_bell(omega: f64, gain_db: f64, q: f64) -> FeqBiquadCoefficients {
-    let g = 10.0_f64.powf(gain_db / 20.0);
-    if (g - 1.0).abs() < 1e-9 {
-        let (a1, a2) = matched_poles(omega, q);
-        return unity_on(a1, a2);
+/// Exact port of `bell` in `/native/dsp-core/src/biquad_matched.cpp` (lines 122–156).
+fn matched_bell(w0: f64, gain_db: f64, quality: f64) -> FeqBiquadCoefficients {
+    if gain_db == 0.0 {
+        let d = matched_poles(w0, 1.0 / (2.0 * quality));
+        return unity_on(d.a1, d.a2);
     }
-    // Cut is built as the exact reciprocal of the boost of the same depth.
-    if g < 1.0 {
-        let boost = matched_bell(omega, -gain_db, q);
-        if boost.b0 != 0.0 && boost.b0.is_finite() {
-            let inv = 1.0 / boost.b0;
-            return FeqBiquadCoefficients {
-                b0: inv,
-                b1: boost.a1 * inv,
-                b2: boost.a2 * inv,
-                a1: boost.b1 * inv,
-                a2: boost.b2 * inv,
-            };
-        }
+    let cut = gain_db < 0.0;
+    let g = 10.0_f64.powf(gain_db.abs() / 20.0);
+    let d = matched_poles(w0, 1.0 / (2.0 * quality * g.sqrt()));
+    let p = Phis::at(w0);
+    let b0_w = d.cap_a0;
+    let r1 = (d.cap_a0 * p.phi0 + d.cap_a1 * p.phi1 + d.cap_a2 * p.phi2) * g * g;
+    let r2 = (-d.cap_a0 + d.cap_a1 + 4.0 * (p.phi0 - p.phi1) * d.cap_a2) * g * g;
+    let b2_w = (r1 - r2 * p.phi1 - b0_w) / (4.0 * p.phi1 * p.phi1);
+    let b1_w = r2 + b0_w + 4.0 * (p.phi1 - p.phi0) * b2_w;
+    let w = 0.5 * (root(b0_w) + root(b1_w));
+    let boost_b0 = 0.5 * (w + root(w * w + b2_w));
+    let boost_b1 = 0.5 * (root(b0_w) - root(b1_w));
+    let boost_b2 = -b2_w / (4.0 * boost_b0);
+    let boost = FeqBiquadCoefficients {
+        b0: boost_b0,
+        b1: boost_b1,
+        b2: boost_b2,
+        a1: d.a1,
+        a2: d.a2,
+    };
+    if !cut {
+        return boost;
     }
-
-    let sqrt_g = g.sqrt();
-    let (a1, a2) = matched_poles(omega, q * sqrt_g);
-    let (a0, a1_w, a2_w) = denominator_weights(a1, a2);
-    let phi = Phis::at(omega);
-
-    let r1 = (a0 * phi.p0 + a1_w * phi.p1 + a2_w * phi.p2) * g * g;
-    let b0_w = a0;
-    let b1_w = r1;
-    let b2_w = (r1 - b0_w * phi.p0 - b1_w * phi.p1) / phi.p2.max(1e-30);
-
-    let sqrt_b0 = b0_w.max(0.0).sqrt();
-    let sqrt_b1 = b1_w.max(0.0).sqrt();
-    let w = 0.5 * (sqrt_b0 + sqrt_b1);
-    let disc = (w * w + b2_w).max(0.0);
-    let b0 = 0.5 * (w + disc.sqrt());
-    let b1 = 0.5 * (sqrt_b0 - sqrt_b1);
-    let b2 = -b2_w / (4.0 * b0.max(1e-30));
-    FeqBiquadCoefficients { b0, b1, b2, a1, a2 }
+    FeqBiquadCoefficients {
+        b0: 1.0 / boost.b0,
+        b1: boost.a1 / boost.b0,
+        b2: boost.a2 / boost.b0,
+        a1: boost.b1 / boost.b0,
+        a2: boost.b2 / boost.b0,
+    }
 }
 
-fn matched_low_pass(omega: f64, q: f64) -> FeqBiquadCoefficients {
-    let (a1, a2) = matched_poles(omega, q);
-    let (a0, a1_w, a2_w) = denominator_weights(a1, a2);
-    let phi = Phis::at(omega);
-
-    let sqrt_b0 = a0.max(0.0).sqrt();
-    let b0_w = a0;
-    let r1 = phi.dot(a0, a1_w, a2_w) * q * q;
-    let b2_w = (r1 - b0_w * phi.p0) / phi.p2.max(1e-30);
-
-    let w = 0.5 * sqrt_b0;
-    let disc = (w * w + b2_w).max(0.0);
-    let b0 = 0.5 * (w + disc.sqrt());
-    let b1 = 0.5 * sqrt_b0;
-    let b2 = -b2_w / (4.0 * b0.max(1e-30));
-    FeqBiquadCoefficients { b0, b1, b2, a1, a2 }
+/// Exact port of `low_pass` in `/native/dsp-core/src/biquad_matched.cpp` (lines 159–172).
+fn matched_low_pass(w0: f64, quality: f64) -> FeqBiquadCoefficients {
+    let d = matched_poles(w0, 1.0 / (2.0 * quality));
+    let p = Phis::at(w0);
+    let b0_w = d.cap_a0;
+    let r1 = (d.cap_a0 * p.phi0 + d.cap_a1 * p.phi1 + d.cap_a2 * p.phi2) * quality * quality;
+    let b1_w = (r1 - b0_w * p.phi0) / p.phi1;
+    let b0 = 0.5 * (root(b0_w) + root(b1_w));
+    let b1 = root(b0_w) - b0;
+    FeqBiquadCoefficients {
+        b0,
+        b1,
+        b2: 0.0,
+        a1: d.a1,
+        a2: d.a2,
+    }
 }
 
-fn matched_high_pass(omega: f64, q: f64) -> FeqBiquadCoefficients {
-    let (a1, a2) = matched_poles(omega, q);
-    let (a0, a1_w, a2_w) = denominator_weights(a1, a2);
-    let phi = Phis::at(omega);
-
-    let r1 = phi.dot(a0, a1_w, a2_w) * q * q;
-    let b0 = r1.max(0.0).sqrt() / (4.0 * phi.p1.max(1e-30));
+/// Exact port of `high_pass` in `/native/dsp-core/src/biquad_matched.cpp` (lines 175–186).
+fn matched_high_pass(w0: f64, quality: f64) -> FeqBiquadCoefficients {
+    let d = matched_poles(w0, 1.0 / (2.0 * quality));
+    let p = Phis::at(w0);
+    let b0 = quality * root(d.cap_a0 * p.phi0 + d.cap_a1 * p.phi1 + d.cap_a2 * p.phi2)
+        / (4.0 * p.phi1);
     FeqBiquadCoefficients {
         b0,
         b1: -2.0 * b0,
         b2: b0,
-        a1,
-        a2,
+        a1: d.a1,
+        a2: d.a2,
     }
 }
 
-fn matched_band_pass(omega: f64, q: f64) -> FeqBiquadCoefficients {
-    let (a1, a2) = matched_poles(omega, q);
-    let (a0, a1_w, a2_w) = denominator_weights(a1, a2);
-    let phi = Phis::at(omega);
-
-    let r1 = phi.dot(a0, a1_w, a2_w);
-    let r2 = -a0 + a1_w + 4.0 * (phi.p0 - phi.p1) * a2_w;
-
-    let b2_w = (r1 - r2 * phi.p1) / (4.0 * phi.p1 * phi.p1).max(1e-30);
-    let b1_w = r2 + 4.0 * (phi.p1 - phi.p0) * b2_w;
-
-    let sqrt_b1 = b1_w.max(0.0).sqrt();
-    let b1 = -0.5 * sqrt_b1;
-    let disc = (b1_w + 4.0 * b2_w).max(0.0);
-    let b0 = 0.25 * (disc.sqrt() + sqrt_b1);
+/// Exact port of `band_pass` in `/native/dsp-core/src/biquad_matched.cpp` (lines 189–203).
+fn matched_band_pass(w0: f64, quality: f64) -> FeqBiquadCoefficients {
+    let d = matched_poles(w0, 1.0 / (2.0 * quality));
+    let p = Phis::at(w0);
+    let r1 = d.cap_a0 * p.phi0 + d.cap_a1 * p.phi1 + d.cap_a2 * p.phi2;
+    let r2 = -d.cap_a0 + d.cap_a1 + 4.0 * (p.phi0 - p.phi1) * d.cap_a2;
+    let b2_w = (r1 - r2 * p.phi1) / (4.0 * p.phi1 * p.phi1);
+    let b1_w = r2 + 4.0 * (p.phi1 - p.phi0) * b2_w;
+    let b1 = -0.5 * root(b1_w);
+    let b0 = 0.5 * (root(b2_w + b1 * b1) - b1);
     let b2 = -b0 - b1;
-    FeqBiquadCoefficients { b0, b1, b2, a1, a2 }
+    FeqBiquadCoefficients {
+        b0,
+        b1,
+        b2,
+        a1: d.a1,
+        a2: d.a2,
+    }
 }
 
-fn matched_shelf(omega: f64, gain_db: f64, high: bool) -> (bool, FeqBiquadCoefficients) {
-    let mut g = 10.0_f64.powf(gain_db / 20.0);
-    if (g - 1.0).abs() < 1e-9 {
-        let (a1, a2) = matched_poles(omega, BUTTERWORTH_Q);
-        return (true, unity_on(a1, a2));
+/// Exact port of `shelf` in `/native/dsp-core/src/biquad_matched.cpp` (lines 210–258).
+fn matched_shelf(high: bool, fc: f64, gain_db: f64) -> FeqBiquadCoefficients {
+    let cap_g = 10.0_f64.powf(gain_db / 20.0);
+    let mut g = if high { cap_g } else { 1.0 / cap_g };
+    if (1.0 - g).abs() < 1e-6 {
+        g = 1.00001;
     }
-    if high {
-        g = 1.0 / g;
+    let fc4 = fc * fc * fc * fc;
+    let h_nyquist = (fc4 + g) / (fc4 + 1.0 / g);
+    let f1 = fc / (0.160 + 1.543 * fc * fc).sqrt();
+    let f2 = fc / (0.947 + 3.806 * fc * fc).sqrt();
+    let h_at = |f: f64| -> f64 {
+        let f4 = f * f * f * f;
+        (fc4 + f4 * g) / (fc4 + f4 / g)
+    };
+    let h1 = h_at(f1);
+    let h2 = h_at(f2);
+    let s1 = (PI * f1 / 2.0).sin();
+    let s2 = (PI * f2 / 2.0).sin();
+    let p1 = s1 * s1;
+    let p2 = s2 * s2;
+    let d1 = (h1 - 1.0) * (1.0 - p1);
+    let d2 = (h2 - 1.0) * (1.0 - p2);
+    let c11 = -p1 * d1;
+    let c12 = p1 * p1 * (h_nyquist - h1);
+    let c21 = -p2 * d2;
+    let c22 = p2 * p2 * (h_nyquist - h2);
+    let alpha = (c22 * d1 - c12 * d2) / (c11 * c22 - c12 * c21);
+    let aa1 = (d1 - c11 * alpha) / c12;
+    let bb1 = h_nyquist * aa1;
+    let aa2 = (alpha - aa1) / 4.0;
+    let bb2 = (alpha - bb1) / 4.0;
+    let v = 0.5 * (1.0 + root(aa1));
+    let w = 0.5 * (1.0 + root(bb1));
+    let a0 = 0.5 * (v + root(v * v + aa2));
+    let beta0 = 0.5 * (w + root(w * w + bb2));
+    let mut k = FeqBiquadCoefficients {
+        a1: (1.0 - v) / a0,
+        a2: -aa2 / (4.0 * a0 * a0),
+        b0: beta0 / a0,
+        b1: (1.0 - w) / a0,
+        b2: -bb2 / (4.0 * beta0 * a0),
+    };
+    if !high {
+        k.b0 *= cap_g;
+        k.b1 *= cap_g;
+        k.b2 *= cap_g;
     }
+    k
+}
 
-    let g_fourth = g.powf(0.25);
-    let (a1, a2) = matched_poles(omega / g_fourth, BUTTERWORTH_Q);
-    let (b_hat1, b_hat2) = matched_poles(omega * g_fourth, BUTTERWORTH_Q);
-
-    let (a0, a1_w, a2_w) = denominator_weights(a1, a2);
-    let (u0, u1, u2) = denominator_weights(b_hat1, b_hat2);
-
-    let phi_c = Phis::at(omega);
-    let phi_m = Phis::at((omega / g_fourth).min(PI * 0.99));
-
-    let num_c = phi_c.dot(u0, u1, u2);
-    let num_m = phi_m.dot(u0, u1, u2);
-    if num_c <= 0.0 || num_m <= 0.0 {
-        return (false, FeqBiquadCoefficients::default());
+/// Pure-Rust port of `feq_biquad_coefficients_matched` in `/native/dsp-core/src/biquad_matched.cpp` (lines 264–317).
+pub fn biquad_coefficients_matched_rust(
+    filter_type: FeqFilterType,
+    frequency: f64,
+    gain_db: f64,
+    quality: f64,
+    sample_rate: f64,
+) -> FeqBiquadCoefficients {
+    let cookbook = biquad_coefficients_cookbook(filter_type, frequency, gain_db, quality, sample_rate);
+    if !(sample_rate > 0.0) || !(frequency > 0.0) || !(quality > 0.0) {
+        return cookbook;
     }
-    let target_c = g * phi_c.dot(a0, a1_w, a2_w) / num_c;
-    let target_m = g.sqrt() * phi_m.dot(a0, a1_w, a2_w) / num_m;
+    let safe = frequency.min(sample_rate * 0.499);
+    let w0 = 2.0 * PI * safe / sample_rate;
+    let matched = match filter_type {
+        FeqFilterType::FEQ_FILTER_PK => matched_bell(w0, gain_db, quality),
+        FeqFilterType::FEQ_FILTER_LPQ => matched_low_pass(w0, quality),
+        FeqFilterType::FEQ_FILTER_HPQ => matched_high_pass(w0, quality),
+        FeqFilterType::FEQ_FILTER_BP => matched_band_pass(w0, quality),
+        FeqFilterType::FEQ_FILTER_LSC | FeqFilterType::FEQ_FILTER_HSC => {
+            if (quality - BUTTERWORTH_Q).abs() > BUTTERWORTH_TOLERANCE {
+                return cookbook;
+            }
+            let fc = frequency.min(2.0 * sample_rate) / (sample_rate / 2.0);
+            let mut s = matched_shelf(filter_type == FeqFilterType::FEQ_FILTER_HSC, fc, gain_db);
+            if gain_db == 0.0 {
+                s = unity_on(s.a1, s.a2);
+            }
+            s
+        }
+        FeqFilterType::FEQ_FILTER_NO => {
+            return cookbook;
+        }
+    };
 
-    let det = phi_c.p1 * phi_m.p2 - phi_c.p2 * phi_m.p1;
-    let k0 = g * g * a0 / u0.max(1e-30);
-    let mut k1 = target_c;
-    if det.abs() > 1e-24 {
-        let rhs_c = target_c - k0 * phi_c.p0;
-        let rhs_m = target_m - k0 * phi_m.p0;
-        k1 = (rhs_c * phi_m.p2 - rhs_m * phi_c.p2) / det;
+    let stable = matched.a2.abs() < 1.0 && matched.a1.abs() < 1.0 + matched.a2;
+    if is_finite_coeffs(&matched) && stable {
+        matched
+    } else {
+        cookbook
     }
-    if k0 < 0.0 || k1 < 0.0 {
-        return (false, FeqBiquadCoefficients::default());
-    }
-
-    let b0_w = k0 * u0;
-    let b1_w = k1 * u1;
-    let r_c = target_c * num_c;
-    let b2_w = (r_c - b0_w * phi_c.p0 - b1_w * phi_c.p1) / phi_c.p2.max(1e-30);
-
-    let sqrt_b0 = b0_w.max(0.0).sqrt();
-    let sqrt_b1 = b1_w.max(0.0).sqrt();
-    let w = 0.5 * (sqrt_b0 + sqrt_b1);
-    let disc = w * w + b2_w;
-    if disc < 0.0 {
-        return (false, FeqBiquadCoefficients::default());
-    }
-    let b0 = 0.5 * (w + disc.sqrt());
-    if b0 <= 1e-15 {
-        return (false, FeqBiquadCoefficients::default());
-    }
-    let mut b1 = 0.5 * (sqrt_b0 - sqrt_b1);
-    let mut b2 = -b2_w / (4.0 * b0);
-    let mut final_b0 = b0;
-
-    if high {
-        let scale = 1.0 / g;
-        final_b0 *= scale;
-        b1 *= scale;
-        b2 *= scale;
-    }
-
-    (
-        true,
-        FeqBiquadCoefficients {
-            b0: final_b0,
-            b1,
-            b2,
-            a1,
-            a2,
-        },
-    )
 }
 
 /// Exact port of `feq_biquad_coefficients_matched` in `/native/dsp-core/src/biquad_matched.cpp`.
@@ -497,67 +522,27 @@ pub fn biquad_coefficients_matched(
 
     #[cfg(not(feature = "link-cpp-core"))]
     {
-        if !sample_rate.is_finite()
-            || sample_rate <= 0.0
-            || !frequency.is_finite()
-            || frequency <= 0.0
-            || frequency >= sample_rate * 0.5
-            || !quality.is_finite()
-            || quality <= 0.0
-        {
-            return biquad_coefficients_cookbook(filter_type, frequency, gain_db, quality, sample_rate);
-        }
+        biquad_coefficients_matched_rust(filter_type, frequency, gain_db, quality, sample_rate)
+    }
+}
 
-        let omega = 2.0 * PI * frequency / sample_rate;
-        let result = match filter_type {
-            FeqFilterType::FEQ_FILTER_PK => matched_bell(omega, gain_db, quality),
-            FeqFilterType::FEQ_FILTER_LPQ => matched_low_pass(omega, quality),
-            FeqFilterType::FEQ_FILTER_HPQ => matched_high_pass(omega, quality),
-            FeqFilterType::FEQ_FILTER_BP => matched_band_pass(omega, quality),
-            FeqFilterType::FEQ_FILTER_LSC | FeqFilterType::FEQ_FILTER_HSC => {
-                if (quality - BUTTERWORTH_Q).abs() > BUTTERWORTH_TOLERANCE {
-                    return biquad_coefficients_cookbook(
-                        filter_type,
-                        frequency,
-                        gain_db,
-                        quality,
-                        sample_rate,
-                    );
-                }
-                let (ok, shelf) =
-                    matched_shelf(omega, gain_db, filter_type == FeqFilterType::FEQ_FILTER_HSC);
-                if !ok {
-                    return biquad_coefficients_cookbook(
-                        filter_type,
-                        frequency,
-                        gain_db,
-                        quality,
-                        sample_rate,
-                    );
-                }
-                shelf
-            }
-            FeqFilterType::FEQ_FILTER_NO => {
-                return biquad_coefficients_cookbook(
-                    filter_type,
-                    frequency,
-                    gain_db,
-                    quality,
-                    sample_rate,
-                );
-            }
-        };
-
-        let finite = result.b0.is_finite()
-            && result.b1.is_finite()
-            && result.b2.is_finite()
-            && result.a1.is_finite()
-            && result.a2.is_finite();
-        let stable = result.a2.abs() < 1.0 && result.a1.abs() < 1.0 + result.a2;
-        if !finite || !stable {
-            return biquad_coefficients_cookbook(filter_type, frequency, gain_db, quality, sample_rate);
-        }
-        result
+/// Pure-Rust port of `feq_biquad_coefficients_designed` in `/native/dsp-core/src/biquad.cpp`.
+pub fn biquad_coefficients_designed_rust(
+    filter_type: FeqFilterType,
+    frequency: f64,
+    gain_db: f64,
+    quality: f64,
+    sample_rate: f64,
+    model: FeqEqModel,
+    amount: f64,
+    matched: bool,
+) -> FeqBiquadCoefficients {
+    let _ = SHELF_BUTTERWORTH_TOLERANCE;
+    let q = modelled_quality(filter_type, gain_db, quality, model, amount);
+    if matched {
+        biquad_coefficients_matched_rust(filter_type, frequency, gain_db, q, sample_rate)
+    } else {
+        biquad_coefficients_cookbook(filter_type, frequency, gain_db, q, sample_rate)
     }
 }
 
@@ -586,14 +571,42 @@ pub fn biquad_coefficients_designed(
     }
     #[cfg(not(feature = "link-cpp-core"))]
     {
-        let _ = SHELF_BUTTERWORTH_TOLERANCE;
-        let q = modelled_quality(filter_type, gain_db, quality, model, amount);
-        if matched {
-            biquad_coefficients_matched(filter_type, frequency, gain_db, q, sample_rate)
-        } else {
-            biquad_coefficients_cookbook(filter_type, frequency, gain_db, q, sample_rate)
-        }
+        biquad_coefficients_designed_rust(
+            filter_type,
+            frequency,
+            gain_db,
+            quality,
+            sample_rate,
+            model,
+            amount,
+            matched,
+        )
     }
+}
+
+/// Pure-Rust port of `feq_biquad_process` in `/native/dsp-core/src/biquad.cpp`.
+pub fn biquad_process_rust(
+    state: &mut fluideq_dsp_sys::FeqBiquadState,
+    buffer: &mut [f32],
+    coeffs: &FeqBiquadCoefficients,
+) {
+    let mut x1 = state.x1;
+    let mut x2 = state.x2;
+    let mut y1 = state.y1;
+    let mut y2 = state.y2;
+    for sample in buffer.iter_mut() {
+        let x0 = f64::from(*sample);
+        let y0 = coeffs.b0 * x0 + coeffs.b1 * x1 + coeffs.b2 * x2 - coeffs.a1 * y1 - coeffs.a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        *sample = y0 as f32;
+    }
+    state.x1 = x1;
+    state.x2 = x2;
+    state.y1 = y1;
+    state.y2 = y2;
 }
 
 pub fn evaluate_biquad_magnitude_db(
@@ -642,3 +655,213 @@ pub fn compute_auto_preamp_db(coeffs_list: &[FeqBiquadCoefficients], sample_rate
         0.0
     }
 }
+
+/// 12-tap 4x polyphase Blackman-windowed sinc true-peak detector (`FeqTruePeak` in `/native/dsp-core/src/primitives.cpp`).
+#[derive(Debug, Clone)]
+pub struct TruePeakDetector {
+    factor: u32,
+    history: [f64; 12],
+    position: usize,
+    phases: [[f64; 12]; 4],
+}
+
+impl TruePeakDetector {
+    pub fn new(factor: u32) -> Self {
+        let factor = if matches!(factor, 1 | 2 | 4) { factor } else { 4 };
+        let mut phases = [[0.0_f64; 12]; 4];
+        let half = 6.0_f64;
+        for (phase, row) in phases.iter_mut().enumerate() {
+            let offset = (phase as f64) / 4.0;
+            let mut sum = 0.0_f64;
+            for (at, tap_slot) in row.iter_mut().enumerate() {
+                let x = (at as f64) - half + 1.0 - offset;
+                let sinc = if x == 0.0 {
+                    1.0
+                } else {
+                    (PI * x).sin() / (PI * x)
+                };
+                let t = (at as f64) / 11.0;
+                let window = 0.42 - 0.5 * (2.0 * PI * t).cos() + 0.08 * (4.0 * PI * t).cos();
+                let val = sinc * window;
+                *tap_slot = val;
+                sum += val;
+            }
+            for tap_slot in row.iter_mut() {
+                *tap_slot /= sum;
+            }
+        }
+        Self {
+            factor,
+            history: [0.0; 12],
+            position: 0,
+            phases,
+        }
+    }
+
+    pub fn process_sample(&mut self, sample: f64) -> f64 {
+        if self.factor == 1 {
+            return sample.abs();
+        }
+        self.history[self.position] = sample;
+        self.position = if self.position + 1 == 12 {
+            0
+        } else {
+            self.position + 1
+        };
+
+        let mut peak = 0.0_f64;
+        let phase_step = (4 / self.factor) as usize;
+        let mut phase = 0usize;
+        while phase < 4 {
+            let taps = &self.phases[phase];
+            let mut sum = 0.0_f64;
+            let mut tap = 0usize;
+            for read in self.position..12 {
+                sum += self.history[read] * taps[tap];
+                tap += 1;
+            }
+            let mut read = 0usize;
+            while tap < 12 {
+                sum += self.history[read] * taps[tap];
+                tap += 1;
+                read += 1;
+            }
+            let mag = sum.abs();
+            if mag > peak {
+                peak = mag;
+            }
+            phase += phase_step;
+        }
+        peak
+    }
+
+    pub fn process_block(&mut self, input: &[f32]) -> f64 {
+        let mut peak = 0.0_f64;
+        for &s in input {
+            let mag = self.process_sample(f64::from(s));
+            if mag > peak {
+                peak = mag;
+            }
+        }
+        peak
+    }
+}
+
+#[cfg(all(test, feature = "link-cpp-core"))]
+mod cpp_parity_tests {
+    use super::*;
+    use fluideq_dsp_sys::{
+        feq_biquad_coefficients_designed, feq_biquad_process, FeqBiquadState,
+    };
+
+    #[test]
+    fn biquad_designed_and_matched_coefficients_match_cpp_core_sample_for_sample() {
+        let filter_types = [
+            FeqFilterType::FEQ_FILTER_PK,
+            FeqFilterType::FEQ_FILTER_NO,
+            FeqFilterType::FEQ_FILTER_LSC,
+            FeqFilterType::FEQ_FILTER_HSC,
+            FeqFilterType::FEQ_FILTER_LPQ,
+            FeqFilterType::FEQ_FILTER_HPQ,
+            FeqFilterType::FEQ_FILTER_BP,
+        ];
+        let models = [
+            FeqEqModel::FEQ_EQ_MODEL_CLEAN,
+            FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL,
+            FeqEqModel::FEQ_EQ_MODEL_WIDE,
+            FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
+        ];
+        let frequencies = [60.0, 440.0, 2500.0, 12_000.0, 18_500.0];
+        let gains = [-12.0, -3.5, 0.0, 4.5, 12.0];
+        let qualities = [0.5, 0.70710678, 1.414, 4.0];
+
+        for &ft in &filter_types {
+            for &model in &models {
+                for &matched in &[false, true] {
+                    for &freq in &frequencies {
+                        for &gain in &gains {
+                            for &q in &qualities {
+                                let rust_c = biquad_coefficients_designed_rust(
+                                    ft, freq, gain, q, 48_000.0, model, 0.75, matched,
+                                );
+                                let cpp_c = unsafe {
+                                    feq_biquad_coefficients_designed(
+                                        ft,
+                                        freq,
+                                        gain,
+                                        q,
+                                        48_000.0,
+                                        model,
+                                        0.75,
+                                        if matched { 1 } else { 0 },
+                                    )
+                                };
+                                let diff = (rust_c.b0 - cpp_c.b0)
+                                    .abs()
+                                    .max((rust_c.b1 - cpp_c.b1).abs())
+                                    .max((rust_c.b2 - cpp_c.b2).abs())
+                                    .max((rust_c.a1 - cpp_c.a1).abs())
+                                    .max((rust_c.a2 - cpp_c.a2).abs());
+                                assert!(
+                                    diff < 1e-11,
+                                    "Coefficient mismatch for {:?} {:?} matched={} freq={} gain={} q={}: rust={:?} cpp={:?} diff={}",
+                                    ft,
+                                    model,
+                                    matched,
+                                    freq,
+                                    gain,
+                                    q,
+                                    rust_c,
+                                    cpp_c,
+                                    diff
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also verify sample-for-sample biquad_process_rust parity against C++ feq_biquad_process
+        let coeffs = biquad_coefficients_designed_rust(
+            FeqFilterType::FEQ_FILTER_PK,
+            3200.0,
+            6.5,
+            1.8,
+            48_000.0,
+            FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
+            1.0,
+            true,
+        );
+        let mut rust_buf = vec![0.0_f32; 512];
+        for (i, s) in rust_buf.iter_mut().enumerate() {
+            let t = (i as f32) / 48_000.0;
+            *s = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+                + 0.3 * (2.0 * std::f32::consts::PI * 3200.0 * t).cos();
+        }
+        let mut cpp_buf = rust_buf.clone();
+        let mut rust_state = FeqBiquadState::default();
+        let mut cpp_state = FeqBiquadState::default();
+        biquad_process_rust(&mut rust_state, &mut rust_buf, &coeffs);
+        unsafe {
+            feq_biquad_process(
+                &mut cpp_state,
+                cpp_buf.as_mut_ptr(),
+                cpp_buf.len() as u32,
+                &coeffs,
+            );
+        }
+        for i in 0..rust_buf.len() {
+            assert!(
+                (rust_buf[i] - cpp_buf[i]).abs() <= 1e-7,
+                "Sample mismatch at {}: rust={} cpp={}",
+                i,
+                rust_buf[i],
+                cpp_buf[i]
+            );
+        }
+    }
+}
+
+
+

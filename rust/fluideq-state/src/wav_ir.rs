@@ -704,6 +704,209 @@ impl MediaFoundationPacketBuffer {
     }
 }
 
+// ============================================================================
+// System-APO Strict Bounds-Checked `Convolution:` WAVE Reader (`wav.h` & `wav.cpp`)
+// ============================================================================
+
+/// The largest `Convolution:` file `system-apo` will touch: 64 MiB (`kMaxWavBytes = 64u * 1024u * 1024u` in `wav.h`).
+pub const MAX_APO_WAV_BYTES: usize = 64 * 1024 * 1024;
+
+/// Decoded mono `Convolution:` impulse response (`fluideq_engine::WavData` in `/native/system-apo/src/wav.h`).
+/// First channel only; channels past 0 are silently dropped rather than mixed so the measured impulse is never altered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApoWavData {
+    pub sample_rate: u32,
+    pub mono: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ApoWavFormatInfo {
+    format_tag: u16,
+    channels: u16,
+    sample_rate: u32,
+    bits_per_sample: u16,
+}
+
+fn apo_read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    if offset.checked_add(2)? > bytes.len() {
+        return None;
+    }
+    Some(u16::from_le_bytes([bytes[offset], bytes[offset + 1]]))
+}
+
+fn apo_read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    if offset.checked_add(4)? > bytes.len() {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]))
+}
+
+fn parse_apo_fmt_chunk(bytes: &[u8], data_start: usize, chunk_size: u32) -> Option<ApoWavFormatInfo> {
+    if chunk_size < 16 {
+        return None;
+    }
+    let tag = apo_read_u16(bytes, data_start)?;
+    let channels = apo_read_u16(bytes, data_start + 2)?;
+    let sample_rate = apo_read_u32(bytes, data_start + 4)?;
+    let bits = apo_read_u16(bytes, data_start + 14)?;
+    let mut resolved_tag = tag;
+    if resolved_tag == WAVE_FORMAT_EXTENSIBLE {
+        if chunk_size < 40 {
+            return None;
+        }
+        let sub_format = apo_read_u16(bytes, data_start + 24)?;
+        if sub_format != WAVE_FORMAT_PCM && sub_format != WAVE_FORMAT_IEEE_FLOAT {
+            return None;
+        }
+        resolved_tag = sub_format;
+    } else if resolved_tag != WAVE_FORMAT_PCM && resolved_tag != WAVE_FORMAT_IEEE_FLOAT {
+        return None;
+    }
+    Some(ApoWavFormatInfo {
+        format_tag: resolved_tag,
+        channels,
+        sample_rate,
+        bits_per_sample: bits,
+    })
+}
+
+fn apo_read_sample(bytes: &[u8], offset: usize, format_tag: u16, bits_per_sample: u16) -> f32 {
+    if format_tag == WAVE_FORMAT_IEEE_FLOAT {
+        if bits_per_sample == 32 {
+            return f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]);
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&bytes[offset..offset + 8]);
+        return f64::from_le_bytes(raw) as f32;
+    }
+    if bits_per_sample == 8 {
+        return ((bytes[offset] as f32) - 128.0) / 128.0;
+    }
+    if bits_per_sample == 16 {
+        let signed = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        return (signed as f32) / 32_768.0;
+    }
+    if bits_per_sample == 24 {
+        let mut raw = (bytes[offset] as u32)
+            | ((bytes[offset + 1] as u32) << 8)
+            | ((bytes[offset + 2] as u32) << 16);
+        if (raw & 0x0080_0000) != 0 {
+            raw |= 0xFF00_0000;
+        }
+        let signed = raw as i32;
+        return (signed as f32) / 8_388_608.0;
+    }
+    let signed = i32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]);
+    (signed as f32) / 2_147_483_648.0
+}
+
+/// Exact 1:1 port of `fluideq_engine::parse_wav` in `/native/system-apo/src/wav.cpp`:
+/// - Enforces `12 <= bytes.len() <= MAX_APO_WAV_BYTES` (64 MiB).
+/// - Refuses any chunk whose declared `chunk_size > MAX_APO_WAV_BYTES` or `chunk_size > size - chunk_data`
+///   (never clamping truncated `data` chunks).
+/// - Enforces `1 <= channels <= 8` and `sample_rate > 0`.
+/// - Extracts channel 0 into `ApoWavData::mono` (including `0`-frame `data` chunks so `load_impulse`
+///   can log `"Convolution file has no samples"`).
+pub fn parse_apo_wav(bytes: &[u8]) -> Option<ApoWavData> {
+    let size = bytes.len();
+    if size < 12 || size > MAX_APO_WAV_BYTES {
+        return None;
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut format: Option<ApoWavFormatInfo> = None;
+    let mut data_offset = 0usize;
+    let mut data_size = 0u32;
+    let mut have_data = false;
+
+    let mut pos = 12usize;
+    while pos + 8 <= size {
+        let id = &bytes[pos..pos + 4];
+        let chunk_size = apo_read_u32(bytes, pos + 4)?;
+        let chunk_data = pos + 8;
+        if (chunk_size as usize) > MAX_APO_WAV_BYTES {
+            return None;
+        }
+        if (chunk_size as usize) > size - chunk_data {
+            return None;
+        }
+        if id == b"fmt " {
+            format = Some(parse_apo_fmt_chunk(bytes, chunk_data, chunk_size)?);
+        } else if id == b"data" {
+            data_offset = chunk_data;
+            data_size = chunk_size;
+            have_data = true;
+        }
+        let advance = (chunk_size as usize) + ((chunk_size as usize) & 1);
+        pos = chunk_data.checked_add(advance)?;
+    }
+
+    let fmt = format?;
+    if !have_data || fmt.channels < 1 || fmt.channels > 8 || fmt.sample_rate == 0 {
+        return None;
+    }
+    let bits_valid = if fmt.format_tag == WAVE_FORMAT_IEEE_FLOAT {
+        fmt.bits_per_sample == 32 || fmt.bits_per_sample == 64
+    } else {
+        matches!(fmt.bits_per_sample, 8 | 16 | 24 | 32)
+    };
+    if !bits_valid {
+        return None;
+    }
+
+    let bytes_per_sample = u32::from(fmt.bits_per_sample / 8);
+    let block_align = u32::from(fmt.channels) * bytes_per_sample;
+    let frame_count = (data_size / block_align) as usize;
+
+    let mut mono = Vec::with_capacity(frame_count);
+    for frame in 0..frame_count {
+        let offset = data_offset + frame * (block_align as usize);
+        mono.push(apo_read_sample(
+            bytes,
+            offset,
+            fmt.format_tag,
+            fmt.bits_per_sample,
+        ));
+    }
+
+    Some(ApoWavData {
+        sample_rate: fmt.sample_rate,
+        mono,
+    })
+}
+
+/// Exact 1:1 port of `fluideq_engine::read_wav` in `/native/system-apo/src/wav.cpp`:
+/// Checks file size on disk (`1..=MAX_APO_WAV_BYTES`) before reading into memory and passing to `parse_apo_wav`.
+pub fn read_apo_wav(path: &std::path::Path) -> Option<ApoWavData> {
+    let meta = std::fs::metadata(path).ok()?;
+    let len = meta.len();
+    if len == 0 || len > (MAX_APO_WAV_BYTES as u64) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as u64 != len {
+        return None;
+    }
+    parse_apo_wav(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,6 +923,14 @@ mod tests {
         assert_eq!(ir.frames, 2);
         assert_eq!(ir.left, vec![1.0, -0.25]);
         assert_eq!(ir.right, vec![0.5, 0.125]);
+
+        // Verify `parse_apo_wav` extracts channel 0 only and refuses truncated chunks
+        let apo = parse_apo_wav(&wav).expect("parse_apo_wav should accept valid stereo float wav");
+        assert_eq!(apo.sample_rate, 48_000);
+        assert_eq!(apo.mono, vec![1.0, -0.25]);
+
+        // Truncating 1 byte off the end makes the declared `data` chunk run past the buffer -> refused
+        assert!(parse_apo_wav(&wav[..wav.len() - 1]).is_none());
     }
 
     #[test]
@@ -799,4 +1010,5 @@ mod tests {
         assert_eq!(mf.available_pending_frames(), 0);
     }
 }
+
 

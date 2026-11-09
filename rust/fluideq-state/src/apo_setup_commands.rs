@@ -31,12 +31,12 @@ use crate::apo::{
     FX_LEGACY_COUNT, FX_SLOT_COUNT,
 };
 use crate::apo_setup_registry::{
-    apo_off_endpoints_on_disk, apo_record_present, backup_exists_on_disk, enable_unsigned_effects,
-    endpoint_is_combined, endpoint_key_exists, json_escape, load_apo_off_from_disk,
-    load_backup_from_disk, read_fx_values, register_engine, registered_dll_path,
-    remove_apo_off_on_disk, remove_backup_on_disk, save_apo_off_once_on_disk,
+    apo_off_endpoints_on_disk, apo_record_present, backup_exists_on_disk, decode_sz,
+    enable_unsigned_effects, endpoint_is_combined, endpoint_key_exists, json_escape,
+    load_apo_off_from_disk, load_backup_from_disk, read_fx_values, register_engine,
+    registered_dll_path, remove_apo_off_on_disk, remove_backup_on_disk, save_apo_off_once_on_disk,
     save_backup_once_on_disk, unregister_engine, unsigned_effects_enabled, write_fx_values,
-    decode_sz, RegistryBackend, ENGINE_CLSID_UPPER, REG_SZ_TYPE,
+    RegistryBackend, ENGINE_CLSID_UPPER, REG_EXPAND_SZ_TYPE, REG_SZ_TYPE,
 };
 use crate::apo_setup_services_and_fs::{
     apply_config_acl, apply_engine_acl, apply_log_acl, apply_read_only_acl, describe_error,
@@ -1389,7 +1389,11 @@ pub fn engine_has_run(paths: &SetupPaths) -> bool {
 pub fn registered_class_name<R: RegistryBackend>(reg: &R, clsid: &str) -> String {
     let path = format!("SOFTWARE\\Classes\\CLSID\\{}", clsid);
     match reg.query_value(&path, "") {
-        Ok(Some(raw)) if raw.value_type == REG_SZ_TYPE => decode_sz(&raw.bytes),
+        Ok(Some(raw))
+            if raw.value_type == REG_SZ_TYPE || raw.value_type == REG_EXPAND_SZ_TYPE =>
+        {
+            decode_sz(&raw.bytes)
+        }
         _ => String::new(),
     }
 }

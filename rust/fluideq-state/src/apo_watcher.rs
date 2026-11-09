@@ -22,15 +22,16 @@ use crate::apo_analysis_and_status::{
     StatusShare, SOURCE_ANALYSIS_FILE,
 };
 use crate::apo_engine_runtime::{
-    endpoint_config_name, parse_programme, read_apo_config_file_bounded, signature_of_chain,
-    BlockLoadReport, EngineStatusReport, FinishedSongStatus, SignatureChainInput,
-    SourceAnalysisStatusReport, SplitStatusReport,
+    endpoint_config_name, parse_programme, read_apo_config_file_bounded,
+    resolve_apo_endpoint_chain_from_dir, signature_of_chain, BlockLoadReport, EngineStatusReport,
+    FinishedSongStatus, SignatureBand, SignatureChainInput, SourceAnalysisStatusReport,
+    SplitStatusReport,
 };
 use crate::apo_graph_and_guard::{
     describe_timing, judge_level_prediction, timing_step, InputHistory, LevelMailbox,
     LevelPrediction, LevelPredictionJudgement, LEVEL_HISTORY_SECONDS,
 };
-use crate::apo_split_and_leveling::EndpointLevelingCoordinator;
+pub use crate::apo_split_and_leveling::{sha256_digest, EndpointLevelingCoordinator};
 use crate::apo_split_tap_and_reader::{SplitReport, SplitState};
 use crate::chain_wire::decode_chain_settings_wire;
 use crate::room_heads::RoomHeadBank;
@@ -668,10 +669,10 @@ impl ApoWatcher {
     ) -> Self {
         let guid = endpoint_guid.into();
         let dir = config_dir.into();
-        let status_path = Path::new(&dir)
+        let status_root = Path::new(&dir)
             .parent()
             .unwrap_or_else(|| Path::new(&dir))
-            .join("status.json");
+            .to_path_buf();
         Self {
             slot,
             log,
@@ -683,7 +684,11 @@ impl ApoWatcher {
             max_frames: max_frames.max(1),
             channel_mask,
             default_mode,
-            leveling: Some(EndpointLevelingCoordinator::new(&guid)),
+            leveling: if guid.is_empty() {
+                None
+            } else {
+                Some(EndpointLevelingCoordinator::new())
+            },
             history: None,
             accepted_chain: None,
             accepted_heard_frames: 0,
@@ -723,7 +728,7 @@ impl ApoWatcher {
             unwatched: false,
             split_report: None,
             split_transport_failed: false,
-            status_share: StatusShare::with_root(status_path),
+            status_share: StatusShare::with_root(status_root),
             status_failure_logged: false,
             timing_step_logged: 0,
             stop_event: AtomicBool::new(false),
@@ -1013,26 +1018,74 @@ impl ApoWatcher {
             return SignatureChainInput::default();
         }
         let dir = Path::new(&self.config_dir);
-        let mut chain = SignatureChainInput::default();
-        let config_path = dir.join("config.txt");
-        if read_apo_config_file_bounded(&config_path).is_some() {
-            chain.files_read.push(config_path.to_string_lossy().into_owned());
-            chain.matched = true;
-        }
-        if let Some(dsp_file) = endpoint_config_name("fluideq-dsp", &self.endpoint_guid) {
-            let dsp_path = dir.join(&dsp_file);
-            if let Some(text) = read_apo_config_file_bounded(&dsp_path) {
-                chain.files_read.push(dsp_path.to_string_lossy().into_owned());
-                for tok in text.split_whitespace() {
-                    if let Ok(v) = tok.parse::<f64>() {
-                        if v.is_finite() {
-                            chain.dsp_values.push(v);
-                        }
-                    }
-                }
+        let Some(resolved) = resolve_apo_endpoint_chain_from_dir(
+            dir,
+            "config.txt",
+            &self.endpoint_guid,
+            &self.endpoint_name,
+        ) else {
+            return SignatureChainInput::default();
+        };
+
+        let convolution_stamp = if resolved.convolution_path.is_empty() {
+            String::new()
+        } else {
+            let conv_path = Path::new(&resolved.convolution_path);
+            let full_conv = if conv_path.is_absolute() {
+                conv_path.to_path_buf()
+            } else {
+                dir.join(conv_path)
+            };
+            match file_stamp(&full_conv) {
+                Some((size, mtime)) => format!(
+                    "{}:{}:{}:{}",
+                    (size >> 32) as u32,
+                    size as u32,
+                    (mtime >> 32) as u32,
+                    mtime as u32
+                ),
+                None => "-".to_string(),
             }
+        };
+
+        let bands = resolved
+            .apo_bands
+            .into_iter()
+            .map(|b| SignatureBand {
+                filter_type: b.spec.filter_type as i32,
+                frequency: b.spec.frequency,
+                gain_db: b.spec.gain_db,
+                quality: b.spec.quality,
+                user_eq: b.user_eq,
+                curve_layer: b.curve_layer,
+                matched: b.matched,
+                channels_all: b.channels.all,
+                channels_speakers: b.channels.speakers,
+                channels_indices: b.channels.indices,
+            })
+            .collect();
+
+        SignatureChainInput {
+            matched: resolved.matched,
+            convolution_path: resolved.convolution_path,
+            convolution_passes: resolved.convolution_passes as i32,
+            convolution_stamp,
+            preamp_db: resolved.preamp_db,
+            output_guard: resolved.output_guard,
+            auto_preamp: resolved.auto_preamp,
+            auto_preamp_start_db: resolved.auto_preamp_start_db,
+            stable_graphic: resolved.stable_graphic,
+            low_latency: resolved.low_latency,
+            minimum_curve_phase: resolved.minimum_curve_phase,
+            minimum_eq_phase: resolved.minimum_eq_phase,
+            eq_graphic_curves: resolved.eq_graphic_curves,
+            comparison_curves: resolved.comparison_curves,
+            bands,
+            graphic_curves: resolved.graphic_curves,
+            files_read: resolved.files_read,
+            ignored: resolved.ignored,
+            dsp_values: resolved.dsp_values,
         }
-        chain
     }
 
     /// Exact port of `Watcher::load_chain()` in `/native/system-apo/src/watcher_load.cpp`:
@@ -1378,6 +1431,9 @@ impl ApoWatcher {
 
     /// Exact port of `Watcher::log_timing()` in `/native/system-apo/src/watcher_log.cpp`.
     pub fn log_timing(&mut self) {
+        if self.endpoint_guid.is_empty() {
+            return;
+        }
         let timing = output_block_timing(&self.endpoint_guid);
         let reading = timing.read();
         let step = timing_step(reading.slowest_permille);
@@ -1452,7 +1508,8 @@ impl ApoWatcher {
             if self.split_transport_failed {
                 status.problems.push("split-transport".to_string());
             }
-            status.carried = output_carried_flag(&self.endpoint_guid).load(Ordering::Relaxed);
+            let carried = output_carried_flag(&self.endpoint_guid);
+            status.carried = carried.load(Ordering::Relaxed);
             let timing = output_block_timing(&self.endpoint_guid);
             let reading = timing.read();
             if reading.blocks > 0 {
@@ -1526,7 +1583,7 @@ impl ApoWatcher {
             .as_deref()
             .map(parse_programme)
             .unwrap_or_default();
-        leveling.announce(&programme, None)
+        leveling.announce(&programme)
     }
 
     /// Exact port of `Watcher::follow_split(bool owner)` in `/native/system-apo/src/watcher_log.cpp`.
@@ -1752,10 +1809,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let slot = Arc::new(GraphSlot::new());
-        let log = EngineLog::with_path(
-            temp_dir.join("engine.log").to_string_lossy().into_owned(),
-            "{11111111-2222-3333-4444-555555555555}",
-        );
+        let log = EngineLog::new(temp_dir.join("engine.log"), "{11111111-2222-3333-4444-555555555555}");
         let mut watcher = ApoWatcher::new(
             slot.clone(),
             log,

@@ -40,7 +40,6 @@ pub struct MemoryFootprintEstimate {
     pub meters_fft_enabled: bool,
     pub spectrum_target_fps: u32,
     pub online_media_protected: bool,
-    pub online_media_playing: bool,
     pub minimized_elapsed_ms: u64,
 }
 
@@ -184,9 +183,7 @@ impl ColdResidencyController {
             total_estimated_mb,
             meters_fft_enabled: self.should_enable_native_meters(),
             spectrum_target_fps: self.target_spectrum_fps(),
-            online_media_protected: self.online_media_playing
-                && self.mode == WindowResidencyMode::MinimizedWarm,
-            online_media_playing: self.online_media_playing,
+            online_media_protected: self.online_media_playing,
             minimized_elapsed_ms: self.minimized_elapsed_ms,
         }
     }
@@ -298,14 +295,99 @@ impl ResidencySystemHooks for NativeResidencyHookBridge {
     fn trim_process_working_set(&mut self) -> Result<u64, String> {
         self.actions
             .push(ResidencyHookAction::TrimProcessWorkingSet);
+        #[cfg(target_os = "windows")]
+        {
+            let _ = win32_residency_ffi::trim_current_process_working_set_win32();
+        }
         let ws = query_current_process_working_set_bytes().unwrap_or(12 * 1024 * 1024);
         self.last_working_set_bytes = ws;
         Ok(ws)
     }
 }
 
+#[cfg(target_os = "windows")]
+pub mod win32_residency_ffi {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct ProcessMemoryCountersEx {
+        pub cb: u32,
+        pub page_fault_count: u32,
+        pub peak_working_set_size: usize,
+        pub working_set_size: usize,
+        pub quota_peak_paged_pool_usage: usize,
+        pub quota_paged_pool_usage: usize,
+        pub quota_peak_non_paged_pool_usage: usize,
+        pub quota_non_paged_pool_usage: usize,
+        pub pagefile_usage: usize,
+        pub peak_pagefile_usage: usize,
+        pub private_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetCurrentProcess() -> *mut c_void;
+        pub fn K32EmptyWorkingSet(h_process: *mut c_void) -> i32;
+        pub fn SetProcessWorkingSetSizeEx(
+            h_process: *mut c_void,
+            dw_minimum_working_set_size: usize,
+            dw_maximum_working_set_size: usize,
+            flags: u32,
+        ) -> i32;
+        pub fn K32GetProcessMemoryInfo(
+            process: *mut c_void,
+            ppsmem_counters: *mut ProcessMemoryCountersEx,
+            cb: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        pub fn DestroyWindow(hwnd: *mut c_void) -> i32;
+        pub fn ShowWindow(hwnd: *mut c_void, n_cmd_show: i32) -> i32;
+        pub fn PostMessageW(hwnd: *mut c_void, msg: u32, w_param: usize, l_param: isize) -> i32;
+    }
+
+    pub const WM_CLOSE: u32 = 0x0010;
+    pub const SW_HIDE: i32 = 0;
+    pub const SW_SHOW: i32 = 5;
+
+    /// Reclaims physical RAM pages from the current process working set via `K32EmptyWorkingSet`
+    /// and `SetProcessWorkingSetSizeEx(..., SIZE_MAX, SIZE_MAX, 0)`.
+    pub fn trim_current_process_working_set_win32() -> bool {
+        unsafe {
+            let proc_handle = GetCurrentProcess();
+            let emptied = K32EmptyWorkingSet(proc_handle) != 0;
+            let trimmed =
+                SetProcessWorkingSetSizeEx(proc_handle, usize::MAX, usize::MAX, 0) != 0;
+            emptied || trimmed
+        }
+    }
+
+    /// Queries the current process working set and private commit bytes via `K32GetProcessMemoryInfo`.
+    pub fn query_current_process_working_set_win32() -> Option<u64> {
+        unsafe {
+            let mut counters = ProcessMemoryCountersEx {
+                cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+                ..Default::default()
+            };
+            let ok = K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                &mut counters as *mut ProcessMemoryCountersEx,
+                counters.cb,
+            );
+            if ok != 0 {
+                Some(counters.working_set_size as u64)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Reads the current process resident working set in bytes from `/proc/self/statm` on Linux,
-/// or returns `None` when the OS pseudo-filesystem is unavailable.
+/// `K32GetProcessMemoryInfo` on Windows, or returns `None` when unavailable.
 pub fn query_current_process_working_set_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -315,7 +397,11 @@ pub fn query_current_process_working_set_bytes() -> Option<u64> {
         let resident_pages: u64 = parts.next()?.parse().ok()?;
         Some(resident_pages.saturating_mul(4096))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        win32_residency_ffi::query_current_process_working_set_win32()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         None
     }

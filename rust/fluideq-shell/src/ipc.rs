@@ -12,11 +12,12 @@ use fluideq_state::{
         default_slot_for, plan_attach, plan_detach, plan_mode_in_place, ApoSlot, EndpointFxPlan,
         EndpointFxValues, FLUID_ENGINE_APO_CLSID,
     },
+    biquad::EqBandSpec,
     deck_transport::DeckLoadOutcome,
     models::PitchEstimate,
     residency::MemoryFootprintEstimate,
     wav_ir::DecodedImpulseResponse,
-    AppStateSnapshot, AppStateStore,
+    AppStateSnapshot, AppStateStore, ToneSettings,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -30,6 +31,15 @@ pub enum ShellIpcCommand {
         frequency: f64,
         gain_db: f64,
         quality: f64,
+    },
+    SetEqBandsAndConfig {
+        bands: Vec<EqBandSpec>,
+        eq_model: String,
+        matched_treble: bool,
+        master_power: bool,
+        auto_headroom: bool,
+        manual_preamp_db: f64,
+        tone: ToneSettings,
     },
     UpdateChainSettings(FeqChainSettings),
     ExportWireParameters,
@@ -61,12 +71,12 @@ pub enum ShellIpcCommand {
         requested_slot: Option<ApoSlot>,
         pre_win81: bool,
     },
+    PlanApoModeInPlace {
+        current: EndpointFxValues,
+    },
     PlanApoEndpointDetach {
         current: EndpointFxValues,
         backup: EndpointFxValues,
-    },
-    PlanApoModeInPlace {
-        current: EndpointFxValues,
     },
     LoadVoiceDenoiseModel {
         model_path: String,
@@ -156,6 +166,23 @@ pub fn dispatch_ipc_command(
             store.update_band_gain(band_id, frequency, gain_db, quality);
             ShellIpcResponse::Snapshot(store.snapshot())
         }
+        ShellIpcCommand::SetEqBandsAndConfig {
+            bands,
+            eq_model,
+            matched_treble,
+            master_power,
+            auto_headroom,
+            manual_preamp_db,
+            tone,
+        } => ShellIpcResponse::Snapshot(store.set_eq_bands_and_config(
+            bands,
+            &eq_model,
+            matched_treble,
+            master_power,
+            auto_headroom,
+            manual_preamp_db,
+            tone,
+        )),
         ShellIpcCommand::UpdateChainSettings(settings) => {
             store.update_chain_settings(settings);
             ShellIpcResponse::Snapshot(store.snapshot())
@@ -278,7 +305,8 @@ pub fn dispatch_ipc_command(
             ShellIpcResponse::Residency(store.tick_minimized_idle(delta_ms))
         }
         ShellIpcCommand::EnterColdStandby => {
-            ShellIpcResponse::Residency(store.enter_cold_standby())
+            store.enter_cold_standby();
+            ShellIpcResponse::Snapshot(store.snapshot())
         }
         ShellIpcCommand::WakeFromColdStandby => {
             ShellIpcResponse::Snapshot(store.wake_to_active())

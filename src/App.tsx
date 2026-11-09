@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildToneBands,
   computeAutoPreampDb,
@@ -57,6 +57,36 @@ type EqSubTabId =
   | 'convolution'
   | 'game-presets'
   | 'config';
+
+interface NativeResidencyEstimate {
+  residency_mode: 'Active' | 'MinimizedWarm' | 'ColdStandby';
+  cpp_dsp_core_mb: number;
+  rust_state_and_shell_mb: number;
+  webview_ui_and_canvas_mb: number;
+  total_estimated_mb: number;
+  meters_fft_enabled: boolean;
+  spectrum_target_fps: number;
+}
+
+interface NativeEngineSnapshot {
+  revision: number;
+  master_power: boolean;
+  auto_headroom: boolean;
+  preamp_db: number;
+  auto_preamp_db: number;
+  active_preset_name: string;
+  active_device_guid: string | null;
+  active_device_name: string | null;
+  eq_model: string;
+  eq_model_amount: number;
+  matched_treble: boolean;
+  eq_curve_db: number[];
+  native_abi_version: string;
+  native_active_stages: number;
+  native_latency_frames: number;
+  native_working_set_bytes: number;
+  residency: NativeResidencyEstimate;
+}
 
 export function App() {
   // Navigation state
@@ -154,7 +184,101 @@ export function App() {
 
   const { toneBands, cutBands } = useMemo(() => buildToneBands(tone), [tone]);
 
-  const eqCurveDb = useMemo(
+  const [nativeSnapshot, setNativeSnapshot] = useState<NativeEngineSnapshot | null>(null);
+  const initialHydratedRef = useRef<boolean>(false);
+
+  const postNativeIpc = useCallback(
+    async (cmd: string, payload?: Record<string, unknown>) => {
+      try {
+        const res = await fetch('/api/engine/ipc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload !== undefined ? { cmd, payload } : { cmd }),
+        });
+        if (!res.ok) return;
+        const parsed = (await res.json()) as {
+          kind?: string;
+          data?: Record<string, unknown>;
+        };
+        if (parsed.kind === 'Snapshot' && parsed.data) {
+          setNativeSnapshot(parsed.data as unknown as NativeEngineSnapshot);
+        } else if (
+          parsed.kind === 'OpraCurveApplied' &&
+          parsed.data &&
+          typeof parsed.data === 'object' &&
+          'snapshot' in parsed.data
+        ) {
+          setNativeSnapshot(
+            parsed.data.snapshot as unknown as NativeEngineSnapshot,
+          );
+        }
+      } catch {
+        // Fallback to local TypeScript evaluation if backend IPC is unreachable
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/engine/snapshot')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((parsed: { kind?: string; data?: NativeEngineSnapshot } | null) => {
+        if (active && parsed?.kind === 'Snapshot' && parsed.data) {
+          setNativeSnapshot(parsed.data);
+          initialHydratedRef.current = true;
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!initialHydratedRef.current) return;
+    const nativeBands = bands.map((b, idx) => ({
+      id: idx + 1,
+      enabled: b.enabled,
+      filter_type: b.type,
+      frequency: b.frequency,
+      gain_db: b.gainDb,
+      quality: b.q,
+      dynamic: false,
+      threshold_db: -18.0,
+      ear: b.ear === 'left' ? 1 : b.ear === 'right' ? 2 : 0,
+    }));
+    const nativeTone = {
+      bass_db: tone.bassDb,
+      bass_freq_hz: 105.0,
+      bass_q: 0.7071,
+      treble_db: tone.trebleDb,
+      treble_freq_hz: 8500.0,
+      treble_q: 0.7071,
+      low_cut_hz: tone.lowCutSlope === 0 ? 10.0 : tone.lowCutSlope === 12 ? 22.0 : 30.0,
+      high_cut_hz: tone.highCutSlope === 0 ? 24000.0 : tone.highCutSlope === 12 ? 19500.0 : 18500.0,
+    };
+    void postNativeIpc('SetEqBandsAndConfig', {
+      bands: nativeBands,
+      eq_model: eqModel,
+      matched_treble: trebleMode === 'precise',
+      master_power: systemEqEnabled,
+      auto_headroom: autoNormalize,
+      manual_preamp_db: manualPreampDb,
+      tone: nativeTone,
+    });
+  }, [
+    bands,
+    eqModel,
+    trebleMode,
+    systemEqEnabled,
+    autoNormalize,
+    manualPreampDb,
+    tone,
+    postNativeIpc,
+  ]);
+
+  const localEqCurveDb = useMemo(
     () =>
       evaluateBandCascadeDb(
         bands,
@@ -167,6 +291,17 @@ export function App() {
       ),
     [bands, freqGrid, sampleRate, eqModel, trebleMode],
   );
+
+  const eqCurveDb = useMemo(() => {
+    if (
+      nativeSnapshot &&
+      Array.isArray(nativeSnapshot.eq_curve_db) &&
+      nativeSnapshot.eq_curve_db.length === freqGrid.length
+    ) {
+      return nativeSnapshot.eq_curve_db;
+    }
+    return localEqCurveDb;
+  }, [nativeSnapshot, localEqCurveDb, freqGrid.length]);
 
   const toneCurveDb = useMemo(
     () =>
@@ -250,9 +385,43 @@ export function App() {
   );
 
   const effectivePreampDb = autoNormalize ? computedPreampDb : manualPreampDb;
-  const residencyProfile = useMemo(
-    () => computeResidencyProfile(residencyMode, isPlaying),
-    [residencyMode, isPlaying],
+  const residencyProfile = useMemo(() => {
+    const fallback = computeResidencyProfile(residencyMode, isPlaying);
+    if (!nativeSnapshot?.residency) {
+      return fallback;
+    }
+    return {
+      mode: residencyMode,
+      cppDspCoreMb: Number(nativeSnapshot.residency.cpp_dsp_core_mb.toFixed(1)),
+      rustStateMb: Number(nativeSnapshot.residency.rust_state_and_shell_mb.toFixed(1)),
+      webviewUiMb: Number(nativeSnapshot.residency.webview_ui_and_canvas_mb.toFixed(1)),
+      totalMb: Number(nativeSnapshot.residency.total_estimated_mb.toFixed(1)),
+      targetFps: nativeSnapshot.residency.spectrum_target_fps as 0 | 60,
+    };
+  }, [residencyMode, isPlaying, nativeSnapshot]);
+
+  const toggleResidencyMode = useCallback(
+    (nextMode: WindowResidencyMode) => {
+      setResidencyMode(nextMode);
+      void postNativeIpc(
+        nextMode === 'cold-standby' ? 'EnterColdStandby' : 'WakeFromColdStandby',
+      );
+    },
+    [postNativeIpc],
+  );
+
+  const selectOutputEndpoint = useCallback(
+    (nextId: string) => {
+      setActiveOutputId(nextId);
+      const found = outputs.find((o) => o.id === nextId);
+      if (found) {
+        void postNativeIpc('SwitchOutputDevice', {
+          guid: found.id,
+          name: found.name,
+        });
+      }
+    },
+    [outputs, postNativeIpc],
   );
 
   const updateBand = (index: number, patch: Partial<EqBand>) => {
@@ -441,8 +610,8 @@ export function App() {
           <button
             type="button"
             onClick={() =>
-              setResidencyMode((prev) =>
-                prev === 'cold-standby' ? 'active' : 'cold-standby',
+              toggleResidencyMode(
+                residencyMode === 'cold-standby' ? 'active' : 'cold-standby',
               )
             }
             title="Toggle Tray Cold-Residency Standby (destroys UI view to save memory)"
@@ -572,11 +741,19 @@ export function App() {
                   {effectivePreampDb.toFixed(1)} dB ({bands.length} bands active)
                 </strong>
               </p>
+              {nativeSnapshot && (
+                <p>
+                  <span className="text-[#7fa1b5]">Native Process RSS:</span>{' '}
+                  <strong className="text-[#ecf5fb] feq-mono">
+                    {(nativeSnapshot.native_working_set_bytes / (1024 * 1024)).toFixed(2)} MB · Rev #{nativeSnapshot.revision}
+                  </strong>
+                </p>
+              )}
             </div>
 
             <button
               type="button"
-              onClick={() => setResidencyMode('active')}
+              onClick={() => toggleResidencyMode('active')}
               className="w-full py-2 rounded-lg bg-[#00e5cf] text-[#042326] font-semibold text-xs hover:bg-[#2bf0dc] transition-colors cursor-pointer"
             >
               Restore FluidEQ Window
@@ -755,10 +932,14 @@ export function App() {
 
                 <div className="flex items-center gap-2.5 text-xs">
                   <span className="text-[#00e5cf] font-semibold">
-                    FluidEQ Engine
+                    {nativeSnapshot
+                      ? 'FluidEQ Engine · Native C++20 Core'
+                      : 'FluidEQ Engine'}
                   </span>
                   <span className="text-[11px] text-[#8aa7b9] feq-mono">
-                    34 ms
+                    {nativeSnapshot
+                      ? `${((nativeSnapshot.native_latency_frames / sampleRate) * 1000).toFixed(1)} ms (${nativeSnapshot.native_latency_frames}f · rev #${nativeSnapshot.revision})`
+                      : '34 ms'}
                   </span>
                 </div>
               </div>
@@ -1216,10 +1397,17 @@ export function App() {
                   activeHeadphoneLabel={headphoneLabel}
                   headphoneBands={headphoneBands}
                   headphoneEnabled={headphoneEnabled}
-                  onApplyHeadphoneCorrection={(label, nextBands) => {
+                  onApplyHeadphoneCorrection={(label, nextBands, opraMeta) => {
                     setHeadphoneLabel(label);
                     setHeadphoneBands(nextBands);
                     setHeadphoneEnabled(true);
+                    if (opraMeta) {
+                      void postNativeIpc('ApplyOpraHeadphoneCurve', {
+                        vendor: opraMeta.vendor,
+                        product: opraMeta.product,
+                        curve_id: opraMeta.curveId ?? null,
+                      });
+                    }
                   }}
                   onApplyAsEditableEq={(nextBands) => {
                     setBands(nextBands);
@@ -1303,7 +1491,7 @@ export function App() {
                 <ConfigSubTab
                   outputs={outputs}
                   activeOutputId={activeOutputId}
-                  onSelectOutput={setActiveOutputId}
+                  onSelectOutput={selectOutputEndpoint}
                   preampDb={effectivePreampDb}
                   eqBands={bands}
                   eqEnabled={systemEqEnabled}
@@ -1407,7 +1595,7 @@ export function App() {
                 <select
                   aria-label="Active audio output device"
                   value={activeOutput.id}
-                  onChange={(e) => setActiveOutputId(e.target.value)}
+                  onChange={(e) => selectOutputEndpoint(e.target.value)}
                   className="w-full bg-[#06131d] border border-[#1d4259] rounded px-2 py-1.5 text-xs text-[#ecf5fb] focus:outline-none focus:border-[#00e5cf]"
                 >
                   {outputs.map((o) => (

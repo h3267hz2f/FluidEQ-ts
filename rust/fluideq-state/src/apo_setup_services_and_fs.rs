@@ -29,7 +29,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //!    descending into reparse points/symlinks), and `describe_error`.
 
 use crate::apo::EndpointAttachResult;
-use crate::apo_split_and_leveling::sha256_digest;
+use crate::apo_watcher::sha256_digest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -717,58 +717,51 @@ impl SetupPaths {
         self.install_dir().map(|d| d.join("FluidEQ-Engine.dll"))
     }
 
-    /// The tree every write is checked against (`engine_parent` in `fs.cpp`).
-    fn link_root(&self) -> PathBuf {
-        self.engine_parent().unwrap_or_default()
-    }
-
-    /// Creates `path` and its missing parents, refusing a path that crosses a link.
-    pub fn ensure_directory(&self, path: &Path) -> bool {
-        ensure_directory_safe(&self.link_root(), path)
-    }
-
-    /// Writes UTF-8 without a BOM, refusing a path that crosses a link.
-    pub fn write_utf8(&self, path: &Path, text: &str) -> bool {
-        write_utf8_safe(&self.link_root(), path, text)
-    }
-
-    /// Appends UTF-8 without truncating, refusing a path that crosses a link.
-    pub fn append_utf8(&self, path: &Path, text: &str) -> bool {
-        append_utf8_safe(&self.link_root(), path, text)
-    }
-
-    /// Reads a UTF-8 file up to the 4 MB cap, or nothing.
-    pub fn read_utf8(&self, path: &Path) -> Option<String> {
-        read_utf8_bounded(path)
-    }
-
-    /// Whether anything exists at `path`.
     pub fn path_exists(path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok()
     }
 
-    /// File names in `directory` matching `pattern`.
+    pub fn ensure_directory(&self, path: &Path) -> bool {
+        let parent = self.engine_parent().unwrap_or_default();
+        ensure_directory_safe(&parent, path)
+    }
+
+    pub fn write_utf8(&self, path: &Path, text: &str) -> bool {
+        let parent = self.engine_parent().unwrap_or_default();
+        write_utf8_safe(&parent, path, text)
+    }
+
+    pub fn append_utf8(&self, path: &Path, text: &str) -> bool {
+        let parent = self.engine_parent().unwrap_or_default();
+        append_utf8_safe(&parent, path, text)
+    }
+
+    pub fn read_utf8(&self, path: &Path) -> Option<String> {
+        let parent = self.engine_parent().unwrap_or_default();
+        if crosses_link(&parent, path) || is_symlink_or_reparse(path) {
+            return None;
+        }
+        read_utf8_bounded(path)
+    }
+
     pub fn files_matching(directory: &Path, pattern: &str) -> Vec<String> {
         files_matching(directory, pattern)
     }
 
-    /// A plain file's bytes, read once, up to `limit`.
     pub fn read_locked(path: &Path, limit: usize) -> Option<Vec<u8>> {
         read_locked(path, limit)
     }
 
-    /// Replaces `to` with `bytes`, moving an in-use file aside for the next reboot.
     pub fn replace_with_bytes_simulated(
         bytes: &[u8],
         to: &Path,
         target_is_mapped_in_use: bool,
-    ) -> Result<(), String> {
-        replace_with_bytes(bytes, to, target_is_mapped_in_use).map(|_| ())
+    ) -> Result<ReplaceFileOutcome, String> {
+        replace_with_bytes(bytes, to, target_is_mapped_in_use)
     }
 
-    /// Deletes `directory` and everything under it, never following a link.
-    pub fn delete_directory_tree(directory: &Path) {
-        let _ = delete_directory_tree(directory);
+    pub fn delete_directory_tree(directory: &Path) -> bool {
+        delete_directory_tree(directory)
     }
 }
 
@@ -1049,6 +1042,130 @@ pub fn describe_error(code: u32) -> String {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub mod win32_setup_ffi {
+    use std::ffi::c_void;
+
+    pub type Hkey = isize;
+    pub type ScHandle = *mut c_void;
+
+    pub const HKEY_LOCAL_MACHINE: Hkey = -2147483646isize; // 0x80000002
+    pub const KEY_READ: u32 = 0x20019;
+    pub const KEY_WRITE: u32 = 0x20006;
+    pub const KEY_WOW64_64KEY: u32 = 0x0100;
+    pub const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    pub const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x0000_0004;
+    pub const SC_MANAGER_CONNECT: u32 = 0x0001;
+    pub const SERVICE_QUERY_STATUS: u32 = 0x0004;
+    pub const SERVICE_START: u32 = 0x0010;
+    pub const SERVICE_STOP: u32 = 0x0020;
+    pub const SERVICE_ENUMERATE_DEPENDENTS: u32 = 0x0008;
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct ServiceStatusProcess {
+        pub dw_service_type: u32,
+        pub dw_current_state: u32,
+        pub dw_controls_accepted: u32,
+        pub dw_win32_exit_code: u32,
+        pub dw_service_specific_exit_code: u32,
+        pub dw_check_point: u32,
+        pub dw_wait_hint: u32,
+        pub dw_process_id: u32,
+        pub dw_service_flags: u32,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        pub fn RegOpenKeyExW(
+            h_key: Hkey,
+            lp_sub_key: *const u16,
+            ul_options: u32,
+            sam_desired: u32,
+            phk_result: *mut Hkey,
+        ) -> i32;
+        pub fn RegCreateKeyExW(
+            h_key: Hkey,
+            lp_sub_key: *const u16,
+            reserved: u32,
+            lp_class: *mut u16,
+            dw_options: u32,
+            sam_desired: u32,
+            lp_security_attributes: *const c_void,
+            phk_result: *mut Hkey,
+            lpdw_disposition: *mut u32,
+        ) -> i32;
+        pub fn RegQueryValueExW(
+            h_key: Hkey,
+            lp_value_name: *const u16,
+            lp_reserved: *mut u32,
+            lp_type: *mut u32,
+            lp_data: *mut u8,
+            lpcb_data: *mut u32,
+        ) -> i32;
+        pub fn RegSetValueExW(
+            h_key: Hkey,
+            lp_value_name: *const u16,
+            reserved: u32,
+            dw_type: u32,
+            lp_data: *const u8,
+            cb_data: u32,
+        ) -> i32;
+        pub fn RegDeleteValueW(h_key: Hkey, lp_value_name: *const u16) -> i32;
+        pub fn RegDeleteTreeW(h_key: Hkey, lp_sub_key: *const u16) -> i32;
+        pub fn RegCloseKey(h_key: Hkey) -> i32;
+
+        pub fn OpenSCManagerW(
+            lp_machine_name: *const u16,
+            lp_database_name: *const u16,
+            dw_desired_access: u32,
+        ) -> ScHandle;
+        pub fn OpenServiceW(
+            h_sc_manager: ScHandle,
+            lp_service_name: *const u16,
+            dw_desired_access: u32,
+        ) -> ScHandle;
+        pub fn QueryServiceStatusEx(
+            h_service: ScHandle,
+            info_level: u32,
+            lp_buffer: *mut u8,
+            cb_buf_size: u32,
+            pcb_bytes_needed: *mut u32,
+        ) -> i32;
+        pub fn ControlService(
+            h_service: ScHandle,
+            dw_control: u32,
+            lp_service_status: *mut c_void,
+        ) -> i32;
+        pub fn StartServiceW(
+            h_service: ScHandle,
+            dw_num_service_args: u32,
+            lp_service_arg_vectors: *const *const u16,
+        ) -> i32;
+        pub fn CloseServiceHandle(h_sc_object: ScHandle) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn MoveFileExW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            dw_flags: u32,
+        ) -> i32;
+        pub fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        pub fn GetLastError() -> u32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        pub fn IsUserAnAdmin() -> i32;
+    }
+
+    pub fn is_elevated_admin_win32() -> bool {
+        unsafe { IsUserAnAdmin() != 0 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1082,8 +1199,10 @@ mod tests {
 
     #[test]
     fn retry_policy_passes_all_six_checks_from_retry_test_cpp() {
+        use std::cell::RefCell;
+
         // 1. A command that works runs once and never waits
-        let calls = std::cell::RefCell::new(Vec::new());
+        let calls = RefCell::new(Vec::new());
         let res = run_with_retries(
             COMMAND_TRIES,
             |attempt| {
@@ -1099,7 +1218,7 @@ mod tests {
         assert_eq!(*calls.borrow(), vec!["try"]);
 
         // 2. A command that works the second time clears the first try's error
-        let calls = std::cell::RefCell::new(Vec::new());
+        let calls = RefCell::new(Vec::new());
         let mut try_count = 0;
         let res = run_with_retries(
             COMMAND_TRIES,
@@ -1121,7 +1240,7 @@ mod tests {
         assert_eq!(*calls.borrow(), vec!["try", "settle", "try"]);
 
         // 3. A command that never works tries 3 times with 2 settles
-        let calls = std::cell::RefCell::new(Vec::new());
+        let calls = RefCell::new(Vec::new());
         let mut try_count = 0;
         let res = run_with_retries(
             COMMAND_TRIES,
@@ -1141,7 +1260,7 @@ mod tests {
         assert_eq!(res.error, "failed 3 times; the last time: try 3");
 
         // 4. A wait that fails ends the tries immediately
-        let calls = std::cell::RefCell::new(Vec::new());
+        let calls = RefCell::new(Vec::new());
         let res = run_with_retries(
             COMMAND_TRIES,
             |attempt| {

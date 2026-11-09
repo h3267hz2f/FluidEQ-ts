@@ -53,16 +53,6 @@ fn clamp_f64(v: f64, lo: f64, hi: f64) -> f64 {
     }
 }
 
-#[inline]
-fn clamp_i32(v: f64, lo: i32, hi: i32) -> i32 {
-    if !v.is_finite() {
-        lo
-    } else {
-        let rounded = v.round_ties_even() as i32;
-        rounded.clamp(lo, hi)
-    }
-}
-
 /// Encodes `FeqChainSettings` into the flat `Vec<f64>` wire payload consumed by
 /// `feq_engine_prepare_config` and `feq_chain_settings_decode`.
 pub fn encode_chain_settings_wire(settings: &FeqChainSettings) -> Vec<f64> {
@@ -498,173 +488,181 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
 
     settings.exciter.enabled = read_bool(values[c]);
     settings.exciter.isolate = read_bool(values[c + 1]);
-    settings.exciter.stereo = clamp_i32(values[c + 2], 0, 2);
+    settings.exciter.stereo = values[c + 2] as i32;
     settings.exciter.align_enabled = read_bool(values[c + 3]);
-    settings.exciter.align_amount = clamp_f64(values[c + 4], 0.0, 1.0);
+    settings.exciter.align_amount = values[c + 4];
     settings.exciter.organic_enabled = read_bool(values[c + 5]);
-    settings.exciter.organic_amount = clamp_f64(values[c + 6], 0.0, 1.0);
-    settings.exciter.organic_focus_hz = clamp_f64(values[c + 7], 50.0, 160.0);
-    settings.exciter.organic_range = clamp_f64(values[c + 8], 0.5, 4.0);
+    settings.exciter.organic_amount = values[c + 6];
+    settings.exciter.organic_focus_hz = values[c + 7];
+    settings.exciter.organic_range = values[c + 8];
     c += 9;
 
     for b in 0..FEQ_CHAIN_EXCITER_BANDS {
         let band = &mut settings.exciter.bands[b];
         band.enabled = read_bool(values[c]);
-        band.freq_hz = clamp_f64(values[c + 1], 20.0, 20000.0);
-        band.range = clamp_f64(values[c + 2], 0.25, 4.0);
-        band.drive = clamp_f64(values[c + 3], 0.0, 1.0);
-        band.mix = clamp_f64(values[c + 4], 0.0, 1.0);
-        band.texture = clamp_f64(values[c + 5], 0.0, 1.0);
+        band.freq_hz = values[c + 1];
+        band.range = values[c + 2];
+        band.drive = values[c + 3];
+        band.mix = values[c + 4];
+        band.texture = values[c + 5];
         c += 6;
     }
 
     settings.eq.enabled = read_bool(values[c]);
     settings.eq.isolate = read_bool(values[c + 1]);
-    settings.eq.model = clamp_i32(values[c + 2], 0, 3);
-    settings.eq.model_amount = clamp_f64(values[c + 3], 0.0, 2.0);
-    settings.eq.engine = clamp_i32(values[c + 4], 0, 1);
-    settings.eq.phase = clamp_i32(values[c + 5], 0, 1);
-    settings.eq.stereo = clamp_i32(values[c + 6], 0, 2);
-    settings.eq.mono_below_hz = clamp_f64(values[c + 7], 0.0, 300.0);
-    settings.eq.oversample = clamp_i32(values[c + 8], 1, 4) as u32;
-    settings.eq.subsonic_hz = clamp_f64(values[c + 9], 0.0, 80.0);
-    settings.eq.fuzz_amount = clamp_f64(values[c + 10], 0.0, 1.0);
+    settings.eq.model = values[c + 2] as i32;
+    settings.eq.model_amount = values[c + 3];
+    settings.eq.engine = values[c + 4] as i32;
+    settings.eq.phase = values[c + 5] as i32;
+    settings.eq.stereo = values[c + 6] as i32;
+    settings.eq.mono_below_hz = values[c + 7];
+    settings.eq.oversample = values[c + 8] as u32;
+    settings.eq.subsonic_hz = values[c + 9];
+    settings.eq.fuzz_amount = values[c + 10];
     c += 11;
 
     if has_deesser {
         settings.deesser.enabled = read_bool(values[c + 1]);
         settings.deesser.isolate = read_bool(values[c + 2]);
-        settings.deesser.sensitivity = clamp_f64(values[c + 3], 0.0, 1.0);
-        settings.deesser.low_hz = clamp_f64(values[c + 4], 2000.0, 12000.0);
-        settings.deesser.high_hz =
-            clamp_f64(values[c + 5], settings.deesser.low_hz + 500.0, 16000.0);
-        settings.deesser.range_db = clamp_f64(values[c + 6], 0.0, 24.0);
-        settings.deesser.width_oct = clamp_f64(values[c + 7], 0.25, 2.5);
+        settings.deesser.sensitivity = values[c + 3];
+        settings.deesser.low_hz = values[c + 4];
+        settings.deesser.high_hz = values[c + 5];
+        settings.deesser.range_db = values[c + 6];
+        settings.deesser.width_oct = values[c + 7];
         settings.deesser.mode = values[c + 8] as i32;
-        settings.deesser.attack_ms = clamp_f64(values[c + 9], 0.2, 20.0);
-        settings.deesser.release_ms = clamp_f64(values[c + 10], 10.0, 250.0);
+        settings.deesser.attack_ms = values[c + 9];
+        settings.deesser.release_ms = values[c + 10];
         settings.deesser.centre_only = read_bool(values[c + 11]);
-        settings.deesser.keep_cymbals = clamp_f64(values[c + 12], 0.0, 1.0);
-        let ov = values[c + 15] as i32;
-        settings.exciter.oversampling = if ov >= 2 { ov } else { 1 };
+        settings.deesser.keep_cymbals = values[c + 12];
+        settings.exciter.oversampling = values[c + 15] as i32;
     }
     c += 18;
 
     settings.dimension.enabled = read_bool(values[c]);
-    settings.dimension.low_width = clamp_f64(values[c + 1], 0.0, 1.0);
-    settings.dimension.mid_width = clamp_f64(values[c + 2], 0.0, 2.0);
-    settings.dimension.high_width = clamp_f64(values[c + 3], 0.0, 2.0);
-    settings.dimension.low_hz = clamp_f64(values[c + 4], 60.0, 400.0);
-    settings.dimension.high_hz = clamp_f64(values[c + 5], 1200.0, 8000.0);
-    settings.dimension.decorrelation = clamp_f64(values[c + 6], 0.0, 1.0);
+    settings.dimension.low_width = values[c + 1];
+    settings.dimension.mid_width = values[c + 2];
+    settings.dimension.high_width = values[c + 3];
+    settings.dimension.low_hz = values[c + 4];
+    settings.dimension.high_hz = values[c + 5];
+    settings.dimension.decorrelation = values[c + 6];
     c += 7;
 
     settings.maximizer.enabled = read_bool(values[c]);
-    settings.maximizer.drive_db = clamp_f64(values[c + 1], 0.0, 18.0);
-    settings.maximizer.ceiling_db = clamp_f64(values[c + 2], -6.0, 0.0);
-    settings.maximizer.look_ahead_ms = clamp_f64(values[c + 3], 1.0, 10.0);
-    settings.maximizer.release_ms = clamp_f64(values[c + 4], 20.0, 500.0);
+    settings.maximizer.drive_db = values[c + 1];
+    settings.maximizer.ceiling_db = values[c + 2];
+    settings.maximizer.look_ahead_ms = values[c + 3];
+    settings.maximizer.release_ms = values[c + 4];
     c += 5;
 
     settings.master.enabled = read_bool(values[c]);
-    settings.master.output_trim_db = clamp_f64(values[c + 1], -24.0, 12.0);
+    settings.master.output_trim_db = values[c + 1];
     settings.master.loudness_maximize = read_bool(values[c + 2]);
-    settings.master.loudness_target_lufs = clamp_f64(values[c + 3], -30.0, -5.0);
-    settings.master.ceiling_db = clamp_f64(values[c + 4], -12.0, 0.0);
-    settings.master.release_ms = clamp_f64(values[c + 5], 200.0, 5000.0);
+    settings.master.loudness_target_lufs = values[c + 3];
+    settings.master.ceiling_db = values[c + 4];
+    settings.master.release_ms = values[c + 5];
     settings.master.matched_bypass = read_bool(values[c + 6]);
     c += 7;
 
     settings.denoise.enabled = read_bool(values[c]);
     settings.denoise.isolate = read_bool(values[c + 1]);
-    settings.denoise.profile_source = clamp_i32(values[c + 2], 0, 2);
+    settings.denoise.profile_source = values[c + 2] as i32;
     settings.denoise.hiss.enabled = read_bool(values[c + 3]);
-    settings.denoise.hiss.amount = clamp_f64(values[c + 4], 0.0, 1.0);
-    settings.denoise.hiss.floor_db = clamp_f64(values[c + 5], -90.0, 18.0);
-    settings.denoise.hiss.sensitivity_db = clamp_f64(values[c + 6], 0.0, 18.0);
-    settings.denoise.hiss.smoothing = clamp_f64(values[c + 7], 0.0, 1.0);
+    settings.denoise.hiss.amount = values[c + 4];
+    settings.denoise.hiss.floor_db = values[c + 5];
+    settings.denoise.hiss.sensitivity_db = values[c + 6];
+    settings.denoise.hiss.smoothing = values[c + 7];
     settings.denoise.hum.enabled = read_bool(values[c + 8]);
-    settings.denoise.hum.mode = clamp_i32(values[c + 9], 0, 2);
-    settings.denoise.hum.harmonics = clamp_f64(values[c + 10], 1.0, 10.0);
-    settings.denoise.hum.depth_db = clamp_f64(values[c + 11], 0.0, 42.0);
-    settings.denoise.hum.quality = clamp_f64(values[c + 12], 5.0, 60.0);
+    settings.denoise.hum.mode = values[c + 9] as i32;
+    settings.denoise.hum.harmonics = values[c + 10];
+    settings.denoise.hum.depth_db = values[c + 11];
+    settings.denoise.hum.quality = values[c + 12];
     settings.denoise.click.enabled = read_bool(values[c + 13]);
-    settings.denoise.click.sensitivity = clamp_f64(values[c + 14], 0.0, 1.0);
-    settings.denoise.click.max_repair_samples = clamp_f64(values[c + 15], 4.0, 64.0);
+    settings.denoise.click.sensitivity = values[c + 14];
+    settings.denoise.click.max_repair_samples = values[c + 15];
     settings.denoise.voice.enabled = read_bool(values[c + 16]);
-    settings.denoise.voice.mode = clamp_i32(values[c + 17], 0, 2);
-    settings.denoise.voice.amount = clamp_f64(values[c + 18], 0.0, 1.0);
+    settings.denoise.voice.mode = values[c + 17] as i32;
+    settings.denoise.voice.amount = values[c + 18];
     c += 19;
 
     settings.bass_forge.enabled = read_bool(values[c]);
     settings.bass_forge.isolate = read_bool(values[c + 1]);
-    settings.bass_forge.split_hz = clamp_f64(values[c + 2], 40.0, 180.0);
-    settings.bass_forge.drive_db = clamp_f64(values[c + 3], 0.0, 18.0);
-    settings.bass_forge.sub_amount = clamp_f64(values[c + 4], 0.0, 1.0);
-    settings.bass_forge.presence_amount = clamp_f64(values[c + 5], 0.0, 1.0);
-    settings.bass_forge.texture = clamp_f64(values[c + 6], 0.0, 1.0);
-    settings.bass_forge.mix = clamp_f64(values[c + 7], 0.0, 1.0);
+    settings.bass_forge.split_hz = values[c + 2];
+    settings.bass_forge.drive_db = values[c + 3];
+    settings.bass_forge.sub_amount = values[c + 4];
+    settings.bass_forge.presence_amount = values[c + 5];
+    settings.bass_forge.texture = values[c + 6];
+    settings.bass_forge.mix = values[c + 7];
     c += 8;
 
     settings.bass_punch.enabled = read_bool(values[c]);
     settings.bass_punch.isolate = read_bool(values[c + 1]);
-    settings.bass_punch.split_hz = clamp_f64(values[c + 2], 50.0, 200.0);
-    settings.bass_punch.attack = clamp_f64(values[c + 3], -1.0, 1.0);
-    settings.bass_punch.sustain = clamp_f64(values[c + 4], -1.0, 1.0);
-    settings.bass_punch.bloom_amount = clamp_f64(values[c + 5], 0.0, 1.0);
-    settings.bass_punch.bloom_decay_ms = clamp_f64(values[c + 6], 30.0, 350.0);
-    settings.bass_punch.duck = clamp_f64(values[c + 7], 0.0, 1.0);
-    settings.bass_punch.mix = clamp_f64(values[c + 8], 0.0, 1.0);
+    settings.bass_punch.split_hz = values[c + 2];
+    settings.bass_punch.attack = values[c + 3];
+    settings.bass_punch.sustain = values[c + 4];
+    settings.bass_punch.bloom_amount = values[c + 5];
+    settings.bass_punch.bloom_decay_ms = values[c + 6];
+    settings.bass_punch.duck = values[c + 7];
+    settings.bass_punch.mix = values[c + 8];
     c += 9;
 
     settings.room.enabled = read_bool(values[c]);
-    settings.room.preset = clamp_i32(values[c + 1], 0, 4);
-    settings.room.size_m = clamp_f64(values[c + 2], 2.0, 25.0);
-    settings.room.walls = clamp_f64(values[c + 3], 0.0, 1.0);
-    settings.room.distance_m = clamp_f64(values[c + 4], 0.5, 4.0);
-    settings.room.centre_db = clamp_f64(values[c + 5], -12.0, 6.0);
-    settings.room.sub_db = clamp_f64(values[c + 6], -12.0, 12.0);
-    settings.room.head = clamp_i32(values[c + 7], 0, 2);
+    settings.room.preset = values[c + 1] as i32;
+    settings.room.size_m = values[c + 2];
+    settings.room.walls = values[c + 3];
+    settings.room.distance_m = values[c + 4];
+    settings.room.centre_db = values[c + 5];
+    settings.room.sub_db = values[c + 6];
+    settings.room.head = values[c + 7] as i32;
     settings.eq.matched = read_bool(values[c + 8]);
     for s in 0..FEQ_ROOM_SPEAKERS {
-        settings.room.angle_deg[s] = clamp_f64(values[c + 9 + s], -180.0, 180.0);
+        settings.room.angle_deg[s] = values[c + 9 + s];
     }
     for s in 0..FEQ_ROOM_SPEAKERS {
-        settings.room.level_db[s] = clamp_f64(values[c + 16 + s], -24.0, 12.0);
+        settings.room.level_db[s] = values[c + 16 + s];
     }
     settings.room.bass_management = read_bool(values[c + 23]);
-    settings.room.crossover_hz = clamp_f64(values[c + 24], 40.0, 160.0);
+    settings.room.crossover_hz = values[c + 24];
     settings.room.music_upmix = read_bool(values[c + 25]);
-    settings.room.upmix_amount = clamp_f64(values[c + 26], 0.0, 1.0);
+    settings.room.upmix_amount = values[c + 26];
     for s in 0..FEQ_ROOM_SPEAKERS {
-        let d = values[c + 27 + s];
-        settings.room.speaker_distance_m[s] = if d <= 0.0 {
-            0.0
-        } else {
-            clamp_f64(d, 0.5, 4.0)
-        };
+        settings.room.speaker_distance_m[s] = values[c + 27 + s];
     }
     for s in 0..FEQ_ROOM_MUTE_SLOTS {
-        settings.room.mute[s] = clamp_i32(values[c + 34 + s], 0, 3);
+        let v = values[c + 34 + s];
+        settings.room.mute[s] = if v == 0.0 {
+            0
+        } else if v == 2.0 {
+            2
+        } else if v == 3.0 {
+            3
+        } else {
+            1
+        };
     }
     c += 42;
 
     settings.surround_all_channels = read_bool(values[c]);
-    settings.master.peak_limiting_db = clamp_f64(values[c + 1], 0.0, 6.0);
+    settings.master.peak_limiting_db = values[c + 1];
     c += 3; // [157] band_count already read
 
     settings.eq.band_count = band_count as u32;
     for b in 0..band_count {
         let band = &mut settings.eq.bands[b];
-        let switch_word = clamp_i32(values[c], 0, 3);
-        band.enabled = if switch_word > 0 { 1 } else { 0 };
-        band.ear = if switch_word > 1 { switch_word - 1 } else { 0 };
-        band.filter_type = FeqFilterType::from_wire(clamp_i32(values[c + 1], 0, 6));
-        band.frequency = clamp_f64(values[c + 2], 10.0, 24000.0);
-        band.gain_db = clamp_f64(values[c + 3], -48.0, 48.0);
-        band.quality = clamp_f64(values[c + 4], 0.1, 30.0);
+        let on = values[c];
+        band.enabled = if on != 0.0 { 1 } else { 0 };
+        band.ear = if on == 2.0 {
+            1
+        } else if on == 3.0 {
+            2
+        } else {
+            0
+        };
+        band.filter_type = FeqFilterType::from_wire(values[c + 1] as i32);
+        band.frequency = values[c + 2];
+        band.gain_db = values[c + 3];
+        band.quality = values[c + 4];
         band.dynamic = read_bool(values[c + 5]);
-        band.threshold_db = clamp_f64(values[c + 6], -60.0, 0.0);
+        band.threshold_db = values[c + 6];
         c += FEQ_CHAIN_BAND_PARAMS;
     }
 
@@ -804,5 +802,18 @@ mod tests {
         let decoded = decode_chain_settings_wire(&encoded).expect("wire decode should succeed");
 
         assert_eq!(decoded, original);
+
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            let mut cpp_decoded = std::mem::zeroed::<FeqChainSettings>();
+            let ok = fluideq_dsp_sys::feq_chain_settings_decode(
+                encoded.as_ptr(),
+                encoded.len() as u32,
+                &mut cpp_decoded,
+            );
+            assert_eq!(ok, 1, "C++ feq_chain_settings_decode must accept encoded wire");
+            assert_eq!(cpp_decoded, decoded);
+        }
     }
 }
+
