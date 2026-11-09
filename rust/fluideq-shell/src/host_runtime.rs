@@ -44,7 +44,7 @@ pub const MAX_WIRE_CHAIN_PARAMS: u32 = fluideq_dsp_sys::FEQ_CHAIN_MAX_PARAMS as 
 /// Schema version of the core parameter block (`FEQ_PARAMETER_SCHEMA_VERSION`).
 pub const PARAMETER_SCHEMA_VERSION: u32 = fluideq_dsp_sys::FEQ_PARAMETER_SCHEMA_VERSION;
 /// Legacy core parameter count (`FEQ_PARAMETER_COUNT`).
-pub const CORE_PARAMETER_COUNT: u32 = 64;
+pub const CORE_PARAMETER_COUNT: u32 = fluideq_dsp_sys::FEQ_PARAMETER_COUNT as u32;
 
 /// Reads exactly `into.len()` bytes from `reader`, looping across short pipe reads (`read_exact` in `host_wire.cpp`).
 /// Returns `false` only on true EOF (`0` bytes read) or unrecoverable I/O error.
@@ -1142,7 +1142,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
             let _ = write_frame_to_pipe(writer, &serialize_ack_frame(&ack));
         } else if command_raw == FeqWireCommand::FEQ_CMD_APPLY_SNAPSHOT as u16 {
             // `FEQ_CMD_APPLY_SNAPSHOT` (`host_commands.cpp` lines 165–186):
-            // Must equal `FEQ_PARAMETER_COUNT` (64), otherwise reject without reading payload.
+            // Must equal `FEQ_PARAMETER_COUNT`, otherwise reject without reading payload.
             if (parameter_id as usize) != fluideq_dsp_sys::FEQ_PARAMETER_COUNT {
                 let ack = build_ack_frame(
                     request_id,
