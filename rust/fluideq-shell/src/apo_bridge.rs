@@ -15,8 +15,43 @@ use fluideq_state::apo::format_bands_as_apo_lines;
 use fluideq_state::apo_analysis_and_status::{config_dir, owner_pipe_name};
 use fluideq_state::AppStateSnapshot;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const OWNER_MARKER: &str = "fluideq-owner.txt";
+
+/// Why the last publish failed, so the app can say so instead of showing a
+/// chain that edits the window and nothing else.
+static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+static OWNER_READY: AtomicBool = AtomicBool::new(false);
+
+fn error_slot() -> &'static Mutex<Option<String>> {
+    LAST_ERROR.get_or_init(|| Mutex::new(None))
+}
+
+fn note_error(message: Option<String>) {
+    if let Ok(mut slot) = error_slot().lock() {
+        *slot = message;
+    }
+}
+
+/// The last reason the engine could not be reached, if there is one.
+pub fn last_error() -> Option<String> {
+    if let Ok(slot) = error_slot().lock() {
+        if let Some(message) = slot.clone() {
+            return Some(message);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if !OWNER_READY.load(Ordering::Relaxed) {
+        return Some("the engine owner pipe did not come up".to_string());
+    }
+    None
+}
 
 /// The Equalizer APO text the engine parses, for the current state.
 ///
@@ -58,13 +93,22 @@ pub fn write_to(config_folder: &Path, snapshot: &AppStateSnapshot) -> std::io::R
 pub fn publish(snapshot: &AppStateSnapshot) -> Result<PathBuf, String> {
     let folder = PathBuf::from(config_dir());
     if folder.as_os_str().is_empty() {
-        return Err("the engine root could not be resolved".to_string());
+        let message = "the engine root could not be resolved".to_string();
+        note_error(Some(message.clone()));
+        return Err(message);
     }
-    write_to(&folder, snapshot)
-        .map_err(|error| format!("could not write {}: {error}", folder.join("config.txt").display()))?;
+    write_to(&folder, snapshot).map_err(|error| {
+        let message = format!(
+            "could not write {}: {error}",
+            folder.join("config.txt").display()
+        );
+        note_error(Some(message.clone()));
+        message
+    })?;
     // A file written in the watched directory is what wakes the engine's
     // watcher, which then retries the owner pipe. The contents do not matter.
     let _ = std::fs::write(folder.join(OWNER_MARKER), "FluidEQ\n");
+    note_error(None);
     Ok(folder)
 }
 
@@ -78,7 +122,17 @@ pub fn publish(snapshot: &AppStateSnapshot) -> Result<PathBuf, String> {
 pub fn start_owner_link() {
     let (ready, wait) = std::sync::mpsc::channel();
     pipe::spawn(owner_pipe_name(), ready);
-    let _ = wait.recv_timeout(std::time::Duration::from_secs(2));
+    if wait.recv_timeout(std::time::Duration::from_secs(2)).is_ok() {
+        OWNER_READY.store(true, Ordering::Relaxed);
+        return;
+    }
+    // The pipe thread keeps retrying, so the wait is not the end of the
+    // answer. Whoever is asking `last_error` hears it as soon as it succeeds.
+    std::thread::spawn(move || {
+        if wait.recv().is_ok() {
+            OWNER_READY.store(true, Ordering::Relaxed);
+        }
+    });
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -828,9 +828,13 @@ function renderEngineStatus(status) {
     status.dllVersion !== status.bundledVersion;
   const blockers = engineBlockers(status);
   const blocked = blockers.length > 0;
-  const active = installed && attached > 0 && bypassed === 0 && !blocked;
+  const bridgeError =
+    typeof status?.bridgeError === 'string' ? status.bridgeError : '';
+  const active =
+    installed && attached > 0 && bypassed === 0 && !blocked && !bridgeError;
   const working = active && unloaded < attached;
-  const needsAttention = attachable || bypassed > 0 || stale || blocked;
+  const needsAttention =
+    attachable || bypassed > 0 || stale || blocked || Boolean(bridgeError);
 
   const device = status?.defaultDevice;
   if (device?.name) {
@@ -844,6 +848,9 @@ function renderEngineStatus(status) {
   renderCoreState();
 
   const notes = blockers.slice();
+  if (bridgeError) {
+    notes.unshift(`Engine bridge: ${bridgeError}`);
+  }
   if (unloaded > 0) {
     notes.push(
       `${unloaded} attached output${unloaded === 1 ? ' has' : 's have'} never loaded the engine`
@@ -857,6 +864,8 @@ function renderEngineStatus(status) {
     els.engineText.textContent = `Windows is bypassing the engine on ${bypassed} output${bypassed === 1 ? '' : 's'}`;
   } else if (blocked) {
     els.engineText.textContent = `Engine cannot load: ${blockers[0]}`;
+  } else if (bridgeError) {
+    els.engineText.textContent = `Engine config: ${bridgeError}`;
   } else if (active) {
     els.engineText.textContent = stale
       ? `Engine update available · ${status.dllVersion} → ${status.bundledVersion}`
@@ -876,7 +885,7 @@ function renderEngineStatus(status) {
   }
   els.engineInstall.hidden = installed && !needsAttention;
   els.engineInstall.textContent = installed
-    ? blocked
+    ? blocked || bridgeError
       ? 'Repair engine'
       : bypassed
         ? 'Fix engine activation'

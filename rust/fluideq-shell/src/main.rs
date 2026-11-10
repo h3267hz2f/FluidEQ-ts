@@ -151,7 +151,17 @@ fn set_output_volume(volume: f64) -> Result<f64, String> {
 
 #[tauri::command]
 fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
-    engine_setup::status(&app)
+    let mut status = engine_setup::status(&app)?;
+    // The two ways the window can look right while the engine reads nothing:
+    // the config file could not be written, or the owner pipe never came up.
+    // Both are this process's failure, so they ride beside the helper's answer
+    // rather than being guessed at from it.
+    if let Some(error) = apo_bridge::last_error() {
+        if let Some(object) = status.as_object_mut() {
+            object.insert("bridgeError".to_string(), Value::String(error));
+        }
+    }
+    Ok(status)
 }
 
 #[tauri::command]
