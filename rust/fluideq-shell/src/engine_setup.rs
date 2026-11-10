@@ -78,6 +78,42 @@ fn require_success(json: &Value, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The lines of `engine.log` that explain the current audio path.
+///
+/// The engine writes its own verdict whenever it reloads: which files it read,
+/// whether it is processing or passing the endpoint through, and why. That is
+/// the only place a "written but never instantiated" output says what Windows
+/// did with it, so the status carries the last few lines to the window.
+pub fn diagnosis_lines(text: &str, limit: usize) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.starts_with("chain loaded:")
+                || line.starts_with("pass-through:")
+                || *line == "processing this endpoint"
+                || line.starts_with("graph warning:")
+                || line.starts_with("could not write this output's status")
+        })
+        .map(str::to_string)
+        .collect();
+    let keep_from = lines.len().saturating_sub(limit);
+    lines.drain(..keep_from);
+    lines
+}
+
+/// The tail of `<engine root>\engine.log`, filtered by `diagnosis_lines`.
+pub fn log_tail() -> Vec<String> {
+    let path = fluideq_state::apo_analysis_and_status::log_path();
+    if path.is_empty() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => diagnosis_lines(&text, 8),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// The current engine state, without asking for administrator rights.
 pub fn status(app: &AppHandle) -> Result<Value, String> {
     let setup = engine_setup_exe(app)?;
@@ -272,7 +308,31 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_setup_json, require_success};
+    use super::{diagnosis_lines, parse_setup_json, require_success};
+
+    #[test]
+    fn only_the_engine_verdicts_are_kept_and_the_tail_is_bounded() {
+        let log = "noise\n\
+                   chain loaded: files=1 (config.txt) bands=2 preamp=0.0 dB\n\
+                   pass-through: FluidEQ is not running\n\
+                   graph warning: sample rate changed\n\
+                   processing this endpoint\n\
+                   more noise\n";
+        assert_eq!(
+            diagnosis_lines(log, 2),
+            vec![
+                "graph warning: sample rate changed".to_string(),
+                "processing this endpoint".to_string()
+            ]
+        );
+
+        // The positive control: the reason line the user needs survives even
+        // when the file only holds that one.
+        assert_eq!(
+            diagnosis_lines("pass-through: no config.txt in the configuration directory\n", 8),
+            vec!["pass-through: no config.txt in the configuration directory"]
+        );
+    }
 
     #[test]
     fn status_json_after_diagnostic_text_parses() {

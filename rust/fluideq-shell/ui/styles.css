@@ -235,6 +235,93 @@ button {
   font-size: 12px;
 }
 
+.preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 5px;
+}
+
+.preset-select {
+  min-width: 0;
+  max-width: 220px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.preset-select:hover,
+.preset-select:focus-visible {
+  border-color: var(--line);
+  color: var(--text);
+  outline: none;
+}
+
+.preset-action {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-soft);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.preset-action:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.preset-action.accent {
+  color: var(--accent);
+  border-color: rgba(59, 232, 196, 0.28);
+}
+
+.preset-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* A layout rule would otherwise beat the `hidden` attribute. */
+.preset-form[hidden] {
+  display: none;
+}
+
+.preset-name {
+  width: 150px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.preset-name:focus {
+  border-color: rgba(59, 232, 196, 0.5);
+  outline: none;
+}
+
+.ir-state {
+  margin: 0;
+  color: var(--muted-soft);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .device {
   display: flex;
   align-items: center;
@@ -552,6 +639,17 @@ button {
   background: var(--line);
 }
 
+/* Shown only when the guard plus the trim is deep enough to read as silence.
+   Two lines at the narrowest inspector width; it is a sentence, not a pill. */
+.preamp-warning {
+  margin: -2px 0 0;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+}
+
 .stat-row {
   display: flex;
   align-items: center;
@@ -559,7 +657,6 @@ button {
   color: var(--muted);
   font-size: 11px;
 }
-
 .stat-row strong {
   color: var(--text);
   font-weight: 600;

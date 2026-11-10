@@ -42,6 +42,20 @@ jobs:
           --target fluideq-engine fluideq-engine-setup fluideq-dsp-host
           --parallel
 
+      - name: Build attachment regression tests
+        run: >
+          cmake --build native/.build/engine --config Release
+          --target fluideq-engine-fx-list-test fluideq-engine-fx-list-mode-test
+          fluideq-engine-fx-list-apo-test fluideq-engine-attach-outcome-test
+          fluideq-engine-slot-report-test
+          --parallel
+
+      - name: Test attachment decisions
+        run: >
+          ctest --test-dir native/.build/engine -C Release
+          --output-on-failure --no-tests=error
+          -R "^engine-(fx-list|fx-list-mode|fx-list-apo|attach-outcome|slot-report)$"
+
       - name: Verify the engine DLL exports
         shell: pwsh
         run: |

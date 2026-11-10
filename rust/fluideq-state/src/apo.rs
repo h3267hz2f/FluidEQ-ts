@@ -1825,6 +1825,94 @@ mod tests {
     }
 
     #[test]
+    fn every_windows_default_effect_is_takeable_in_both_generations() {
+        // Windows ships four inbox effects under two names, and which pair an
+        // endpoint carries varies by machine. Every one of them, in the mixed
+        // case the audio stack actually writes, is ours to replace; a vendor's
+        // class id in the same value is not.
+        let vendor = "{5C8DC6DB-1A99-46FE-90E8-8229A41DD3EF}";
+        for &windows in &WINDOWS_DEFAULT_APO_CLSIDS {
+            for spelling in [
+                windows.to_string(),
+                windows.to_ascii_lowercase(),
+                windows.to_ascii_uppercase(),
+            ] {
+                assert!(is_windows_default_apo_clsid(&spelling));
+
+                let mut single = EndpointFxValues::default();
+                single.single[FX_SLOT_EFX] = Some(spelling.clone());
+                assert!(is_single_only(&single));
+                assert_eq!(default_slot_for(&single, false), ApoSlot::EfxSingle);
+                let plan = plan_attach(&single, FLUID_ENGINE_APO_CLSID, ApoSlot::EfxSingle);
+                assert!(plan.refused.is_none(), "{spelling}: {:?}", plan.refused);
+
+                let mut legacy = EndpointFxValues::default();
+                legacy.legacy[FX_LEGACY_GFX] = Some(spelling.clone());
+                assert!(is_legacy_only(&legacy));
+                assert_eq!(default_slot_for(&legacy, false), ApoSlot::Gfx);
+                let plan = plan_attach(&legacy, FLUID_ENGINE_APO_CLSID, ApoSlot::Gfx);
+                assert!(plan.refused.is_none(), "{spelling}: {:?}", plan.refused);
+            }
+        }
+
+        // The positive control: the same shape with somebody else's effect in
+        // it is still refused, so this test cannot pass by taking everything.
+        let mut vendor_value = EndpointFxValues::default();
+        vendor_value.single[FX_SLOT_EFX] = Some(vendor.to_string());
+        assert!(!is_windows_default_apo_clsid(vendor));
+        assert!(!plan_attach(&vendor_value, FLUID_ENGINE_APO_CLSID, ApoSlot::EfxSingle)
+            .refused
+            .is_none());
+
+        let mut vendor_legacy = EndpointFxValues::default();
+        vendor_legacy.legacy[FX_LEGACY_GFX] = Some(vendor.to_string());
+        assert!(!plan_attach(&vendor_legacy, FLUID_ENGINE_APO_CLSID, ApoSlot::Gfx)
+            .refused
+            .is_none());
+    }
+
+    #[test]
+    fn slot_matrix_falls_back_to_composite_and_never_takes_a_vendor_value() {
+        // A vendor's composite lists with Equalizer APO in the value Windows
+        // actually creates: the endpoint value is ours to take because EAPO is
+        // another EQ and the detach backup puts it back.
+        let mut composite = EndpointFxValues::default();
+        composite.single[FX_SLOT_EFX] = Some(EQUALIZER_APO_CLSIDS[0].to_string());
+        composite.composite[FX_SLOT_SFX] =
+            Some(vec!["{DA2C9ECE-7418-4906-B4FA-0A00B3EB88AA}".to_string()]);
+        composite.composite[FX_SLOT_EFX] =
+            Some(vec!["{A29EB043-6CE2-4ee2-B38C-F58719E0D88F}".to_string()]);
+        assert_eq!(default_slot_for(&composite, false), ApoSlot::EfxSingle);
+
+        // The same composite endpoint with Windows' own effect in the value.
+        let mut windows_value = composite.clone();
+        windows_value.single[FX_SLOT_EFX] = Some(WINDOWS_DEFAULT_APO_CLSIDS[3].to_string());
+        assert_eq!(default_slot_for(&windows_value, false), ApoSlot::EfxSingle);
+
+        // Composite endpoint with a vendor in the value: the value is not ours
+        // to take, so the ladder falls back to the generic composite rungs.
+        let mut vendor_value = composite.clone();
+        vendor_value.single[FX_SLOT_EFX] = Some("{5C8DC6DB-1A99-46FE-90E8-8229A41DD3EF}".to_string());
+        assert_eq!(default_slot_for(&vendor_value, false), ApoSlot::Efx);
+        assert_eq!(default_slot_for(&vendor_value, true), ApoSlot::Mfx);
+
+        // Every one-value rung held by a vendor and no composite list at all:
+        // nothing may be written there, so the ladder's own top rung stands.
+        let mut full = EndpointFxValues::default();
+        for at in 0..FX_SLOT_COUNT {
+            full.single[at] = Some("{62DC1A93-CE3E-4B2C-9B3B-9F1B0E2A0001}".to_string());
+        }
+        assert!(is_single_only(&full));
+        assert_eq!(default_slot_for(&full, false), ApoSlot::Efx);
+
+        // Bare endpoint: the newest rung, or MFX on a combined endpoint.
+        let bare = EndpointFxValues::default();
+        assert!(!is_legacy_only(&bare));
+        assert_eq!(default_slot_for(&bare, false), ApoSlot::Efx);
+        assert_eq!(default_slot_for(&bare, true), ApoSlot::Mfx);
+    }
+
+    #[test]
     fn vendor_composite_with_equalizer_apo_in_efx_takes_the_endpoint_value() {
         let mut values = EndpointFxValues::default();
         // Realtek-shaped: vendor APOs in the lists, Equalizer APO in the

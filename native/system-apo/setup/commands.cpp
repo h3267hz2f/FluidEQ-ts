@@ -51,13 +51,26 @@ void fail(CommandResult& result, std::wstring message) {
  * from how it was first found — the backup — because the first attach may
  * since have added lists to an endpoint whose driver reads only the old
  * values), then what Windows says about it.
+ *
+ * A candidate this helper has already been refused is stepped over: the
+ * ladder asks for the first rung nobody has tried
+ * (`first_untried_slot`), so a rung another program holds costs one prompt
+ * once rather than one on every launch.
  */
 Slot slot_for(const std::wstring& guid, const FxValues& original) {
   const std::optional<Slot> learned = remembered_slot(guid);
-  if (learned.has_value()) {
-    return *learned;
+  const Slot candidate =
+      learned.has_value()
+          ? *learned
+          : default_slot_for(original, endpoint_is_combined(guid));
+  std::vector<Slot> failed = failed_slots(guid);
+  if (std::find(failed.begin(), failed.end(), candidate) == failed.end()) {
+    return candidate;
   }
-  return default_slot_for(original, endpoint_is_combined(guid));
+  std::vector<Slot> tried = remembered_slots(guid);
+  tried.insert(tried.end(), failed.begin(), failed.end());
+  const std::optional<Slot> next = first_untried_slot(tried);
+  return next.has_value() ? *next : candidate;
 }
 
 /**
@@ -120,8 +133,9 @@ bool attach_one(const std::wstring& guid, std::optional<Slot> named,
                                 slot);
   if (!plan.refused.empty()) {
     // A legacy value already registered to somebody else. Nothing written,
-    // and the effect stays wherever it was — the app reads the answer and
-    // stops trying slots on this output.
+    // and the effect stays wherever it was. Remember the refusal so the next
+    // attach with no slot named skips this rung (`slot_for`).
+    remember_failed_slot(guid, slot);
     error = L"cannot attach to " + std::wstring(slot_name(slot)) + L" on " +
             guid + L": " + plan.refused;
     return false;
@@ -129,9 +143,9 @@ bool attach_one(const std::wstring& guid, std::optional<Slot> named,
   if (plan.changed && !write_fx_values(guid, before, plan.after, error)) {
     return false;
   }
-  if (named.has_value()) {
-    remember_slot(guid, slot);
-  }
+  // Also when the slot was chosen rather than named: the next attach must put
+  // the engine back where it is, not re-run the guess.
+  remember_slot(guid, slot);
   attached = is_attached(plan.after, kEngineClsid);
   // Only now, and only where the engine is really registered: clearing the
   // switch on an output the attach refused would be a change to somebody

@@ -38,8 +38,13 @@ jobs:
         run: node native/tools/generate-parameters.mjs
 
       - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Test the workspace
         run: cargo test --workspace --features link-cpp-core --locked
+
+      - name: Lint the workspace
+        run: cargo clippy --workspace --features link-cpp-core --locked -- -D warnings

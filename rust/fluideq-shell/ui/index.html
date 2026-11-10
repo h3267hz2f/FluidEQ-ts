@@ -59,7 +59,16 @@
           <div class="title">
             <p class="eyebrow">Parametric equalizer</p>
             <h1>Equalizer</h1>
-            <p id="preset" class="preset">Harman Target 2018</p>
+            <div class="preset-bar">
+              <select id="preset" class="preset-select" aria-label="EQ preset"></select>
+              <button id="preset-save" class="preset-action" type="button">Save as…</button>
+              <button id="preset-delete" class="preset-action" type="button">Delete</button>
+            </div>
+            <form id="preset-form" class="preset-form" hidden>
+              <input id="preset-name" class="preset-name" type="text" maxlength="64" placeholder="Preset name" aria-label="Preset name" />
+              <button id="preset-confirm" class="preset-action accent" type="submit">Save</button>
+              <button id="preset-cancel" class="preset-action" type="button">Cancel</button>
+            </form>
           </div>
 
           <div class="device" title="The shell drives the default Windows render endpoint">
@@ -140,9 +149,17 @@
               <span>Preamp <output id="preamp-value">0.0 dB</output></span>
               <input id="preamp" class="range" type="range" min="-24" max="24" step="0.1" value="0" />
             </label>
+            <p id="preamp-warning" class="preamp-warning" role="status" aria-live="polite" hidden></p>
 
             <div class="stat-row"><span>Auto headroom</span><button id="auto-headroom" class="stat-toggle" type="button" aria-pressed="true">On</button></div>
             <div class="stat-row"><span>Bands</span><strong id="band-count">15</strong></div>
+
+            <div class="divider"></div>
+
+            <div class="stat-row"><span>Convolution</span><button id="ir-load" class="stat-toggle" type="button">Load IR…</button></div>
+            <input id="ir-file" type="file" accept=".wav,.aif,.aiff" hidden />
+            <p id="ir-state" class="ir-state">No impulse response</p>
+            <button id="ir-clear" class="ghost" type="button" hidden>Clear impulse response</button>
           </aside>
         </section>
 

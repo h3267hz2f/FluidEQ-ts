@@ -32,6 +32,7 @@ pub mod linear_phase;
 pub mod models;
 pub mod opra;
 pub mod persistence;
+pub mod presets;
 pub mod remote_audio_runtime;
 pub mod remote_playback;
 pub mod residency;
@@ -59,7 +60,7 @@ use room_heads::RoomHeadBank;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
-use wav_ir::{decode_pcm_impulse_response, DecodedImpulseResponse};
+use wav_ir::{decode_pcm_impulse_response, DecodedImpulseResponse, IrSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToneSettings {
@@ -95,6 +96,8 @@ pub struct AppStateSnapshot {
     pub auto_headroom: bool,
     pub preamp_db: f64,
     pub auto_preamp_db: f64,
+    #[serde(default)]
+    pub preamp_total_db: f64,
     pub active_preset_name: String,
     #[serde(default)]
     pub active_device_guid: Option<String>,
@@ -118,6 +121,19 @@ pub struct AppStateSnapshot {
     pub chain_settings: FeqChainSettings,
     pub models: NeuralModelStatus,
     pub residency: MemoryFootprintEstimate,
+    /// The impulse response installed in this process. Not persisted: the host
+    /// loads it again from the file the user picked, and a restart must not
+    /// claim a convolution is running when the kernel is empty.
+    #[serde(skip)]
+    pub impulse_response: Option<IrSummary>,
+}
+
+/// The gain the chain actually plays at: the headroom the curve needs plus the
+/// user's own trim. The window shows this sum, not the trim alone, because a
+/// -24 dB trim under a -38 dB guard read as a 24 dB cut while the chain sat at
+/// -62 dB and looked broken.
+pub fn total_preamp_db(manual_db: f64, auto_db: f64, auto_headroom: bool) -> f64 {
+    manual_db + if auto_headroom { auto_db.min(0.0) } else { 0.0 }
 }
 
 pub struct AppStateStore {
@@ -141,6 +157,7 @@ pub struct AppStateStore {
     residency: ColdResidencyController,
     native_chain: NativeChainHandle,
     native_meters: NativeMetersHandle,
+    impulse_response: Option<IrSummary>,
 }
 
 impl Default for AppStateStore {
@@ -190,7 +207,7 @@ impl AppStateStore {
             sample_rate,
             master_power: true,
             auto_headroom: true,
-            preamp_db: -1.5,
+            preamp_db: 0.0,
             active_preset_name: "Modern Country".to_string(),
             eq_model: FeqEqModel::FEQ_EQ_MODEL_CLEAN,
             eq_model_amount: 1.0,
@@ -206,6 +223,7 @@ impl AppStateStore {
             residency: ColdResidencyController::new(),
             native_chain: NativeChainHandle::new(sample_rate as u32, 2, 2048),
             native_meters: NativeMetersHandle::new(2, sample_rate),
+            impulse_response: None,
         };
         store.sync_eq_and_tone_into_chain_settings();
         store.commit_chain_and_linear_phase_kernel();
@@ -355,8 +373,63 @@ impl AppStateStore {
     pub fn load_wav_impulse_response(&mut self, wav_bytes: &[u8]) -> Result<DecodedImpulseResponse, String> {
         let decoded = decode_pcm_impulse_response(wav_bytes)?;
         let _ = self.native_chain.set_eq_kernel(&decoded.left, &decoded.right);
+        self.impulse_response = Some(IrSummary::from_decoded(&decoded));
         self.revision += 1;
         Ok(decoded)
+    }
+
+    /// Removes the convolution kernel. The window keeps the summary in the
+    /// snapshot, so this clears it too rather than leaving a stale "loaded".
+    pub fn clear_impulse_response(&mut self) {
+        let _ = self.native_chain.set_eq_kernel(&[], &[]);
+        self.impulse_response = None;
+        self.revision += 1;
+    }
+
+    pub fn impulse_response(&self) -> Option<&IrSummary> {
+        self.impulse_response.as_ref()
+    }
+
+    /// The current curve, headroom and voicing as a named preset.
+    pub fn current_preset(&self, name: &str) -> presets::EqPreset {
+        presets::EqPreset {
+            name: name.trim().to_string(),
+            preamp_db: self.preamp_db,
+            auto_headroom: self.auto_headroom,
+            eq_model: self.eq_model_name().to_string(),
+            eq_model_amount: self.eq_model_amount,
+            matched_treble: self.matched_treble,
+            tone: self.tone.clone(),
+            bands: self.bands.clone(),
+        }
+    }
+
+    /// Replaces the editable curve with a preset and keeps the master switch
+    /// where the user left it: a preset is an EQ, not a power state.
+    pub fn apply_preset(&mut self, preset: &presets::EqPreset) -> AppStateSnapshot {
+        let master_power = self.master_power;
+        let mut snapshot = self.set_eq_bands_and_config(
+            preset.bands.clone(),
+            &preset.eq_model,
+            preset.matched_treble,
+            master_power,
+            preset.auto_headroom,
+            preset.preamp_db,
+            preset.tone.clone(),
+        );
+        self.active_preset_name = preset.name.clone();
+        self.revision += 1;
+        snapshot.revision = self.revision;
+        snapshot.active_preset_name = self.active_preset_name.clone();
+        snapshot
+    }
+
+    /// Names the curve the window is showing, for a preset that was just
+    /// saved under the name it already carries.
+    pub fn set_active_preset_name(&mut self, name: &str) -> AppStateSnapshot {
+        self.active_preset_name = name.trim().to_string();
+        self.revision += 1;
+        self.snapshot()
     }
 
     /// Loads a track onto a player deck (`0`, `1`, `FEQ_DECK_HANDOFF = 2`, or `FEQ_DECK_SPARE = 3`),
@@ -669,6 +742,11 @@ impl AppStateStore {
             auto_headroom: self.auto_headroom,
             preamp_db: self.preamp_db,
             auto_preamp_db,
+            preamp_total_db: total_preamp_db(
+                self.preamp_db,
+                auto_preamp_db,
+                self.auto_headroom,
+            ),
             active_preset_name: self.active_preset_name.clone(),
             active_device_guid: self.device_profiles.active_device_guid.clone(),
             active_device_name: self.device_profiles.active_device_name.clone(),
@@ -685,6 +763,7 @@ impl AppStateStore {
             chain_settings: self.chain_settings,
             models: self.models.clone(),
             residency: self.residency.estimate_memory(),
+            impulse_response: self.impulse_response.clone(),
         }
     }
 }
@@ -692,6 +771,18 @@ impl AppStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_preamp_readout_is_the_guard_plus_the_trim() {
+        // With headroom off the slider is the whole answer; with it on the
+        // guard and the trim add up, which is what the engine applies.
+        assert_eq!(total_preamp_db(0.0, -6.0, true), -6.0);
+        assert_eq!(total_preamp_db(-3.0, -6.0, true), -9.0);
+        assert_eq!(total_preamp_db(-3.0, -6.0, false), -3.0);
+        // The default trim is zero, so a fresh store shows only the curve's
+        // own headroom instead of an unexplained -1.5 dB.
+        assert_eq!(AppStateStore::new(48_000.0).snapshot().preamp_db, 0.0);
+    }
 
     #[test]
     fn cold_standby_preserves_eq_state_and_disables_meters() {

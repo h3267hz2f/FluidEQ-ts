@@ -9,13 +9,23 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // No polling timers: system volume is written by the gesture that changes it,
 // and the canvas is redrawn on the next animation frame.
 
+import { registerView } from './views/registry.js';
+import { equalizer } from './views/equalizer/index.js';
+import {
+  F_MIN,
+  F_MAX,
+  dbOf,
+  frequencyOf,
+  xOf,
+  yOf,
+} from './views/equalizer/graph.js';
+
 const TAURI = window.__TAURI__;
 const invoke = TAURI?.core?.invoke;
 
-const F_MIN = 20;
-const F_MAX = 20_000;
-const DB_MIN = -18;
-const DB_MAX = 18;
+// Below this the curve's peaks are high enough that the guard is doing the
+// cutting; trimming further turns the output quiet instead of fixing them.
+const PREAMP_WARN_DB = -30;
 const SAMPLE_RATE = 48_000;
 let sampleRate = SAMPLE_RATE;
 const ISO_FREQUENCIES = [
@@ -57,6 +67,7 @@ const demoSnapshot = () => ({
   auto_headroom: true,
   preamp_db: 0,
   auto_preamp_db: 0,
+  preamp_total_db: 0,
   active_preset_name: 'Harman Target 2018',
   eq_model: 'FEQ_EQ_MODEL_CLEAN',
   eq_model_amount: 1,
@@ -69,6 +80,12 @@ const demoSnapshot = () => ({
 const els = {
   canvas: document.getElementById('response'),
   preset: document.getElementById('preset'),
+  presetSave: document.getElementById('preset-save'),
+  presetDelete: document.getElementById('preset-delete'),
+  presetForm: document.getElementById('preset-form'),
+  presetName: document.getElementById('preset-name'),
+  presetConfirm: document.getElementById('preset-confirm'),
+  presetCancel: document.getElementById('preset-cancel'),
   power: document.getElementById('power'),
   volume: document.getElementById('volume'),
   volumeValue: document.getElementById('volume-value'),
@@ -84,7 +101,12 @@ const els = {
   resetBand: document.getElementById('reset-band'),
   preamp: document.getElementById('preamp'),
   preampValue: document.getElementById('preamp-value'),
+  preampWarning: document.getElementById('preamp-warning'),
   autoHeadroom: document.getElementById('auto-headroom'),
+  irLoad: document.getElementById('ir-load'),
+  irFile: document.getElementById('ir-file'),
+  irState: document.getElementById('ir-state'),
+  irClear: document.getElementById('ir-clear'),
   bandCount: document.getElementById('band-count'),
   chainState: document.getElementById('chain-state'),
   connection: document.getElementById('connection'),
@@ -95,6 +117,8 @@ const els = {
   engineState: document.getElementById('engine-state'),
   deviceName: document.querySelector('.device-name'),
 };
+
+const graph = registerView(equalizer).createGraph(els.canvas);
 
 let snapshot = demoSnapshot();
 let selectedId = 4;
@@ -109,6 +133,8 @@ let bandCommitQueued = false;
 let engineStatus = null;
 let hostStatus = null;
 let engineInstallInFlight = false;
+let presetNames = [];
+let presetBusy = false;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -167,287 +193,6 @@ function setRangeValue(input, value) {
   if (document.activeElement !== input) input.value = String(value);
 }
 
-// ---------------------------------------------------------------------------
-// Biquad magnitude — the same filters the native core applies, so the curve is
-// the chain's response rather than a decorative spline through the handles.
-// ---------------------------------------------------------------------------
-
-function coefficients(band) {
-  const frequency = clamp(Number(band.frequency) || 1000, 10, sampleRate / 2 - 1);
-  const q = clamp(Number(band.quality) || 1, 0.05, 40);
-  const gain = clamp(Number(band.gain_db) || 0, -60, 60);
-  const type = band.filter_type || 'PK';
-  const w0 = (2 * Math.PI * frequency) / sampleRate;
-  const cosw = Math.cos(w0);
-  const sinw = Math.sin(w0);
-  const alpha = sinw / (2 * q);
-  const a = 10 ** (gain / 40);
-
-  if (type === 'LSC' || type === 'HSC') {
-    const sqrtA = Math.sqrt(a);
-    const common = 2 * sqrtA * alpha;
-    if (type === 'LSC') {
-      return {
-        b0: a * (a + 1 - (a - 1) * cosw + common),
-        b1: 2 * a * (a - 1 - (a + 1) * cosw),
-        b2: a * (a + 1 - (a - 1) * cosw - common),
-        a0: a + 1 + (a - 1) * cosw + common,
-        a1: -2 * (a - 1 + (a + 1) * cosw),
-        a2: a + 1 + (a - 1) * cosw - common,
-      };
-    }
-    return {
-      b0: a * (a + 1 + (a - 1) * cosw + common),
-      b1: -2 * a * (a - 1 + (a + 1) * cosw),
-      b2: a * (a + 1 + (a - 1) * cosw - common),
-      a0: a + 1 - (a - 1) * cosw + common,
-      a1: 2 * (a - 1 - (a + 1) * cosw),
-      a2: a + 1 - (a - 1) * cosw - common,
-    };
-  }
-
-  if (type === 'NO') {
-    return { b0: 1, b1: -2 * cosw, b2: 1, a0: 1 + alpha, a1: -2 * cosw, a2: 1 - alpha };
-  }
-
-  if (type === 'LPQ') {
-    return {
-      b0: (1 - cosw) / 2,
-      b1: 1 - cosw,
-      b2: (1 - cosw) / 2,
-      a0: 1 + alpha,
-      a1: -2 * cosw,
-      a2: 1 - alpha,
-    };
-  }
-
-  if (type === 'HPQ') {
-    return {
-      b0: (1 + cosw) / 2,
-      b1: -(1 + cosw),
-      b2: (1 + cosw) / 2,
-      a0: 1 + alpha,
-      a1: -2 * cosw,
-      a2: 1 - alpha,
-    };
-  }
-
-  if (type === 'BP') {
-    return { b0: alpha, b1: 0, b2: -alpha, a0: 1 + alpha, a1: -2 * cosw, a2: 1 - alpha };
-  }
-
-  return {
-    b0: 1 + alpha * a,
-    b1: -2 * cosw,
-    b2: 1 - alpha * a,
-    a0: 1 + alpha / a,
-    a1: -2 * cosw,
-    a2: 1 - alpha / a,
-  };
-}
-
-function magnitudeDb(band, frequency) {
-  const c = coefficients(band);
-  const w = (2 * Math.PI * frequency) / sampleRate;
-  const cosw = Math.cos(w);
-  const sinw = Math.sin(w);
-  const cos2w = Math.cos(2 * w);
-  const sin2w = Math.sin(2 * w);
-  const numerator = Math.hypot(
-    c.b0 + c.b1 * cosw + c.b2 * cos2w,
-    -(c.b1 * sinw + c.b2 * sin2w),
-  );
-  const denominator = Math.hypot(
-    c.a0 + c.a1 * cosw + c.a2 * cos2w,
-    -(c.a1 * sinw + c.a2 * sin2w),
-  );
-  return 20 * Math.log10(Math.max(numerator / Math.max(denominator, 1e-12), 1e-9));
-}
-
-function responseDb(frequency) {
-  let db = Number(snapshot.preamp_db) || 0;
-  for (const band of snapshot.bands ?? []) {
-    if (band.enabled) db += magnitudeDb(band, frequency);
-  }
-  return db;
-}
-
-// ---------------------------------------------------------------------------
-// Canvas
-// ---------------------------------------------------------------------------
-
-const PAD = { left: 44, right: 20, top: 10, bottom: 22 };
-
-function xOf(frequency, width) {
-  const ratio = Math.log10(clamp(frequency, F_MIN, F_MAX) / F_MIN) / Math.log10(F_MAX / F_MIN);
-  return PAD.left + ratio * (width - PAD.left - PAD.right);
-}
-
-function frequencyOf(x, width) {
-  const ratio = clamp((x - PAD.left) / Math.max(width - PAD.left - PAD.right, 1), 0, 1);
-  return F_MIN * (F_MAX / F_MIN) ** ratio;
-}
-
-function yOf(db, height) {
-  const ratio = (DB_MAX - clamp(db, DB_MIN, DB_MAX)) / (DB_MAX - DB_MIN);
-  return PAD.top + ratio * (height - PAD.top - PAD.bottom);
-}
-
-function dbOf(y, height) {
-  const ratio = clamp((y - PAD.top) / Math.max(height - PAD.top - PAD.bottom, 1), 0, 1);
-  return DB_MAX - ratio * (DB_MAX - DB_MIN);
-}
-
-function prepareCanvas() {
-  const rect = els.canvas.getBoundingClientRect();
-  if (rect.width < 4 || rect.height < 4) return null;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const width = Math.round(rect.width * dpr);
-  const height = Math.round(rect.height * dpr);
-  if (els.canvas.width !== width || els.canvas.height !== height) {
-    els.canvas.width = width;
-    els.canvas.height = height;
-  }
-  const ctx = els.canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, width: rect.width, height: rect.height };
-}
-
-function drawGrid(ctx, width, height) {
-  const frequencies = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-  ctx.save();
-  ctx.font = '10px -apple-system, "Segoe UI", Ubuntu, Cantarell, sans-serif';
-  ctx.textBaseline = 'middle';
-
-  for (const frequency of frequencies) {
-    const x = xOf(frequency, width);
-    ctx.strokeStyle = frequency === 1000 ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.045)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, PAD.top);
-    ctx.lineTo(x, height - PAD.bottom);
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(125,138,153,0.62)';
-    ctx.textAlign = 'center';
-    ctx.fillText(
-      frequency >= 1000 ? `${frequency / 1000}k` : String(frequency),
-      x,
-      height - PAD.bottom + 12,
-    );
-  }
-
-  for (const db of [18, 12, 6, 0, -6, -12, -18]) {
-    const y = yOf(db, height);
-    ctx.strokeStyle = db === 0 ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.045)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(PAD.left, y);
-    ctx.lineTo(width - PAD.right, y);
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(125,138,153,0.62)';
-    ctx.textAlign = 'right';
-    ctx.fillText(db > 0 ? `+${db}` : String(db), PAD.left - 9, y);
-  }
-  ctx.restore();
-}
-
-function drawGraph() {
-  const prepared = prepareCanvas();
-  if (!prepared) return;
-  const { ctx, width, height } = prepared;
-
-  ctx.clearRect(0, 0, width, height);
-  drawGrid(ctx, width, height);
-
-  const left = PAD.left;
-  const right = width - PAD.right;
-  const bottom = height - PAD.bottom;
-  const points = [];
-  const samples = Math.max(260, Math.round((right - left) * 0.55));
-  for (let index = 0; index <= samples; index += 1) {
-    const ratio = index / samples;
-    const frequency = F_MIN * (F_MAX / F_MIN) ** ratio;
-    points.push([
-      left + ratio * (right - left),
-      yOf(responseDb(frequency), height),
-    ]);
-  }
-
-  const fill = ctx.createLinearGradient(0, PAD.top, 0, bottom);
-  fill.addColorStop(0, 'rgba(59,232,196,0.20)');
-  fill.addColorStop(0.55, 'rgba(59,232,196,0.06)');
-  fill.addColorStop(1, 'rgba(59,232,196,0.005)');
-  ctx.beginPath();
-  ctx.moveTo(points[0][0], points[0][1]);
-  for (let index = 1; index < points.length; index += 1) {
-    ctx.lineTo(points[index][0], points[index][1]);
-  }
-  ctx.lineTo(right, bottom);
-  ctx.lineTo(left, bottom);
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-
-  const stroke = ctx.createLinearGradient(left, 0, right, 0);
-  stroke.addColorStop(0, 'rgba(124,160,255,0.88)');
-  stroke.addColorStop(0.4, '#3be8c4');
-  stroke.addColorStop(1, '#ffcf8a');
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(points[0][0], points[0][1]);
-  for (let index = 1; index < points.length; index += 1) {
-    ctx.lineTo(points[index][0], points[index][1]);
-  }
-  ctx.lineWidth = 9;
-  ctx.strokeStyle = 'rgba(59,232,196,0.055)';
-  ctx.stroke();
-  ctx.lineWidth = 2.2;
-  ctx.strokeStyle = stroke;
-  ctx.shadowColor = 'rgba(59,232,196,0.38)';
-  ctx.shadowBlur = 14;
-  ctx.stroke();
-  ctx.restore();
-
-  const band = selectedBand();
-  if (band) {
-    const x = xOf(band.frequency, width);
-    const y = yOf(band.gain_db, height);
-    ctx.save();
-    ctx.setLineDash([3, 4]);
-    ctx.strokeStyle = 'rgba(255,180,94,0.28)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, PAD.top);
-    ctx.lineTo(x, bottom);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  for (const current of snapshot.bands ?? []) {
-    if (!current.enabled) continue;
-    const x = xOf(current.frequency, width);
-    const y = yOf(current.gain_db, height);
-    const selected = current.id === selectedId;
-    ctx.beginPath();
-    ctx.arc(x, y, selected ? 4.6 : 3.1, 0, Math.PI * 2);
-    ctx.fillStyle = selected ? '#0b1517' : '#3be8c4';
-    ctx.fill();
-    ctx.lineWidth = selected ? 2.2 : 1;
-    ctx.strokeStyle = selected ? '#ffb45e' : 'rgba(5,7,11,0.9)';
-    ctx.stroke();
-    if (selected) {
-      ctx.beginPath();
-      ctx.arc(x, y, 8.5, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,180,94,0.26)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-  }
-}
-
 function scheduleDraw() {
   if (drawFrame) return;
   drawFrame = requestAnimationFrame(() => {
@@ -456,12 +201,72 @@ function scheduleDraw() {
   });
 }
 
+function drawGraph() {
+  graph.draw({
+    bands: snapshot.bands ?? [],
+    preampDb: snapshot.preamp_db,
+    selectedId,
+    sampleRate,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
+function renderPresetSelect() {
+  const active = snapshot.active_preset_name || 'Custom curve';
+  const names = presetNames.includes(active)
+    ? presetNames
+    : [active, ...presetNames];
+  const fragment = document.createDocumentFragment();
+  for (const name of names) {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = name;
+    fragment.appendChild(option);
+  }
+  els.preset.replaceChildren(fragment);
+  els.preset.value = active;
+}
+
+// A preset the user deleted, or one another window saved, changes the list;
+// the chosen curve is the snapshot's own name, not whatever the control says.
+async function refreshPresets() {
+  if (!invoke) return;
+  try {
+    presetNames = await invoke('list_presets');
+  } catch (error) {
+    showMessage(`Presets: ${error}`);
+    return;
+  }
+  renderPresetSelect();
+}
+
+function renderIr() {
+  const ir = snapshot.impulse_response;
+  if (!ir) {
+    els.irState.textContent = 'No impulse response';
+    els.irClear.hidden = true;
+    return;
+  }
+  const seconds = Number(ir.seconds) || 0;
+  const milliseconds = seconds * 1000;
+  const rate = Number(ir.sample_rate) || 0;
+  const peak = Math.max(Number(ir.left_peak_db), Number(ir.right_peak_db));
+  els.irState.textContent = [
+    `${ir.frames} taps`,
+    `${milliseconds.toFixed(milliseconds < 10 ? 1 : 0)} ms`,
+    rate > 0 ? `${(rate / 1000).toFixed(1)} kHz` : '',
+    Number.isFinite(peak) ? `peak ${formatDb(peak)} dB` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  els.irClear.hidden = false;
+}
+
 function renderHeader() {
-  els.preset.textContent = snapshot.active_preset_name || 'Custom curve';
+  renderPresetSelect();
   els.power.classList.toggle('on', Boolean(snapshot.master_power));
   els.power.setAttribute('aria-pressed', String(Boolean(snapshot.master_power)));
   els.chainState.textContent = snapshot.master_power
@@ -532,6 +337,7 @@ function renderInspector() {
   setRangeValue(els.preamp, snapshot.preamp_db);
   setRangeFill(els.preamp, ((snapshot.preamp_db + 24) / 48) * 100);
   renderPreampReadout();
+  renderIr();
 }
 
 // With auto headroom on, the guard starts at the curve's own level and the
@@ -539,11 +345,18 @@ function renderInspector() {
 // like the whole gain while the chain actually sat at -62 dB.
 function renderPreampReadout() {
   const manual = Number(snapshot.preamp_db) || 0;
-  const auto = snapshot.auto_headroom ? Number(snapshot.auto_preamp_db) || 0 : 0;
+  const auto = snapshot.auto_headroom
+    ? Math.min(0, Number(snapshot.auto_preamp_db) || 0)
+    : 0;
   const total = manual + auto;
   els.preampValue.textContent = `${formatDb(total)} dB`;
   els.preampValue.title = snapshot.auto_headroom
     ? `Auto headroom ${formatDb(auto)} dB + trim ${formatDb(manual)} dB`
+    : '';
+  const tooLow = total < PREAMP_WARN_DB;
+  els.preampWarning.hidden = !tooLow;
+  els.preampWarning.textContent = tooLow
+    ? `Total gain ${formatDb(total)} dB. The curve peaks are above 0 dB — lower them instead of trimming this far.`
     : '';
 }
 
@@ -632,6 +445,100 @@ async function commitAutoHeadroom() {
   }
   renderAll();
 }
+
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+
+async function applyPreset(name) {
+  if (!invoke || presetBusy || !name) return;
+  presetBusy = true;
+  try {
+    snapshot = await invoke('apply_preset', { name });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not apply the preset: ${error}`);
+    renderAll();
+  } finally {
+    presetBusy = false;
+  }
+}
+
+els.preset.addEventListener('change', () => applyPreset(els.preset.value));
+
+els.presetSave.addEventListener('click', () => {
+  els.presetForm.hidden = false;
+  const active = snapshot.active_preset_name;
+  els.presetName.value =
+    !active || active === 'Custom curve' ? '' : active;
+  els.presetName.focus();
+  els.presetName.select();
+});
+
+els.presetCancel.addEventListener('click', () => {
+  els.presetForm.hidden = true;
+});
+
+els.presetForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const name = els.presetName.value.trim();
+  if (!invoke || !name) return;
+  try {
+    presetNames = await invoke('save_preset', { name });
+    snapshot.active_preset_name = name;
+    els.presetForm.hidden = true;
+    showMessage(`Saved the preset "${name}"`, 'ok');
+    renderHeader();
+  } catch (error) {
+    showMessage(`Could not save the preset: ${error}`);
+  }
+});
+
+els.presetDelete.addEventListener('click', async () => {
+  const name = els.preset.value;
+  if (!invoke || !name) return;
+  if (!window.confirm(`Delete the preset "${name}"?`)) return;
+  try {
+    presetNames = await invoke('delete_preset', { name });
+    snapshot = await invoke('get_snapshot');
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not delete the preset: ${error}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Convolution
+// ---------------------------------------------------------------------------
+
+els.irLoad.addEventListener('click', () => els.irFile.click());
+
+els.irFile.addEventListener('change', async () => {
+  const file = els.irFile.files?.[0];
+  if (!invoke || !file) return;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    snapshot = await invoke('load_ir', { bytes: Array.from(bytes) });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not load the impulse response: ${error}`);
+  } finally {
+    els.irFile.value = '';
+  }
+});
+
+els.irClear.addEventListener('click', async () => {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('clear_ir');
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not clear the impulse response: ${error}`);
+  }
+});
 
 function setVolume(value) {
   const clamped = clamp(value, 0, 1);
@@ -844,6 +751,31 @@ function engineBlockers(status) {
   return blockers;
 }
 
+// An attached effect is not a loaded one: Windows creates the APO when it
+// rebuilds the output's graph, and it will not when the runtime is missing,
+// the folder is closed to the audio service, or the slot has no processing
+// mode. Each has a different next step, so the window names it instead of
+// leaving the output silent with no reason.
+function loadAdvice(endpoint, status) {
+  if (status?.serviceCanWrite === false) {
+    return 'the audio service cannot write the engine folder — repair the engine';
+  }
+  if (status?.runtimeBeside === false) {
+    return 'the engine runtime is missing — reinstall the engine';
+  }
+  if (endpoint?.modeMissing) {
+    return 'the slot has no processing mode — attach again';
+  }
+  const log = Array.isArray(status?.engineLog) ? status.engineLog : [];
+  const reason = [...log]
+    .reverse()
+    .find((line) => line.startsWith('pass-through:'));
+  if (reason) {
+    return `Windows is passing it through: ${reason.slice('pass-through: '.length)}`;
+  }
+  return 'restart Windows audio so the output creates the engine';
+}
+
 function renderEngineStatus(status) {
   engineStatus = status;
   const endpoints = Array.isArray(status?.endpoints) ? status.endpoints : [];
@@ -853,9 +785,11 @@ function renderEngineStatus(status) {
   const bypassed = endpoints.filter(
     (endpoint) => endpoint.attached && endpoint.tpBypassed
   ).length;
-  const unloaded = endpoints.filter(
+  const unloadedEndpoints = endpoints.filter(
     (endpoint) => endpoint.attached && endpoint.loaded === false
-  ).length;
+  );
+  const unloaded = unloadedEndpoints.length;
+  const advice = unloaded > 0 ? loadAdvice(unloadedEndpoints[0], status) : '';
   const stale =
     installed &&
     Boolean(status?.dllVersion) &&
@@ -869,7 +803,7 @@ function renderEngineStatus(status) {
     installed && attached > 0 && bypassed === 0 && !blocked && !bridgeError;
   const working = active && unloaded < attached;
   const needsAttention =
-    attachable || bypassed > 0 || stale || blocked || Boolean(bridgeError);
+    attachable || bypassed > 0 || stale || blocked || Boolean(bridgeError) || unloaded > 0;
 
   const device = status?.defaultDevice;
   if (device?.name) {
@@ -888,7 +822,7 @@ function renderEngineStatus(status) {
   }
   if (unloaded > 0) {
     notes.push(
-      `${unloaded} attached output${unloaded === 1 ? ' has' : 's have'} never loaded the engine`
+      `${unloaded} attached output${unloaded === 1 ? ' has' : 's have'} never loaded the engine: ${advice}`
     );
   }
 
@@ -905,7 +839,7 @@ function renderEngineStatus(status) {
     els.engineText.textContent = stale
       ? `Engine update available · ${status.dllVersion} → ${status.bundledVersion}`
       : unloaded === attached
-        ? 'Engine attached, never loaded'
+        ? `Engine attached, never loaded · ${unloadedEndpoints[0]?.name ?? 'output'}`
         : unloaded > 0
           ? `Engine loaded on ${attached - unloaded} of ${attached} outputs`
           : attachable
@@ -924,11 +858,18 @@ function renderEngineStatus(status) {
       ? 'Repair engine'
       : bypassed
         ? 'Fix engine activation'
-        : stale
-          ? 'Update engine'
-          : 'Attach all outputs'
+        : unloaded > 0
+          ? 'Restart Windows audio'
+          : stale
+            ? 'Update engine'
+            : 'Attach all outputs'
     : 'Enable system audio';
-  clearMessageStartingWith('Engine status:');
+  if (unloaded > 0) {
+    showMessage(`Engine never loaded: ${advice}`);
+  } else {
+    clearMessageStartingWith('Engine never loaded:');
+    clearMessageStartingWith('Engine status:');
+  }
 }
 
 async function refreshEngineHost() {
@@ -998,6 +939,7 @@ async function boot() {
     setConnection('Rust state centre connected · C++ core linked', 'live');
     clearMessage();
     refreshEngineStatus();
+    refreshPresets();
   } catch (error) {
     setConnection('Rust state centre unavailable', 'preview');
     showMessage(`Could not read the state: ${error}`);
@@ -1019,5 +961,12 @@ async function boot() {
 
   await refreshEngineHost();
 }
+
+// The tray's bypass entry changes the chain in the other direction; the
+// window is told the new snapshot rather than guessing at it.
+TAURI?.event?.listen?.('snapshot', (event) => {
+  snapshot = event.payload;
+  renderAll();
+});
 
 boot();

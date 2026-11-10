@@ -43,6 +43,46 @@ pub struct DecodedImpulseResponse {
     pub right: Vec<f32>,
 }
 
+/// What the window needs to show about a loaded impulse response: long enough
+/// to recognise the file, without shipping the samples back over the IPC.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrSummary {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: usize,
+    pub seconds: f64,
+    pub left_peak_db: f64,
+    pub right_peak_db: f64,
+}
+
+fn peak_db(samples: &[f32]) -> f64 {
+    let peak = samples
+        .iter()
+        .fold(0.0_f32, |worst, &sample| worst.max(sample.abs()));
+    if peak <= 0.0 {
+        -120.0
+    } else {
+        (20.0 * f64::from(peak).log10()).max(-120.0)
+    }
+}
+
+impl IrSummary {
+    pub fn from_decoded(decoded: &DecodedImpulseResponse) -> Self {
+        Self {
+            sample_rate: decoded.sample_rate,
+            channels: decoded.channels,
+            frames: decoded.frames,
+            seconds: if decoded.sample_rate == 0 {
+                0.0
+            } else {
+                decoded.frames as f64 / f64::from(decoded.sample_rate)
+            },
+            left_peak_db: peak_db(&decoded.left),
+            right_peak_db: peak_db(&decoded.right),
+        }
+    }
+}
+
 /// Decodes an 80-bit IEEE extended precision float (`SANE` / Apple AIFF `COMM` sample rate).
 /// Exact port of `read_extended80` in `/native/dsp-host/src/decoders/pcm_decoder.cpp`.
 pub fn read_extended80(at: &[u8; 10]) -> f64 {

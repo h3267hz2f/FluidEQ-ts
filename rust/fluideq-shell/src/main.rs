@@ -27,12 +27,19 @@ use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
-use tauri::{Manager, State};
+use tauri::menu::MenuBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, State, WindowEvent};
 
 struct ShellState {
     store: Mutex<AppStateStore>,
     state_path: PathBuf,
+    data_dir: PathBuf,
     host: engine_host::EngineHost,
+}
+
+fn presets_dir(state: &ShellState) -> PathBuf {
+    state.data_dir.join("presets")
 }
 
 fn store_of(state: &ShellState) -> Result<MutexGuard<'_, AppStateStore>, String> {
@@ -140,6 +147,70 @@ fn set_band_gain(
 }
 
 #[tauri::command]
+fn list_presets(state: State<'_, ShellState>) -> Result<Vec<String>, String> {
+    Ok(fluideq_state::presets::list(&presets_dir(&state)))
+}
+
+#[tauri::command]
+fn apply_preset(state: State<'_, ShellState>, name: String) -> Result<AppStateSnapshot, String> {
+    let preset = fluideq_state::presets::load(&presets_dir(&state), &name)?;
+    let mut store = store_of(&state)?;
+    let snapshot = store.apply_preset(&preset);
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn save_preset(state: State<'_, ShellState>, name: String) -> Result<Vec<String>, String> {
+    let mut store = store_of(&state)?;
+    let preset = store.current_preset(&name);
+    fluideq_state::presets::save(&presets_dir(&state), &preset)?;
+    let snapshot = store.set_active_preset_name(&preset.name);
+    save(&store, &state);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(fluideq_state::presets::list(&presets_dir(&state)))
+}
+
+#[tauri::command]
+fn delete_preset(state: State<'_, ShellState>, name: String) -> Result<Vec<String>, String> {
+    fluideq_state::presets::delete(&presets_dir(&state), &name)?;
+    let mut store = store_of(&state)?;
+    if store
+        .snapshot()
+        .active_preset_name
+        .eq_ignore_ascii_case(name.trim())
+    {
+        // The curve stays as it is; only its claim to a name that no longer
+        // exists goes away.
+        let snapshot = store.set_active_preset_name("Custom curve");
+        save(&store, &state);
+        let _ = apo_bridge::publish(&snapshot);
+    }
+    Ok(fluideq_state::presets::list(&presets_dir(&state)))
+}
+
+#[tauri::command]
+fn load_ir(state: State<'_, ShellState>, bytes: Vec<u8>) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    store.load_wav_impulse_response(&bytes)?;
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn clear_ir(state: State<'_, ShellState>) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    store.clear_impulse_response();
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn get_output_volume() -> Result<f64, String> {
     audio_endpoint::get_master_volume()
 }
@@ -156,10 +227,21 @@ fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
     // the config file could not be written, or the owner pipe never came up.
     // Both are this process's failure, so they ride beside the helper's answer
     // rather than being guessed at from it.
-    if let Some(error) = apo_bridge::last_error() {
-        if let Some(object) = status.as_object_mut() {
+    if let Some(object) = status.as_object_mut() {
+        if let Some(error) = apo_bridge::last_error() {
             object.insert("bridgeError".to_string(), Value::String(error));
         }
+        // And the engine's own last verdicts, which are where an output that
+        // was attached but never instantiated says why.
+        object.insert(
+            "engineLog".to_string(),
+            Value::Array(
+                engine_setup::log_tail()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
     }
     Ok(status)
 }
@@ -205,9 +287,142 @@ fn run_stdio_ipc_loop() {
     }
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// The tray's bypass entry flips the same master switch as the power button,
+/// so the chain, the config file and the window cannot disagree.
+fn toggle_bypass(app: &tauri::AppHandle) -> Option<AppStateSnapshot> {
+    let state = app.try_state::<ShellState>()?;
+    let mut store = store_of(&state).ok()?;
+    let current = store.snapshot();
+    let snapshot = store.set_eq_bands_and_config(
+        current.bands,
+        &current.eq_model,
+        current.matched_treble,
+        !current.master_power,
+        current.auto_headroom,
+        current.preamp_db,
+        current.tone,
+    );
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Some(snapshot)
+}
+
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    // No separate tray asset: the window icon is already embedded by the
+    // bundle, and the tray is not a second place to keep one.
+    let Some(icon) = app.default_window_icon().cloned() else {
+        return Ok(());
+    };
+    let menu = MenuBuilder::new(app)
+        .text("show", "Show FluidEQ")
+        .text("bypass", "Bypass / resume")
+        .separator()
+        .text("quit", "Quit FluidEQ")
+        .build()?;
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip("FluidEQ")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "bypass" => {
+                if let Some(snapshot) = toggle_bypass(app) {
+                    let _ = app.emit("snapshot", snapshot);
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        show_main_window(app);
+                    }
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Windows keeps a named mutex per session. A second launch finds it and
+/// stops before it can serve a second owner pipe or write the same config.
+#[cfg(target_os = "windows")]
+fn another_instance_is_running() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{BOOL, CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "Local\\FluidEQ-Desktop-Owner\0".encode_utf16().collect();
+    // SAFETY: `name` is a NUL-terminated UTF-16 string alive for the call.
+    match unsafe { CreateMutexW(None, BOOL(1), PCWSTR(name.as_ptr())) } {
+        Ok(handle) => {
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                // The first process owns the mutex; this handle is only the
+                // probe that discovered it.
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                true
+            } else {
+                // The raw handle stays open until process exit.
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn focus_existing_window() {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    let title: Vec<u16> = "FluidEQ\0".encode_utf16().collect();
+    // SAFETY: the title is NUL-terminated and alive for the call.
+    if let Ok(window) = unsafe { FindWindowW(PCWSTR(std::ptr::null()), PCWSTR(title.as_ptr())) } {
+        unsafe {
+            let _ = ShowWindow(window, SW_RESTORE);
+            let _ = SetForegroundWindow(window);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn another_instance_is_running() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn focus_existing_window() {}
+
 fn main() {
     if std::env::args().any(|arg| arg == "--ipc-stdio") {
         run_stdio_ipc_loop();
+        return;
+    }
+    if another_instance_is_running() {
+        focus_existing_window();
         return;
     }
     let app = tauri::Builder::default()
@@ -242,8 +457,22 @@ fn main() {
             app.manage(ShellState {
                 store: Mutex::new(store),
                 state_path,
+                data_dir,
                 host,
             });
+            setup_tray(app)?;
+            // Closing the window puts FluidEQ in the tray: the engine keeps
+            // processing and the curve is one click away, and quit is an
+            // explicit tray entry rather than an accident of the X button.
+            if let Some(window) = app.get_webview_window("main") {
+                let window_for_event = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_for_event.hide();
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -252,6 +481,12 @@ fn main() {
             set_preamp_db,
             set_auto_headroom,
             set_band_gain,
+            list_presets,
+            apply_preset,
+            save_preset,
+            delete_preset,
+            load_ir,
+            clear_ir,
             get_output_volume,
             set_output_volume,
             engine_status,

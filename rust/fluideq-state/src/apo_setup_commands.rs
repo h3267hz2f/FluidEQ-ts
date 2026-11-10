@@ -25,10 +25,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //!    and `run_setup_main`.
 
 use crate::apo::{
-    append_remembered_slot, default_slot_for, is_attached, is_valid_endpoint_guid, mode_missing,
-    parse_remembered_slots, plan_detach, plan_mode_in_place, plan_move, plan_restore_apo_with_keep,
-    plan_suspend_apo, slot_of, ApoSlot, EndpointAttachResult, EndpointFxValues, APO_SLOT_LADDER,
-    FX_LEGACY_COUNT, FX_SLOT_COUNT,
+    append_remembered_slot, default_slot_for, first_untried_ladder_slot, is_attached,
+    is_valid_endpoint_guid, mode_missing, parse_remembered_slots, plan_detach, plan_mode_in_place,
+    plan_move, plan_restore_apo_with_keep, plan_suspend_apo, slot_of, ApoSlot,
+    EndpointAttachResult, EndpointFxValues, APO_SLOT_LADDER, FX_LEGACY_COUNT, FX_SLOT_COUNT,
 };
 use crate::apo_setup_registry::{
     apo_off_endpoints_on_disk, apo_record_present, backup_exists_on_disk, decode_sz,
@@ -461,10 +461,53 @@ pub fn remember_slot_on_disk(paths: &SetupPaths, guid: &str, slot: ApoSlot) {
         return;
     }
     let mut all = remembered_slots_on_disk(paths, guid);
-    if all.last().copied() == Some(slot) {
+    // Always rewrite, even when the slot is already last: the file may still
+    // carry a `!` failure marker for this rung, and a successful attach is
+    // what takes it away (`append_remembered_slot` serializes the plain
+    // history only).
+    let text = append_remembered_slot(&mut all, slot);
+    let _ = paths.write_utf8(&path, &text);
+}
+
+/// Slots whose attach this helper refused on `guid`, newest last, as written
+/// by `remember_failed_slot_on_disk` with a `!` prefix.
+pub fn failed_slots_on_disk(paths: &SetupPaths, guid: &str) -> Vec<ApoSlot> {
+    let Some(path) = slot_memory_path(paths, guid) else {
+        return Vec::new();
+    };
+    let Some(text) = paths.read_utf8(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix('!'))
+        .filter_map(ApoSlot::from_slot_name)
+        .collect()
+}
+
+/// Records a slot the attach was refused, so the next automatic attach skips
+/// it and asks for the next rung (`first_untried_ladder_slot`).
+///
+/// A refused rung used to be remembered by nothing, so every launch guessed
+/// the same slot, was refused again, and the output stayed silent.
+pub fn remember_failed_slot_on_disk(paths: &SetupPaths, guid: &str, slot: ApoSlot) {
+    let Some(path) = slot_memory_path(paths, guid) else {
+        return;
+    };
+    let Some(slots_dir) = paths.slots_dir() else {
+        return;
+    };
+    if !paths.ensure_directory(&slots_dir) {
         return;
     }
-    let text = append_remembered_slot(&mut all, slot);
+    let mut text = paths.read_utf8(&path).unwrap_or_default();
+    let marker = format!("!{}", slot.slot_name());
+    if text.lines().any(|line| line.trim() == marker) {
+        return;
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&marker);
     let _ = paths.write_utf8(&path, &text);
 }
 
@@ -574,18 +617,25 @@ fn fail_command(result: &mut SetupCommandResult, message: String) {
 }
 
 /// Exact port of `slot_for` in `/native/system-apo/setup/commands.cpp`:
-/// 1. Returns `remembered_slot_on_disk` if this endpoint was previously attached with `--slot`.
+/// 1. Returns `remembered_slot_on_disk` if this endpoint was previously attached.
 /// 2. Otherwise returns `default_slot_for(original, endpoint_is_combined(guid))`.
+/// 3. If that slot was refused before, steps to the first rung of the ladder
+///    nobody has tried (`first_untried_ladder_slot`).
 pub fn slot_for_endpoint<R: RegistryBackend>(
     paths: &SetupPaths,
     reg: &R,
     guid: &str,
     original: &EndpointFxValues,
 ) -> ApoSlot {
-    if let Some(learned) = remembered_slot_on_disk(paths, guid) {
-        return learned;
+    let candidate = remembered_slot_on_disk(paths, guid)
+        .unwrap_or_else(|| default_slot_for(original, endpoint_is_combined(reg, guid)));
+    let failed = failed_slots_on_disk(paths, guid);
+    if !failed.contains(&candidate) {
+        return candidate;
     }
-    default_slot_for(original, endpoint_is_combined(reg, guid))
+    let mut tried = remembered_slots_on_disk(paths, guid);
+    tried.extend(failed);
+    first_untried_ladder_slot(&tried).unwrap_or(candidate)
 }
 
 /// Exact port of `attach_one` in `/native/system-apo/setup/commands.cpp`.
@@ -619,6 +669,9 @@ pub fn attach_one_endpoint<R: RegistryBackend>(
     let slot = named.unwrap_or_else(|| slot_for_endpoint(paths, reg, guid, reference));
     let plan = plan_move(&before, reference, ENGINE_CLSID_UPPER, slot);
     if let Some(refused) = plan.refused {
+        // Remember the refusal, so the next attach with no slot named skips
+        // this rung instead of guessing it again on every launch.
+        remember_failed_slot_on_disk(paths, guid, slot);
         *error = format!(
             "cannot attach to {} on {}: {}",
             slot.slot_name(),
@@ -633,9 +686,9 @@ pub fn attach_one_endpoint<R: RegistryBackend>(
             return false;
         }
     }
-    if named.is_some() {
-        remember_slot_on_disk(paths, guid, slot);
-    }
+    // Remember where the engine actually went, named or chosen, so a later
+    // attach puts it back there rather than re-running the guess.
+    remember_slot_on_disk(paths, guid, slot);
     *attached = is_attached(&plan.after, ENGINE_CLSID_UPPER);
     true
 }
@@ -1962,6 +2015,50 @@ mod tests {
         ])
         .is_none());
         assert!(parse_setup_command_line(&["attach".to_string()]).is_none());
+    }
+
+    #[test]
+    fn a_refused_slot_is_written_and_skipped_on_the_next_attach() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "fluideq_slot_memory_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let program_data = temp_root.join("ProgramData");
+        let paths = SetupPaths::new(
+            program_data,
+            temp_root.join("ProgramFiles"),
+            temp_root.join("AppBin"),
+        );
+        let mut reg = InMemoryRegistryHive::new();
+        let guid = "{11111111-2222-3333-4444-555555555555}";
+        let ep_key = format!(
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}",
+            guid
+        );
+        reg.create_key(&ep_key).unwrap();
+        reg.create_key(&format!("{}\\FxProperties", ep_key)).unwrap();
+        let bare = EndpointFxValues::default();
+
+        // A bare output starts at the top of the ladder.
+        assert_eq!(slot_for_endpoint(&paths, &reg, guid, &bare), ApoSlot::Efx);
+
+        // A refusal is remembered, and the next automatic attach steps past
+        // it instead of asking for the same rung again.
+        remember_failed_slot_on_disk(&paths, guid, ApoSlot::Efx);
+        assert_eq!(failed_slots_on_disk(&paths, guid), vec![ApoSlot::Efx]);
+        assert_eq!(slot_for_endpoint(&paths, &reg, guid, &bare), ApoSlot::Mfx);
+
+        remember_failed_slot_on_disk(&paths, guid, ApoSlot::Mfx);
+        assert_eq!(slot_for_endpoint(&paths, &reg, guid, &bare), ApoSlot::Sfx);
+
+        // The slot that was actually used becomes the memory, and a success
+        // takes every `!` marker away with it.
+        remember_slot_on_disk(&paths, guid, ApoSlot::Sfx);
+        assert!(failed_slots_on_disk(&paths, guid).is_empty());
+        assert_eq!(slot_for_endpoint(&paths, &reg, guid, &bare), ApoSlot::Sfx);
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]
