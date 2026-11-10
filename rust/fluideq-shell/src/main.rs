@@ -22,7 +22,9 @@ pub mod spectrum_bridge;
 pub mod system_daemons;
 
 use fluideq_state::{AppStateSnapshot, AppStateStore};
+use ipc::{dispatch_ipc_command, ShellIpcCommand, ShellIpcResponse};
 use serde_json::Value;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use tauri::{Manager, State};
@@ -140,7 +142,42 @@ fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::Engin
     Ok(state.host.status())
 }
 
+/// The JSON-lines bridge the TypeScript preview server spawns with
+/// `--ipc-stdio`: one command per line in, one reply per line out.
+///
+/// It runs no window and no host — the preview only needs the state centre,
+/// and it spawns a debug build, which still owns the console the server reads.
+fn run_stdio_ipc_loop() {
+    let mut store = AppStateStore::new(48_000.0);
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(raw) = line else { break };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<ShellIpcCommand>(trimmed) {
+            Ok(command) => dispatch_ipc_command(&mut store, command),
+            Err(error) => ShellIpcResponse::Error {
+                message: format!("IPC decode error: {error}"),
+            },
+        };
+        let encoded = match serde_json::to_string(&response) {
+            Ok(encoded) => encoded,
+            Err(_) => continue,
+        };
+        let mut out = stdout.lock();
+        let _ = writeln!(out, "{encoded}");
+        let _ = out.flush();
+    }
+}
+
 fn main() {
+    if std::env::args().any(|arg| arg == "--ipc-stdio") {
+        run_stdio_ipc_loop();
+        return;
+    }
     let app = tauri::Builder::default()
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
