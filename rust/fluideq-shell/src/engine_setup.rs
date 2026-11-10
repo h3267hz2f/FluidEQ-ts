@@ -213,7 +213,7 @@ mod platform {
             lpFile: windows::core::PCWSTR(file.as_ptr()),
             lpParameters: windows::core::PCWSTR(parameters_ptr.as_ptr()),
             lpDirectory: windows::core::PCWSTR(directory.as_ptr()),
-            nShow: SW_HIDE.0 as i32,
+            nShow: SW_HIDE.0,
             ..Default::default()
         };
 

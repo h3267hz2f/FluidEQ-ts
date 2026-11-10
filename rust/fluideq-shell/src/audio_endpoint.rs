@@ -69,7 +69,7 @@ mod platform {
         unsafe {
             endpoint_volume()?
                 .GetMasterVolumeLevelScalar()
-                .map(|value| f64::from(value))
+                .map(f64::from)
                 .map_err(|error| format!("read master volume: {error}"))
         }
     }
@@ -84,7 +84,7 @@ mod platform {
                 .map_err(|error| format!("write master volume: {error}"))?;
             volume
                 .GetMasterVolumeLevelScalar()
-                .map(|value| f64::from(value))
+                .map(f64::from)
                 .map_err(|error| format!("read master volume: {error}"))
         }
     }

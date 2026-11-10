@@ -81,9 +81,11 @@ pub struct SpectrumBridge {
 
 impl SpectrumBridge {
     pub fn new(bins_count: usize) -> Self {
-        let mut stage_meters = MultiStageMeterSnapshot::default();
-        stage_meters.stereo_correlation = 0.86;
-        stage_meters.dimension_guard = 1.0;
+        let stage_meters = MultiStageMeterSnapshot {
+            stereo_correlation: 0.86,
+            dimension_guard: 1.0,
+            ..Default::default()
+        };
         Self {
             bins_count,
             consecutive_silent_frames: 0,

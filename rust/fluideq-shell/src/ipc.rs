@@ -41,7 +41,7 @@ pub enum ShellIpcCommand {
         manual_preamp_db: f64,
         tone: ToneSettings,
     },
-    UpdateChainSettings(FeqChainSettings),
+    UpdateChainSettings(Box<FeqChainSettings>),
     ExportWireParameters,
     ImportWireParameters {
         values: Vec<f64>,
@@ -76,7 +76,7 @@ pub enum ShellIpcCommand {
     },
     PlanApoEndpointDetach {
         current: EndpointFxValues,
-        backup: EndpointFxValues,
+        backup: Box<EndpointFxValues>,
     },
     LoadVoiceDenoiseModel {
         model_path: String,
@@ -184,7 +184,7 @@ pub fn dispatch_ipc_command(
             tone,
         )),
         ShellIpcCommand::UpdateChainSettings(settings) => {
-            store.update_chain_settings(settings);
+            store.update_chain_settings(*settings);
             ShellIpcResponse::Snapshot(store.snapshot())
         }
         ShellIpcCommand::ExportWireParameters => {
@@ -313,6 +313,38 @@ pub fn dispatch_ipc_command(
         }
         ShellIpcCommand::SetAudioSignalActive { active } => {
             ShellIpcResponse::Residency(store.set_audio_signal_active(active))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn boxed_payloads_preserve_command_json_and_dispatch() {
+        let settings = json!({
+            "cmd": "UpdateChainSettings",
+            "payload": FeqChainSettings::default(),
+        });
+        let detach = json!({
+            "cmd": "PlanApoEndpointDetach",
+            "payload": {
+                "current": EndpointFxValues::default(),
+                "backup": EndpointFxValues::default(),
+            },
+        });
+        let mut store = AppStateStore::new(48_000.0);
+        for expected in [settings, detach] {
+            let command: ShellIpcCommand = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&command).unwrap(), expected);
+            let response = dispatch_ipc_command(&mut store, command);
+            match expected["cmd"].as_str().unwrap() {
+                "UpdateChainSettings" => assert!(matches!(response, ShellIpcResponse::Snapshot(_))),
+                "PlanApoEndpointDetach" => assert!(matches!(response, ShellIpcResponse::ApoFxPlanned(_))),
+                _ => unreachable!(),
+            }
         }
     }
 }

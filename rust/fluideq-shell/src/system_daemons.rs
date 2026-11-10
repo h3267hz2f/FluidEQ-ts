@@ -1120,8 +1120,7 @@ impl LightingFrameReader {
         let payload = u32::from_le_bytes([head[8], head[9], head[10], head[11]]);
         if magic != LIGHTING_WIRE_MAGIC
             || kind != LIGHTING_COLOURS_FRAME_KIND
-            || payload > LIGHTING_MAX_PAYLOAD_BYTES
-            || payload < 8
+            || !(8..=LIGHTING_MAX_PAYLOAD_BYTES).contains(&payload)
         {
             self.broken = true;
             return LightingReadResult::Broken;

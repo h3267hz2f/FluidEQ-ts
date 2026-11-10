@@ -46,8 +46,5 @@ jobs:
       - name: Test the workspace
         run: cargo test --workspace --features link-cpp-core --locked
 
-      - name: Report workspace lint diagnostics
-        run: cargo clippy --workspace --features link-cpp-core --locked
-
       - name: Lint the workspace
         run: cargo clippy --workspace --features link-cpp-core --locked -- -D warnings

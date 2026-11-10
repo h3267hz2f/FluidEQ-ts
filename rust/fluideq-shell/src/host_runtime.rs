@@ -880,8 +880,8 @@ impl ProcessingLatency {
             }
             let total = self.words[0].load(Ordering::Relaxed);
             let mut parts = [0u32; 8];
-            for i in 0..8 {
-                parts[i] = self.words[i + 1].load(Ordering::Relaxed);
+            for (i, part) in parts.iter_mut().enumerate() {
+                *part = self.words[i + 1].load(Ordering::Relaxed);
             }
             let active = self.words[9].load(Ordering::Relaxed);
             let after = self.generation.load(Ordering::Acquire);
@@ -891,8 +891,8 @@ impl ProcessingLatency {
         }
         let total = self.words[0].load(Ordering::Relaxed);
         let mut parts = [0u32; 8];
-        for i in 0..8 {
-            parts[i] = self.words[i + 1].load(Ordering::Relaxed);
+        for (i, part) in parts.iter_mut().enumerate() {
+            *part = self.words[i + 1].load(Ordering::Relaxed);
         }
         let active = self.words[9].load(Ordering::Relaxed);
         (total, parts, active)
@@ -1482,7 +1482,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
             // `FEQ_CMD_SET_VOLUME` (`host_commands.cpp` lines 422–431):
             // NaN and negative numbers clamp to `0.0`; values > `1.0` clamp to `1.0`.
             let wanted = value as f32;
-            let clamped = if !(wanted >= 0.0) {
+            let clamped = if wanted.is_nan() || wanted < 0.0 {
                 0.0
             } else if wanted > 1.0 {
                 1.0
@@ -1532,7 +1532,7 @@ pub fn run_supervised_pipe_command_loop_with_session<R: Read, W: Write>(
             if !read_exact_from_pipe(reader, &mut path_bytes) {
                 return Err("Pipe closed mid RENDER_TO_FILE path".to_string());
             }
-            let status = if session.backend_running || parameter_index < 0 || parameter_index > 1 {
+            let status = if session.backend_running || !(0..=1).contains(&parameter_index) {
                 FeqWireStatus::FEQ_WIRE_REJECTED
             } else {
                 FeqWireStatus::FEQ_WIRE_APPLIED
