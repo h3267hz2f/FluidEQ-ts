@@ -101,6 +101,28 @@ fn set_preamp_db(state: State<'_, ShellState>, preamp_db: f64) -> Result<AppStat
 }
 
 #[tauri::command]
+fn set_auto_headroom(
+    state: State<'_, ShellState>,
+    enabled: bool,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let current = store.snapshot();
+    let snapshot = store.set_eq_bands_and_config(
+        current.bands,
+        &current.eq_model,
+        current.matched_treble,
+        current.master_power,
+        enabled,
+        current.preamp_db,
+        current.tone,
+    );
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_band_gain(
     state: State<'_, ShellState>,
     band_id: u32,
@@ -218,6 +240,7 @@ fn main() {
             get_snapshot,
             set_master_power,
             set_preamp_db,
+            set_auto_headroom,
             set_band_gain,
             get_output_volume,
             set_output_volume,

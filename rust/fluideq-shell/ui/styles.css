@@ -557,6 +557,29 @@ button {
   font-weight: 600;
 }
 
+.stat-toggle {
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease;
+}
+
+.stat-toggle:hover {
+  border-color: rgba(59, 232, 196, 0.35);
+}
+
+.stat-toggle[aria-pressed="false"] {
+  color: var(--muted);
+}
+
 .bands {
   display: flex;
   gap: 8px;

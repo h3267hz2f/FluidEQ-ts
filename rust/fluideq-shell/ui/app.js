@@ -457,6 +457,7 @@ function renderHeader() {
     ? 'Mastering chain active'
     : 'Chain bypassed';
   els.autoHeadroom.textContent = snapshot.auto_headroom ? 'On' : 'Off';
+  els.autoHeadroom.setAttribute('aria-pressed', String(Boolean(snapshot.auto_headroom)));
   els.bandCount.textContent = String(snapshot.bands?.length ?? 0);
 }
 
@@ -589,6 +590,21 @@ async function commitPower() {
   } catch (error) {
     snapshot.master_power = !wanted;
     showMessage(`Could not change the chain state: ${error}`);
+  }
+  renderAll();
+}
+
+async function commitAutoHeadroom() {
+  const wanted = !snapshot.auto_headroom;
+  snapshot.auto_headroom = wanted;
+  renderHeader();
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_auto_headroom', { enabled: wanted });
+    clearMessage();
+  } catch (error) {
+    snapshot.auto_headroom = !wanted;
+    showMessage(`Could not change auto headroom: ${error}`);
   }
   renderAll();
 }
@@ -732,6 +748,7 @@ els.preamp.addEventListener('input', () => {
 els.preamp.addEventListener('change', commitPreamp);
 
 els.power.addEventListener('click', commitPower);
+els.autoHeadroom.addEventListener('click', commitAutoHeadroom);
 
 els.volume.addEventListener('input', () => {
   setVolume(Number(els.volume.value));
