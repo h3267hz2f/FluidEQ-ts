@@ -17,6 +17,7 @@ const F_MAX = 20_000;
 const DB_MIN = -18;
 const DB_MAX = 18;
 const SAMPLE_RATE = 48_000;
+let sampleRate = SAMPLE_RATE;
 const ISO_FREQUENCIES = [
   25, 40, 63, 100, 160, 250, 400, 630, 1000, 1600, 2500, 4000, 6300, 10000,
   16000,
@@ -166,11 +167,11 @@ function setRangeValue(input, value) {
 // ---------------------------------------------------------------------------
 
 function coefficients(band) {
-  const frequency = clamp(Number(band.frequency) || 1000, 10, SAMPLE_RATE / 2 - 1);
+  const frequency = clamp(Number(band.frequency) || 1000, 10, sampleRate / 2 - 1);
   const q = clamp(Number(band.quality) || 1, 0.05, 40);
   const gain = clamp(Number(band.gain_db) || 0, -60, 60);
   const type = band.filter_type || 'PK';
-  const w0 = (2 * Math.PI * frequency) / SAMPLE_RATE;
+  const w0 = (2 * Math.PI * frequency) / sampleRate;
   const cosw = Math.cos(w0);
   const sinw = Math.sin(w0);
   const alpha = sinw / (2 * q);
@@ -241,7 +242,7 @@ function coefficients(band) {
 
 function magnitudeDb(band, frequency) {
   const c = coefficients(band);
-  const w = (2 * Math.PI * frequency) / SAMPLE_RATE;
+  const w = (2 * Math.PI * frequency) / sampleRate;
   const cosw = Math.cos(w);
   const sinw = Math.sin(w);
   const cos2w = Math.cos(2 * w);
@@ -834,6 +835,11 @@ function renderEngineStatus(status) {
   const device = status?.defaultDevice;
   if (device?.name) {
     els.deviceName.textContent = device.name;
+  }
+  const mixRate = Number(device?.sampleRate);
+  if (Number.isFinite(mixRate) && mixRate > 0 && mixRate !== sampleRate) {
+    sampleRate = mixRate;
+    scheduleDraw();
   }
   renderCoreState();
 
