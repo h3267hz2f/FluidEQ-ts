@@ -320,14 +320,14 @@ fn read_bool_slots(scanner: &mut JsonScanner, out: &mut [bool]) -> bool {
     if !scanner.consume('[') {
         return false;
     }
-    for at in 0..out.len() {
+    for (at, value) in out.iter_mut().enumerate() {
         if at != 0 && !scanner.consume(',') {
             return false;
         }
         let Some(b) = scanner.read_bool() else {
             return false;
         };
-        out[at] = b;
+        *value = b;
     }
     scanner.consume(']')
 }
@@ -336,18 +336,18 @@ fn read_string_slots(scanner: &mut JsonScanner, out: &mut [Option<String>]) -> b
     if !scanner.consume('[') {
         return false;
     }
-    for at in 0..out.len() {
+    for (at, value) in out.iter_mut().enumerate() {
         if at != 0 && !scanner.consume(',') {
             return false;
         }
         if scanner.read_null() {
-            out[at] = None;
+            *value = None;
             continue;
         }
         let Some(s) = scanner.read_string() else {
             return false;
         };
-        out[at] = Some(s);
+        *value = Some(s);
     }
     scanner.consume(']')
 }
@@ -356,12 +356,12 @@ fn read_list_slots(scanner: &mut JsonScanner, out: &mut [Option<Vec<String>>]) -
     if !scanner.consume('[') {
         return false;
     }
-    for at in 0..out.len() {
+    for (at, value) in out.iter_mut().enumerate() {
         if at != 0 && !scanner.consume(',') {
             return false;
         }
         if scanner.read_null() {
-            out[at] = None;
+            *value = None;
             continue;
         }
         if !scanner.consume('[') {
@@ -383,7 +383,7 @@ fn read_list_slots(scanner: &mut JsonScanner, out: &mut [Option<Vec<String>>]) -
                 break;
             }
         }
-        out[at] = Some(entries);
+        *value = Some(entries);
     }
     scanner.consume(']')
 }
@@ -1152,8 +1152,8 @@ pub fn read_fx_values<R: RegistryBackend>(
         let (mode_list, _) = read_list_reg(reg, &fx_key, &mode_name, false)?;
         out.modes[slot] = mode_list;
     }
-    for slot in 0..FX_LEGACY_COUNT {
-        let leg_name = fx_property_value_name(FX_PROPERTY_SET, LEGACY_PIDS[slot]);
+    for (slot, &pid) in LEGACY_PIDS.iter().enumerate() {
+        let leg_name = fx_property_value_name(FX_PROPERTY_SET, pid);
         out.legacy[slot] = read_single_reg(reg, &fx_key, &leg_name)?;
     }
     Ok(out)
@@ -1227,16 +1227,16 @@ pub fn write_fx_values<R: RegistryBackend>(
         )
     })?;
 
-    for slot in 0..FX_SLOT_COUNT {
+    for (slot, &pid) in SINGLE_PIDS.iter().enumerate() {
         if before.single[slot] != after.single[slot] {
-            let name = fx_property_value_name(FX_PROPERTY_SET, SINGLE_PIDS[slot]);
+            let name = fx_property_value_name(FX_PROPERTY_SET, pid);
             apply_single_reg(reg, &fx_key, &name, &after.single[slot])
                 .map_err(|e| format!("could not write {}: {}", name, e))?;
         }
     }
-    for slot in 0..FX_LEGACY_COUNT {
+    for (slot, &pid) in LEGACY_PIDS.iter().enumerate() {
         if before.legacy[slot] != after.legacy[slot] {
-            let name = fx_property_value_name(FX_PROPERTY_SET, LEGACY_PIDS[slot]);
+            let name = fx_property_value_name(FX_PROPERTY_SET, pid);
             apply_single_reg(reg, &fx_key, &name, &after.legacy[slot])
                 .map_err(|e| format!("could not write {}: {}", name, e))?;
         }

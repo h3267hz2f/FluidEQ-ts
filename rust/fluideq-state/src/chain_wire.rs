@@ -217,19 +217,13 @@ pub fn encode_chain_settings_wire(settings: &FeqChainSettings) -> Vec<f64> {
     out[119] = settings.room.sub_db;
     out[120] = settings.room.head as f64;
     out[121] = bool_word(settings.eq.matched);
-    for s in 0..FEQ_ROOM_SPEAKERS {
-        out[122 + s] = settings.room.angle_deg[s];
-    }
-    for s in 0..FEQ_ROOM_SPEAKERS {
-        out[129 + s] = settings.room.level_db[s];
-    }
+    out[122..122 + FEQ_ROOM_SPEAKERS].copy_from_slice(&settings.room.angle_deg);
+    out[129..129 + FEQ_ROOM_SPEAKERS].copy_from_slice(&settings.room.level_db);
     out[136] = bool_word(settings.room.bass_management);
     out[137] = settings.room.crossover_hz;
     out[138] = bool_word(settings.room.music_upmix);
     out[139] = settings.room.upmix_amount;
-    for s in 0..FEQ_ROOM_SPEAKERS {
-        out[140 + s] = settings.room.speaker_distance_m[s];
-    }
+    out[140..140 + FEQ_ROOM_SPEAKERS].copy_from_slice(&settings.room.speaker_distance_m);
     for s in 0..FEQ_ROOM_MUTE_SLOTS {
         out[147 + s] = (settings.room.mute[s] & 3) as f64;
     }

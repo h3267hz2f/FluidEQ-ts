@@ -864,7 +864,7 @@ fn apo_read_sample(bytes: &[u8], offset: usize, format_tag: u16, bits_per_sample
 ///   can log `"Convolution file has no samples"`).
 pub fn parse_apo_wav(bytes: &[u8]) -> Option<ApoWavData> {
     let size = bytes.len();
-    if size < 12 || size > MAX_APO_WAV_BYTES {
+    if !(12..=MAX_APO_WAV_BYTES).contains(&size) {
         return None;
     }
     if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {

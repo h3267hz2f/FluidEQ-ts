@@ -254,7 +254,7 @@ pub fn parse_apo_channel_selection(body: &str) -> ApoChannelSelection {
 /// Converts bandwidth in octaves (`BW Oct <o>`) to Q factor (`sqrt(2^oct) / (2^oct - 1)`),
 /// matching `parse_filter` in `/native/system-apo/src/config_grammar.cpp` (lines 324–325).
 fn bandwidth_octaves_to_q(bw_oct: f64) -> Option<f64> {
-    if !(bw_oct > 0.0) || !bw_oct.is_finite() {
+    if !bw_oct.is_finite() || bw_oct <= 0.0 {
         return None;
     }
     let factor = 2.0_f64.powf(bw_oct);
@@ -820,7 +820,7 @@ pub fn resolve_apo_endpoint_chain(
             let next_id = (chain.bands.len() + 1) as u32;
             if let Some(band_spec) = parse_apo_filter_line(&line.body, next_id, ear) {
                 chain.apo_bands.push(ApoResolvedBand {
-                    spec: band_spec.clone(),
+                    spec: band_spec,
                     user_eq: stack[top_idx].eq_layer,
                     curve_layer: stack[top_idx].curve_layer,
                     matched: stack[top_idx].matched_design,

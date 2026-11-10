@@ -133,10 +133,7 @@ pub fn synthesize_linear_phase_kernel_for_ear(
         }
 
         let coeffs = biquad_coefficients_designed(
-            band.filter_type,
-            band.frequency,
-            band.gain_db,
-            band.quality,
+            band,
             sample_rate,
             model,
             eq.model_amount,
@@ -215,7 +212,7 @@ pub fn synthesize_linear_phase_change_kernel(
 ) -> Vec<f32> {
     let size = FEQ_LINEAR_PHASE_KERNEL_SIZE;
     let count = (eq.band_count as usize).min(eq.bands.len());
-    if band_index >= count || !(sample_rate > 0.0) {
+    if band_index >= count || sample_rate.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return vec![0.0_f32; size];
     }
     let chosen = &eq.bands[band_index];
@@ -233,10 +230,7 @@ pub fn synthesize_linear_phase_change_kernel(
 
     // 1. Impulse response of the chosen dynamic band alone
     let chosen_coeffs = biquad_coefficients_designed(
-        chosen.filter_type,
-        chosen.frequency,
-        chosen.gain_db,
-        chosen.quality,
+        chosen,
         sample_rate,
         model,
         eq.model_amount,
@@ -335,6 +329,12 @@ mod tests {
         let mid = FEQ_LINEAR_PHASE_KERNEL_LATENCY;
         assert!(active_change[mid].abs() > 1e-3);
         assert!((active_change[mid - 5] - active_change[mid + 5]).abs() < 1e-5);
+
+        for sample_rate in [0.0, -48_000.0, f64::NAN] {
+            let invalid_change = synthesize_linear_phase_change_kernel(&eq, 0, sample_rate, 1);
+            assert_eq!(invalid_change.len(), FEQ_LINEAR_PHASE_KERNEL_SIZE);
+            assert!(invalid_change.iter().all(|&sample| sample == 0.0));
+        }
     }
 
     #[cfg(feature = "link-cpp-core")]

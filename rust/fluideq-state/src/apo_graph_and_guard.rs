@@ -334,7 +334,7 @@ impl InputHistory {
         }
         let cf = u64::from(self.chunk_frames);
         let newest = self.written.load(Ordering::Acquire) / cf;
-        let first = (from + cf - 1) / cf;
+        let first = from.div_ceil(cf);
         let end = (to / cf).min(newest.saturating_sub(1));
         let kept = self.peak_capacity - 2;
         if first >= end || (newest > kept && first < newest - kept) {
@@ -1347,9 +1347,8 @@ impl LevelPredictor {
                 }
                 let take = (replay.chunk_left as usize).min(span - at);
                 let mut peak = 0.0_f64;
-                for ch in 0..ch_count {
-                    let ch_peak =
-                        replay.detectors[ch].process_block(&scratch[ch][at..at + take]);
+                for (ch, plane) in scratch[..ch_count].iter().enumerate() {
+                    let ch_peak = replay.detectors[ch].process_block(&plane[at..at + take]);
                     if ch_peak > peak {
                         peak = ch_peak;
                     }
@@ -1368,7 +1367,7 @@ impl LevelPredictor {
 
     fn peak_over(&self, replay: &LevelReplayState, from: u64, to: u64) -> f64 {
         let cf = u64::from(self.chunk_frames);
-        let first = (from + cf - 1) / cf;
+        let first = from.div_ceil(cf);
         let end = to / cf;
         let mut peak = 0.0_f64;
         for chunk in first..end {

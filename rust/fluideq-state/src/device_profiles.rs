@@ -52,22 +52,9 @@ impl DeviceProfileRegistry {
         Self::default()
     }
 
-    /// Saves the current live state under `self.active_device_guid` (if any),
-    /// then switches to `new_guid` and returns the stored `DeviceEndpointProfile`
-    /// if `new_guid` was previously configured.
-    pub fn switch_device(
-        &mut self,
-        new_guid: &str,
-        new_device_name: &str,
-        current_preset_name: &str,
-        current_preamp_db: f64,
-        current_matched_treble: bool,
-        current_eq_model_amount: f64,
-        current_tone: &ToneSettings,
-        current_bands: &[EqBandSpec],
-        current_chain: &FeqChainSettings,
-    ) -> Option<DeviceEndpointProfile> {
-        let normalized_new = normalize_endpoint_guid(new_guid);
+    /// `seed` combines the incoming device identity with the outgoing device's live state.
+    pub fn switch_device(&mut self, seed: DeviceEndpointProfile) -> Option<DeviceEndpointProfile> {
+        let normalized_new = normalize_endpoint_guid(&seed.guid);
         if normalized_new.is_empty() {
             return None;
         }
@@ -83,19 +70,13 @@ impl DeviceProfileRegistry {
                 DeviceEndpointProfile {
                     guid: prev_guid,
                     device_name: prev_name,
-                    active_preset_name: current_preset_name.to_string(),
-                    preamp_db: current_preamp_db,
-                    matched_treble: current_matched_treble,
-                    eq_model_amount: current_eq_model_amount,
-                    tone: current_tone.clone(),
-                    bands: current_bands.to_vec(),
-                    chain_settings: *current_chain,
+                    ..seed.clone()
                 },
             );
         }
 
         self.active_device_guid = Some(normalized_new.clone());
-        self.active_device_name = Some(new_device_name.trim().to_string());
+        self.active_device_name = Some(seed.device_name.trim().to_string());
 
         if let Some(existing) = self.profiles.get(&normalized_new).cloned() {
             Some(existing)
@@ -103,14 +84,8 @@ impl DeviceProfileRegistry {
             // Seed the newly discovered device with the current state
             let seeded = DeviceEndpointProfile {
                 guid: normalized_new.clone(),
-                device_name: new_device_name.trim().to_string(),
-                active_preset_name: current_preset_name.to_string(),
-                preamp_db: current_preamp_db,
-                matched_treble: current_matched_treble,
-                eq_model_amount: current_eq_model_amount,
-                tone: current_tone.clone(),
-                bands: current_bands.to_vec(),
-                chain_settings: *current_chain,
+                device_name: seed.device_name.trim().to_string(),
+                ..seed
             };
             self.profiles.insert(normalized_new, seeded);
             None
@@ -129,62 +104,62 @@ mod tests {
         let chain = FeqChainSettings::default();
 
         // 1. Bind initial Speakers endpoint
-        let _ = reg.switch_device(
-            "{11111111-1111-1111-1111-111111111111}",
-            "Desktop Speakers",
-            "Speakers Warm",
-            -1.5,
-            true,
-            1.0,
-            &tone,
-            &[],
-            &chain,
-        );
+        let _ = reg.switch_device(DeviceEndpointProfile {
+            guid: "{11111111-1111-1111-1111-111111111111}".to_string(),
+            device_name: "Desktop Speakers".to_string(),
+            active_preset_name: "Speakers Warm".to_string(),
+            preamp_db: -1.5,
+            matched_treble: true,
+            eq_model_amount: 1.0,
+            tone: tone.clone(),
+            bands: vec![],
+            chain_settings: chain,
+        });
 
         // 2. Plug in USB Headset -> saves Speakers ("Speakers Warm", -1.5 dB) and seeds Headset
-        let restored_headset = reg.switch_device(
-            "{22222222-2222-2222-2222-222222222222}",
-            "Sennheiser HD 600 USB",
-            "Speakers Warm",
-            -1.5,
-            true,
-            1.0,
-            &tone,
-            &[],
-            &chain,
-        );
+        let restored_headset = reg.switch_device(DeviceEndpointProfile {
+            guid: "{22222222-2222-2222-2222-222222222222}".to_string(),
+            device_name: "Sennheiser HD 600 USB".to_string(),
+            active_preset_name: "Speakers Warm".to_string(),
+            preamp_db: -1.5,
+            matched_treble: true,
+            eq_model_amount: 1.0,
+            tone: tone.clone(),
+            bands: vec![],
+            chain_settings: chain,
+        });
         assert!(restored_headset.is_none());
 
         // 3. Unplug USB Headset -> switch back to Speakers while Headset had "HD 600 Harman" (-5.2 dB)
         let restored_speakers = reg
-            .switch_device(
-                "{11111111-1111-1111-1111-111111111111}",
-                "Desktop Speakers",
-                "HD 600 Harman",
-                -5.2,
-                true,
-                1.0,
-                &tone,
-                &[],
-                &chain,
-            )
+            .switch_device(DeviceEndpointProfile {
+                guid: "{11111111-1111-1111-1111-111111111111}".to_string(),
+                device_name: "Desktop Speakers".to_string(),
+                active_preset_name: "HD 600 Harman".to_string(),
+                preamp_db: -5.2,
+                matched_treble: true,
+                eq_model_amount: 1.0,
+                tone: tone.clone(),
+                bands: vec![],
+                chain_settings: chain,
+            })
             .expect("Speakers profile should be restored");
         assert_eq!(restored_speakers.active_preset_name, "Speakers Warm");
         assert_eq!(restored_speakers.preamp_db, -1.5);
 
         // 4. Plug USB Headset back in -> restores "HD 600 Harman" (-5.2 dB)
         let restored_headset_again = reg
-            .switch_device(
-                "{22222222-2222-2222-2222-222222222222}",
-                "Sennheiser HD 600 USB",
-                &restored_speakers.active_preset_name,
-                restored_speakers.preamp_db,
-                true,
-                1.0,
-                &tone,
-                &[],
-                &chain,
-            )
+            .switch_device(DeviceEndpointProfile {
+                guid: "{22222222-2222-2222-2222-222222222222}".to_string(),
+                device_name: "Sennheiser HD 600 USB".to_string(),
+                active_preset_name: restored_speakers.active_preset_name.clone(),
+                preamp_db: restored_speakers.preamp_db,
+                matched_treble: true,
+                eq_model_amount: 1.0,
+                tone: tone.clone(),
+                bands: vec![],
+                chain_settings: chain,
+            })
             .expect("Headset profile should be restored");
         assert_eq!(restored_headset_again.active_preset_name, "HD 600 Harman");
         assert_eq!(restored_headset_again.preamp_db, -5.2);

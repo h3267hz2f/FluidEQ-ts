@@ -31,7 +31,7 @@ use crate::chain_wire::decode_chain_settings_wire;
 use crate::linear_phase::fft_radix2_in_place;
 use crate::wav_ir::{parse_apo_wav, read_apo_wav};
 use fluideq_dsp_sys::{
-    FeqBiquadCoefficients, FeqBiquadState, FeqChainSettings, FeqEqModel, FeqFilterType,
+    FeqBiquadCoefficients, FeqBiquadState, FeqChainEqBand, FeqChainSettings, FeqEqModel, FeqFilterType,
 };
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
@@ -134,7 +134,7 @@ pub fn design_graphic_kernel(
 
     let half_n = n / 2;
     let mut kernel = vec![0.0_f32; n];
-    for i in 0..n {
+    for (i, sample) in kernel.iter_mut().enumerate() {
         let source = (i + m - half_n) % m;
         let value = real[source] / m_f64;
         let window = if n > 1 {
@@ -142,7 +142,7 @@ pub fn design_graphic_kernel(
         } else {
             1.0
         };
-        kernel[i] = (value * window) as f32;
+        *sample = (value * window) as f32;
     }
     kernel
 }
@@ -543,12 +543,12 @@ impl CurveStage {
         let mut final_own_mix = self.own_mix;
         let mut final_outgoing_mix = self.outgoing_mix;
 
-        for ch in 0..(self.channels as usize) {
-            let buffer = &mut planar[ch][..frames];
+        for (ch, plane) in planar[..self.channels as usize].iter_mut().enumerate() {
+            let buffer = &mut plane[..frames];
             let ring = &mut self.ring[ch];
             let mut at = self.write;
-            for frame in 0..frames {
-                ring[at] = buffer[frame];
+            for (frame, &sample) in buffer.iter().enumerate() {
+                ring[at] = sample;
                 self.delayed[frame] = ring[(at + size - delay) % size];
                 at = if at + 1 == size { 0 } else { at + 1 };
             }
@@ -574,7 +574,7 @@ impl CurveStage {
             let mut own_mix = self.own_mix;
             let mut outgoing_mix = self.outgoing_mix;
             let mut warm = self.warm_left;
-            for frame in 0..frames {
+            for (frame, output) in buffer.iter_mut().enumerate() {
                 if warm > 0 {
                     warm -= 1;
                 } else if !self.convolvers.is_empty() && own_mix < 1.0 {
@@ -591,7 +591,7 @@ impl CurveStage {
                 if outgoing_heard {
                     sample += outgoing_mix * (self.outgoing_out[frame] as f64);
                 }
-                buffer[frame] = sample as f32;
+                *output = sample as f32;
             }
             final_own_mix = own_mix;
             final_outgoing_mix = outgoing_mix;
@@ -645,10 +645,13 @@ pub fn design_band(band: &SignatureBand, sample_rate: u32, active_channels_mask:
     let rate = sample_rate as f64;
     let coefficients = if band.matched {
         biquad_coefficients_designed(
-            filter_type,
-            band.frequency,
-            band.gain_db,
-            band.quality,
+            &FeqChainEqBand {
+                filter_type,
+                frequency: band.frequency,
+                gain_db: band.gain_db,
+                quality: band.quality,
+                ..FeqChainEqBand::default()
+            },
             rate,
             FeqEqModel::FEQ_EQ_MODEL_CLEAN,
             0.0,
@@ -828,9 +831,9 @@ impl IirCascade {
                     }
                     continue;
                 }
-                for from in 0..searched {
+                for (from, is_taken) in taken[..searched].iter_mut().enumerate() {
                     let then = &previous.bands[from];
-                    if taken[from]
+                    if *is_taken
                         || then.filter_type != now.filter_type
                         || then.channels != now.channels
                         || then.frequency != now.frequency
@@ -841,7 +844,7 @@ impl IirCascade {
                     for ch in 0..(self.channels as usize) {
                         self.states[ch * count + band] = previous.states[ch * before + from];
                     }
-                    taken[from] = true;
+                    *is_taken = true;
                     found[band] = true;
                     break;
                 }
@@ -868,8 +871,8 @@ impl IirCascade {
         let fading = self.fade_left > 0;
         let done = self.fade_total.saturating_sub(self.fade_left);
 
-        for ch in 0..(self.channels as usize) {
-            let buffer = &mut planar[ch][..frames];
+        for (ch, plane) in planar[..self.channels as usize].iter_mut().enumerate() {
+            let buffer = &mut plane[..frames];
             if fading {
                 self.scratch[..frames].copy_from_slice(buffer);
                 let old_base = ch * MAX_FADE_BANDS;
@@ -896,7 +899,7 @@ impl IirCascade {
             }
 
             if fading {
-                for frame in 0..frames {
+                for (frame, sample) in buffer.iter_mut().enumerate() {
                     let at = done + (frame as u32);
                     if at >= self.fade_total {
                         break;
@@ -904,8 +907,8 @@ impl IirCascade {
                     let weight =
                         0.5 - 0.5 * (PI * (at as f64) / (self.fade_total as f64)).cos();
                     let outgoing = self.scratch[frame] as f64;
-                    let current = buffer[frame] as f64;
-                    buffer[frame] = (outgoing + weight * (current - outgoing)) as f32;
+                    let current = *sample as f64;
+                    *sample = (outgoing + weight * (current - outgoing)) as f32;
                 }
             }
         }
@@ -1744,6 +1747,20 @@ pub enum ApoBufferFlags {
     Silent = 2,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ApoEndpointProperties<'a> {
+    pub guid: Option<&'a str>,
+    pub friendly_name: Option<&'a str>,
+}
+
+// Hosts may report valid frames without providing a buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct ApoInputBuffer<'a> {
+    pub valid_frame_count: u32,
+    pub flags: ApoBufferFlags,
+    pub samples: Option<&'a [f32]>,
+}
+
 /// Exact port of `Apo::read_endpoint_properties` and `Apo::read_endpoint` in `/native/system-apo/src/apo_endpoint.cpp`:
 /// Canonicalizes the endpoint GUID (`{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`) and prefers the
 /// endpoint property store over the device collection fallback.
@@ -1917,10 +1934,8 @@ impl ApoInstance {
         has_data: bool,
         declared_cb_size: u32,
         processing_mode: Option<&str>,
-        endpoint_store_guid: Option<&str>,
-        endpoint_store_friendly_name: Option<&str>,
-        collection_device_guid: Option<&str>,
-        collection_device_friendly_name: Option<&str>,
+        endpoint_store: ApoEndpointProperties<'_>,
+        collection_device: ApoEndpointProperties<'_>,
     ) -> ApoHResult {
         if self.locked {
             return ApoHResult::ApoErrLocked;
@@ -1948,10 +1963,10 @@ impl ApoInstance {
             APO_INIT_V3_SIZE_X64 | APO_INIT_V2_SIZE_X64 => {
                 self.processing_mode = processing_mode.unwrap_or_default().to_string();
                 let (guid, name) = resolve_apo_endpoint_identity(
-                    endpoint_store_guid,
-                    endpoint_store_friendly_name,
-                    collection_device_guid,
-                    collection_device_friendly_name,
+                    endpoint_store.guid,
+                    endpoint_store.friendly_name,
+                    collection_device.guid,
+                    collection_device.friendly_name,
                 );
                 self.endpoint_guid = guid;
                 self.endpoint_friendly_name = name;
@@ -1959,10 +1974,10 @@ impl ApoInstance {
             APO_INIT_V1_SIZE_X64 => {
                 self.processing_mode.clear();
                 let (guid, name) = resolve_apo_endpoint_identity(
-                    endpoint_store_guid,
-                    endpoint_store_friendly_name,
-                    collection_device_guid,
-                    collection_device_friendly_name,
+                    endpoint_store.guid,
+                    endpoint_store.friendly_name,
+                    collection_device.guid,
+                    collection_device.friendly_name,
                 );
                 self.endpoint_guid = guid;
                 self.endpoint_friendly_name = name;
@@ -2197,9 +2212,7 @@ impl ApoInstance {
     /// wakes, increments `slot.finish_block()`, and notifies `adopted_wakes` on graph change.
     pub fn apo_process<P>(
         &mut self,
-        valid_frame_count: u32,
-        input_flags: ApoBufferFlags,
-        input_interleaved: Option<&[f32]>,
+        input: ApoInputBuffer<'_>,
         output_interleaved: Option<&mut [f32]>,
         elapsed_ticks: u64,
         graph_lookup: Option<&WatcherGraphInstance>,
@@ -2208,8 +2221,12 @@ impl ApoInstance {
     where
         P: FnMut(&mut [f32], usize, usize),
     {
+        let ApoInputBuffer {
+            valid_frame_count: frames,
+            flags: input_flags,
+            samples: input_interleaved,
+        } = input;
         let active_id = self.slot.adopt_with(|_, _| {});
-        let frames = valid_frame_count;
         let ch = self.channels as usize;
         let required_samples = ch.saturating_mul(frames as usize);
         let has_in_buf = input_interleaved
@@ -2240,7 +2257,8 @@ impl ApoInstance {
 
             if !self.carried_told {
                 for &sample in &input[..required_samples] {
-                    if sample > SILENCE_FLOOR || sample < -SILENCE_FLOOR {
+                    // NaN did not signal audio arrival under the ordered comparisons.
+                    if !sample.is_nan() && !(-SILENCE_FLOOR..=SILENCE_FLOOR).contains(&sample) {
                         self.carried_told = true;
                         if let Some(carried) = &self.carried {
                             carried.store(true, Ordering::Relaxed);
@@ -2599,10 +2617,11 @@ mod tests {
                 true,
                 APO_INIT_V3_SIZE_X64,
                 Some(DEFAULT_PROCESSING_MODE_STR),
-                Some("{11111111-2222-3333-4444-555555555555}"),
-                Some("Speakers"),
-                None,
-                None,
+                ApoEndpointProperties {
+                    guid: Some("{11111111-2222-3333-4444-555555555555}"),
+                    friendly_name: Some("Speakers"),
+                },
+                ApoEndpointProperties::default(),
             ),
             ApoHResult::SucceedOk
         );
@@ -2632,9 +2651,11 @@ mod tests {
         let input = [0.25_f32, -0.25, 0.5, -0.5];
         let mut output = [0.0_f32; 4];
         let (frames_out, flags_out) = apo.apo_process(
-            2,
-            ApoBufferFlags::Valid,
-            Some(&input),
+            ApoInputBuffer {
+                valid_frame_count: 2,
+                flags: ApoBufferFlags::Valid,
+                samples: Some(&input),
+            },
             Some(&mut output),
             50_000,
             Some(&graph),
@@ -2653,6 +2674,44 @@ mod tests {
         assert_eq!(apo.carried_wakes, 1);
         assert_eq!(apo.adopted_wakes, 1);
         assert_eq!(apo.slot.blocks(), 1);
+    }
+
+    #[test]
+    fn apo_audio_arrival_preserves_nan_and_silence_boundary_behavior() {
+        for (sample, audible) in [
+            (f32::NAN, false),
+            (0.0, false),
+            (-0.0, false),
+            (SILENCE_FLOOR, false),
+            (-SILENCE_FLOOR, false),
+            (SILENCE_FLOOR * 2.0, true),
+            (-SILENCE_FLOOR * 2.0, true),
+            (f32::INFINITY, true),
+            (f32::NEG_INFINITY, true),
+        ] {
+            let mut apo = ApoInstance::new(false);
+            apo.channels = 1;
+            apo.max_frames = 1;
+            let input = [sample];
+            let mut output = [0.0];
+            assert_eq!(
+                apo.apo_process(
+                    ApoInputBuffer {
+                        valid_frame_count: 1,
+                        flags: ApoBufferFlags::Valid,
+                        samples: Some(&input),
+                    },
+                    Some(&mut output),
+                    0,
+                    None,
+                    |_, _, _| panic!("passthrough must not process the graph"),
+                ),
+                (1, ApoBufferFlags::Valid)
+            );
+            assert_eq!(apo.carried_told, audible, "sample: {sample}");
+            assert_eq!(apo.carried_wakes, u32::from(audible));
+            assert_eq!(output[0].to_bits(), sample.to_bits());
+        }
     }
 
     #[test]

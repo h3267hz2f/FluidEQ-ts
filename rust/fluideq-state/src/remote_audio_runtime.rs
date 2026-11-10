@@ -110,9 +110,7 @@ pub fn parse_capture_args(argv: &[&str]) -> Option<CaptureArgs> {
         return None;
     }
     let pipe = argv[4];
-    let Some(pipe_hex) = pipe.strip_prefix(LAN_PIPE_PREFIX) else {
-        return None;
-    };
+    let pipe_hex = pipe.strip_prefix(LAN_PIPE_PREFIX)?;
     if !is_lowercase_hex_len(pipe_hex, LAN_PIPE_HEX_DIGITS) {
         return None;
     }
@@ -441,7 +439,7 @@ pub fn compute_shared_low_latency_period(
         return None;
     }
     let wanted = minimum.max(sample_rate / 200);
-    let rounded = ((wanted + fundamental - 1) / fundamental) * fundamental;
+    let rounded = wanted.div_ceil(fundamental) * fundamental;
     Some(maximum.min(rounded))
 }
 
@@ -746,10 +744,8 @@ impl MirrorControlRuntime {
         let delay = out.delay_us();
         let count = self.renders.entry(id).or_insert(0);
         *count = count.wrapping_add(1);
-        if *count % MIRROR_DELAY_EVERY_RENDERS == 0 {
-            if !reply(5, id, delay as i32) {
-                self.stopping = true;
-            }
+        if count.is_multiple_of(MIRROR_DELAY_EVERY_RENDERS) && !reply(5, id, delay as i32) {
+            self.stopping = true;
         }
         pcm
     }
@@ -1312,9 +1308,9 @@ impl PlaybackCommandSession {
 
         match header.kind {
             1 => {
-                if header.bytes != 0 && header.bytes != 38 {
-                    self.live = false;
-                } else if payload.iter().any(|&c| c > 127 || c == 0) {
+                if (header.bytes != 0 && header.bytes != 38)
+                    || payload.iter().any(|&c| c > 127 || c == 0)
+                {
                     self.live = false;
                 } else {
                     let guid = String::from_utf8_lossy(payload).into_owned();
@@ -1651,6 +1647,17 @@ mod tests {
             "--exclude-tree-pid"
         ])
         .is_none());
+    }
+
+    #[test]
+    fn shared_audio_period_rounds_up_and_respects_device_bounds() {
+        assert_eq!(compute_shared_low_latency_period(48_000, 48, 48, 960), Some(240));
+        assert_eq!(compute_shared_low_latency_period(44_100, 48, 48, 960), Some(240));
+        assert_eq!(compute_shared_low_latency_period(48_000, 48, 288, 960), Some(288));
+        assert_eq!(compute_shared_low_latency_period(48_000, 48, 48, 192), Some(192));
+        assert_eq!(compute_shared_low_latency_period(48_000, 0, 48, 960), None);
+        assert_eq!(compute_shared_low_latency_period(48_000, 48, 0, 960), None);
+        assert_eq!(compute_shared_low_latency_period(48_000, 48, 960, 48), None);
     }
 
     #[test]

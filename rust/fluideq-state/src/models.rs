@@ -27,25 +27,13 @@ pub const VOICE_MODEL_HOP_FRAMES: u32 = 480;
 pub const PITCH_MIN_HZ: f64 = 65.0; // C2
 pub const PITCH_MAX_HZ: f64 = 1100.0; // C#6
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeuralModelStatus {
     pub voice_model_loaded: bool,
     pub voice_model_path: Option<String>,
     pub ort_runtime_path: Option<String>,
     pub swift_f0_verified: bool,
     pub swift_f0_size_bytes: u64,
-}
-
-impl Default for NeuralModelStatus {
-    fn default() -> Self {
-        Self {
-            voice_model_loaded: false,
-            voice_model_path: None,
-            ort_runtime_path: None,
-            swift_f0_verified: false,
-            swift_f0_size_bytes: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -93,7 +81,7 @@ pub fn verify_onnx_model_file(path: &Path) -> Result<u64, String> {
 /// using the Cumulative Mean Normalized Difference Function (YIN algorithm) with parabolic
 /// minimum interpolation.
 pub fn estimate_vocal_pitch_yin(samples: &[f32], sample_rate: f64) -> PitchEstimate {
-    if !(sample_rate > 0.0) || samples.len() < 128 {
+    if sample_rate.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) || samples.len() < 128 {
         return PitchEstimate::default();
     }
 
@@ -134,7 +122,7 @@ pub fn estimate_vocal_pitch_yin(samples: &[f32], sample_rate: f64) -> PitchEstim
     let mut tau = tau_min;
     while tau <= tau_max {
         if cmndf[tau] < threshold {
-            while tau + 1 <= tau_max && cmndf[tau + 1] < cmndf[tau] {
+            while tau < tau_max && cmndf[tau + 1] < cmndf[tau] {
                 tau += 1;
             }
             best_tau = Some(tau);
@@ -207,6 +195,13 @@ mod tests {
         assert!((est.frequency_hz - 440.0).abs() < 1.0);
         assert_eq!(est.midi_note, 69);
         assert!(est.confidence > 0.90);
+
+        for invalid_rate in [0.0, -48_000.0, f64::NAN] {
+            assert_eq!(
+                estimate_vocal_pitch_yin(&samples, invalid_rate),
+                PitchEstimate::default()
+            );
+        }
     }
 
     #[test]

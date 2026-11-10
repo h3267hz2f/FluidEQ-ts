@@ -170,7 +170,7 @@ pub fn select_head_rate_and_doubling(stream_rate: u32) -> (u32, i32) {
         if head_rate <= 0.0 {
             return (0, 0);
         }
-        return (head_rate.round() as u32, doubling);
+        (head_rate.round() as u32, doubling)
     }
 
     #[cfg(not(feature = "link-cpp-core"))]

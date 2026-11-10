@@ -185,13 +185,13 @@ fn is_strict_braced_guid(word: &str) -> bool {
     if bytes.len() != 38 || bytes[0] != b'{' || bytes[37] != b'}' {
         return false;
     }
-    for at in 1..37 {
+    for (at, &byte) in bytes.iter().enumerate().take(37).skip(1) {
         let dash = matches!(at, 9 | 14 | 19 | 24);
         if dash {
-            if bytes[at] != b'-' {
+            if byte != b'-' {
                 return false;
             }
-        } else if !bytes[at].is_ascii_hexdigit() {
+        } else if !byte.is_ascii_hexdigit() {
             return false;
         }
     }

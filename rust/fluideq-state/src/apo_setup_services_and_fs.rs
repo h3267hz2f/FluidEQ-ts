@@ -816,10 +816,11 @@ pub fn ensure_directory_safe(engine_parent: &Path, path: &Path) -> bool {
         return true;
     }
     if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && parent != Path::new("/") {
-            if !ensure_directory_safe(engine_parent, parent) {
-                return false;
-            }
+        if !parent.as_os_str().is_empty()
+            && parent != Path::new("/")
+            && !ensure_directory_safe(engine_parent, parent)
+        {
+            return false;
         }
     }
     if fs::create_dir(path).is_ok() {
@@ -950,13 +951,11 @@ pub fn replace_with_bytes(
         return Err(format!("could not write {}: {}", fresh.display(), e));
     }
 
-    if !target_is_mapped_in_use {
-        if fs::rename(&fresh, to).is_ok() {
-            return Ok(ReplaceFileOutcome {
-                moved_aside_for_reboot: false,
-                replaced_aside_path: None,
-            });
-        }
+    if !target_is_mapped_in_use && fs::rename(&fresh, to).is_ok() {
+        return Ok(ReplaceFileOutcome {
+            moved_aside_for_reboot: false,
+            replaced_aside_path: None,
+        });
     }
 
     let mut aside_os = to.as_os_str().to_os_string();
@@ -1002,10 +1001,28 @@ pub fn delete_directory_tree(directory: &Path) -> bool {
                 ok = delete_directory_tree(&child) && ok;
                 continue;
             }
+            #[cfg(windows)]
             if child_meta.permissions().readonly() {
+                use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+
+                // Clear only the readonly attribute, preserving every other Windows attribute.
+                let attributes =
+                    child_meta.file_attributes() & !win32_setup_ffi::FILE_ATTRIBUTE_READONLY;
+                let path: Vec<u16> = child.as_os_str().encode_wide().chain(Some(0)).collect();
+                // SAFETY: `path` is a live, NUL-terminated UTF-16 buffer for this call.
+                let _ = unsafe { win32_setup_ffi::SetFileAttributesW(path.as_ptr(), attributes) };
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
                 let mut perms = child_meta.permissions();
-                perms.set_readonly(false);
-                let _ = fs::set_permissions(&child, perms);
+                let mode = perms.mode();
+                // set_readonly(false) would also grant group/other write access on Unix.
+                if perms.readonly() {
+                    perms.set_mode(mode | 0o200);
+                    let _ = fs::set_permissions(&child, perms);
+                }
             }
             let removed = if child_meta.file_type().is_symlink() {
                 fs::remove_file(&child).is_ok() || fs::remove_dir(&child).is_ok()
@@ -1053,6 +1070,7 @@ pub mod win32_setup_ffi {
     pub const KEY_READ: u32 = 0x20019;
     pub const KEY_WRITE: u32 = 0x20006;
     pub const KEY_WOW64_64KEY: u32 = 0x0100;
+    pub const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
     pub const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
     pub const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x0000_0004;
     pub const SC_MANAGER_CONNECT: u32 = 0x0001;
@@ -1153,6 +1171,7 @@ pub mod win32_setup_ffi {
             dw_flags: u32,
         ) -> i32;
         pub fn GetFileAttributesW(lp_file_name: *const u16) -> u32;
+        pub fn SetFileAttributesW(lp_file_name: *const u16, dw_file_attributes: u32) -> i32;
         pub fn GetLastError() -> u32;
     }
 

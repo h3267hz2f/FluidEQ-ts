@@ -541,7 +541,7 @@ where
         out.push_str("\"}");
     };
 
-    for slot in 0..FX_SLOT_COUNT {
+    for (slot, &slot_name) in SLOT_NAMES.iter().enumerate() {
         let mut held = false;
         if let Some(list) = values.composite[slot].as_ref() {
             for clsid in list {
@@ -549,13 +549,13 @@ where
                     continue;
                 }
                 held = true;
-                append_effect(SLOT_NAMES[slot], "list", clsid);
+                append_effect(slot_name, "list", clsid);
             }
         }
         if let Some(single) = values.single[slot].as_deref() {
             if !single.is_empty() {
                 held = true;
-                append_effect(SLOT_NAMES[slot], "single", single);
+                append_effect(slot_name, "single", single);
             }
         }
         if !held {
@@ -563,10 +563,10 @@ where
         }
     }
 
-    for at in 0..FX_LEGACY_COUNT {
+    for (at, &slot_name) in LEGACY_NAMES.iter().enumerate() {
         if let Some(legacy) = values.legacy[at].as_deref() {
             if !legacy.is_empty() {
-                append_effect(LEGACY_NAMES[at], "legacy", legacy);
+                append_effect(slot_name, "legacy", legacy);
             }
         }
     }
@@ -792,10 +792,10 @@ pub fn attach_all_endpoints<R: RegistryBackend>(
         let mut error = String::new();
         if !endpoint_key_exists(reg, guid) {
             error = format!("there is no output with the id {}", guid);
-        } else if !attach_one_endpoint(paths, reg, guid, slot, &mut attached, &mut error) {
-            if error.is_empty() {
-                error = "the output could not be attached".to_string();
-            }
+        } else if !attach_one_endpoint(paths, reg, guid, slot, &mut attached, &mut error)
+            && error.is_empty()
+        {
+            error = "the output could not be attached".to_string();
         }
         result.endpoints.push(EndpointAttachResult {
             guid: guid.clone(),
@@ -901,10 +901,10 @@ pub fn suspend_apo_all<R: RegistryBackend, E: EndpointEnumeratorBackend>(
         }
         let mut attached = false;
         let mut error = String::new();
-        if !suspend_apo_one(paths, reg, &endpoint.guid, &mut attached, &mut error) {
-            if error.is_empty() {
-                error = "Equalizer APO could not be switched off on this output".to_string();
-            }
+        if !suspend_apo_one(paths, reg, &endpoint.guid, &mut attached, &mut error)
+            && error.is_empty()
+        {
+            error = "Equalizer APO could not be switched off on this output".to_string();
         }
         result.endpoints.push(EndpointAttachResult {
             guid: endpoint.guid,
@@ -1098,6 +1098,12 @@ pub fn ensure_engine_tree<S: SecurityBackend>(
     Ok(())
 }
 
+/// Installation locations paired with the DLL manifest shipped with the setup helper.
+pub struct SetupInstallation<'a> {
+    pub paths: &'a SetupPaths,
+    pub manifest: &'a [ShippedDllEntry],
+}
+
 /// Exact port of `run_command` in `/native/system-apo/setup/commands.cpp`.
 pub fn run_setup_command<
     R: RegistryBackend,
@@ -1106,14 +1112,14 @@ pub fn run_setup_command<
     C: ServiceControl,
 >(
     options: &SetupOptions,
-    paths: &SetupPaths,
-    manifest: &[ShippedDllEntry],
+    installation: SetupInstallation<'_>,
     reg: &mut R,
     security: &mut S,
     enumerator: &E,
     services: &mut C,
     result: &mut SetupCommandResult,
 ) {
+    let SetupInstallation { paths, manifest } = installation;
     if options.command == "install" {
         let source = &paths.module_dir;
         let Some(target) = paths.install_dir() else {
@@ -1729,7 +1735,13 @@ pub fn run_elevated_command<
         COMMAND_TRIES,
         |attempt| {
             run_setup_command(
-                options, paths, manifest, reg, security, enumerator, services, attempt,
+                options,
+                SetupInstallation { paths, manifest },
+                reg,
+                security,
+                enumerator,
+                services,
+                attempt,
             );
         },
         |why| match wait_audio_settled(waiter) {

@@ -42,9 +42,9 @@ pub mod wav_ir;
 use biquad::{biquad_coefficients_designed, compute_auto_preamp_db, BandFilterKind, EqBandSpec};
 use chain_wire::{decode_chain_settings_wire, encode_chain_settings_wire};
 use deck_transport::{decode_noise_profile_wire, DeckLoadOutcome, DualDeckCoordinator};
-use device_profiles::DeviceProfileRegistry;
+use device_profiles::{DeviceEndpointProfile, DeviceProfileRegistry};
 use fluideq_dsp_sys::{
-    FeqChainSettings, FeqEqModel, FeqFilterType, FeqPhaseMode, NativeChainHandle,
+    FeqChainEqBand, FeqChainSettings, FeqEqModel, FeqFilterType, FeqPhaseMode, NativeChainHandle,
     NativeMetersHandle, FEQ_CHAIN_MAX_EQ_BANDS,
 };
 use linear_phase::{
@@ -613,17 +613,17 @@ impl AppStateStore {
     /// Saves the outgoing endpoint's EQ & rack profile and switches to `guid` (`device_name`),
     /// restoring the endpoint's saved profile if one exists.
     pub fn switch_active_output_device(&mut self, guid: &str, device_name: &str) -> AppStateSnapshot {
-        if let Some(restored) = self.device_profiles.switch_device(
-            guid,
-            device_name,
-            &self.active_preset_name,
-            self.preamp_db,
-            self.matched_treble,
-            self.eq_model_amount,
-            &self.tone,
-            &self.bands,
-            &self.chain_settings,
-        ) {
+        if let Some(restored) = self.device_profiles.switch_device(DeviceEndpointProfile {
+            guid: guid.to_string(),
+            device_name: device_name.to_string(),
+            active_preset_name: self.active_preset_name.clone(),
+            preamp_db: self.preamp_db,
+            matched_treble: self.matched_treble,
+            eq_model_amount: self.eq_model_amount,
+            tone: self.tone.clone(),
+            bands: self.bands.clone(),
+            chain_settings: self.chain_settings,
+        }) {
             self.active_preset_name = restored.active_preset_name;
             self.preamp_db = restored.preamp_db;
             self.matched_treble = restored.matched_treble;
@@ -680,10 +680,13 @@ impl AppStateStore {
             .filter(|b| b.enabled)
             .map(|b| {
                 biquad_coefficients_designed(
-                    b.filter_type.to_feq_type(),
-                    b.frequency,
-                    b.gain_db,
-                    b.quality,
+                    &FeqChainEqBand {
+                        filter_type: b.filter_type.to_feq_type(),
+                        frequency: b.frequency,
+                        gain_db: b.gain_db,
+                        quality: b.quality,
+                        ..FeqChainEqBand::default()
+                    },
                     self.sample_rate,
                     self.eq_model,
                     self.eq_model_amount,
@@ -701,10 +704,13 @@ impl AppStateStore {
             .filter(|b| b.enabled)
             .map(|b| {
                 biquad_coefficients_designed(
-                    b.filter_type.to_feq_type(),
-                    b.frequency,
-                    b.gain_db,
-                    b.quality,
+                    &FeqChainEqBand {
+                        filter_type: b.filter_type.to_feq_type(),
+                        frequency: b.frequency,
+                        gain_db: b.gain_db,
+                        quality: b.quality,
+                        ..FeqChainEqBand::default()
+                    },
                     self.sample_rate,
                     self.eq_model,
                     self.eq_model_amount,

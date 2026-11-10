@@ -121,8 +121,8 @@ pub fn build_speaker_folddown_matrix(
     let mut matrix = [[0.0f32; MAX_REMOTE_CHANNELS]; MAX_REMOTE_CHANNELS];
 
     if out_ch >= src_ch && src_ch != 1 {
-        for c in 0..src_ch {
-            matrix[c][c] = 1.0;
+        for (channel, row) in matrix[..src_ch].iter_mut().enumerate() {
+            row[channel] = 1.0;
         }
     } else if src_ch == 1 {
         matrix[0][0] = 1.0;
@@ -555,8 +555,8 @@ impl PeerPlaybackEngine {
                 let coeff =
                     self.sinc_table[k0 + tap] + blend * (self.sinc_table[k1 + tap] - self.sinc_table[k0 + tap]);
                 let ring_offset = ((idx.rem_euclid(cap)) as usize) * src_ch;
-                for c in 0..src_ch {
-                    src_frame[c] += self.ring[ring_offset + c] * coeff;
+                for (channel, sample) in src_frame[..src_ch].iter_mut().enumerate() {
+                    *sample += self.ring[ring_offset + channel] * coeff;
                 }
             }
 
@@ -566,8 +566,8 @@ impl PeerPlaybackEngine {
             let row = f * out_ch;
             for out_c in 0..out_ch {
                 let mut mixed = 0.0f32;
-                for c in 0..src_ch {
-                    mixed += src_frame[c] * self.matrix[out_c][c];
+                for (channel, sample) in src_frame[..src_ch].iter().enumerate() {
+                    mixed += *sample * self.matrix[out_c][channel];
                 }
                 self.last_sample[out_c] = mixed;
                 let sample = mixed * self.fade;
@@ -606,7 +606,7 @@ pub fn capture_chunk_frames(sample_rate: u32) -> usize {
     if !(8_000..=384_000).contains(&sample_rate) {
         return 0;
     }
-    ((sample_rate as usize) + 199) / 200
+    (sample_rate as usize).div_ceil(200)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -884,6 +884,30 @@ mod tests {
         assert_eq!(matrix[0][3], 0.25); // LFE -> L
         assert_eq!(matrix[0][4], 0.5); // BL -> L
         assert_eq!(matrix[1][5], 0.5); // BR -> R
+    }
+
+    #[test]
+    fn matching_or_wider_outputs_preserve_each_source_channel() {
+        for source_channels in 2..=MAX_REMOTE_CHANNELS as u16 {
+            for output_channels in source_channels..=MAX_REMOTE_CHANNELS as u16 {
+                let matrix = build_speaker_folddown_matrix(source_channels, output_channels, 0)
+                    .expect("valid channel layout");
+                for (output, row) in matrix.iter().enumerate() {
+                    for (source, gain) in row.iter().enumerate() {
+                        let expected = if output == source && source < source_channels as usize {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        assert_eq!(*gain, expected);
+                    }
+                }
+            }
+        }
+        assert!(build_speaker_folddown_matrix(0, 2, 0).is_none());
+        assert!(build_speaker_folddown_matrix(2, 0, 0).is_none());
+        assert!(build_speaker_folddown_matrix(9, 2, 0).is_none());
+        assert!(build_speaker_folddown_matrix(2, 9, 0).is_none());
     }
 
     #[test]

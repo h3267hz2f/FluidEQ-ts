@@ -7,8 +7,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! Biquad filter synthesis (RBJ Audio EQ Cookbook + Martin Vicanek analog-matched),
 //! character model Q shaping, and worst-case auto-headroom calculation in Rust.
 
-use fluideq_dsp_sys::{FeqBiquadCoefficients, FeqEqModel, FeqFilterType};
+use fluideq_dsp_sys::{FeqBiquadCoefficients, FeqChainEqBand, FeqEqModel, FeqFilterType};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::f64::consts::{LN_2, PI, SQRT_2};
 
 const MIN_FREQUENCY_HZ: f64 = 10.0;
@@ -467,7 +468,11 @@ pub fn biquad_coefficients_matched_rust(
     sample_rate: f64,
 ) -> FeqBiquadCoefficients {
     let cookbook = biquad_coefficients_cookbook(filter_type, frequency, gain_db, quality, sample_rate);
-    if !(sample_rate > 0.0) || !(frequency > 0.0) || !(quality > 0.0) {
+    // NaN is incomparable and must take the same fallback as non-positive inputs.
+    if sample_rate.partial_cmp(&0.0) != Some(Ordering::Greater)
+        || frequency.partial_cmp(&0.0) != Some(Ordering::Greater)
+        || quality.partial_cmp(&0.0) != Some(Ordering::Greater)
+    {
         return cookbook;
     }
     let safe = frequency.min(sample_rate * 0.499);
@@ -511,13 +516,13 @@ pub fn biquad_coefficients_matched(
 ) -> FeqBiquadCoefficients {
     #[cfg(feature = "link-cpp-core")]
     unsafe {
-        return fluideq_dsp_sys::feq_biquad_coefficients_matched(
+        fluideq_dsp_sys::feq_biquad_coefficients_matched(
             filter_type,
             frequency,
             gain_db,
             quality,
             sample_rate,
-        );
+        )
     }
 
     #[cfg(not(feature = "link-cpp-core"))]
@@ -526,31 +531,26 @@ pub fn biquad_coefficients_matched(
     }
 }
 
-/// Pure-Rust port of `feq_biquad_coefficients_designed` in `/native/dsp-core/src/biquad.cpp`.
+/// Only the band's filter type, frequency, gain and quality affect coefficient design.
 pub fn biquad_coefficients_designed_rust(
-    filter_type: FeqFilterType,
-    frequency: f64,
-    gain_db: f64,
-    quality: f64,
+    band: &FeqChainEqBand,
     sample_rate: f64,
     model: FeqEqModel,
     amount: f64,
     matched: bool,
 ) -> FeqBiquadCoefficients {
     let _ = SHELF_BUTTERWORTH_TOLERANCE;
-    let q = modelled_quality(filter_type, gain_db, quality, model, amount);
+    let q = modelled_quality(band.filter_type, band.gain_db, band.quality, model, amount);
     if matched {
-        biquad_coefficients_matched_rust(filter_type, frequency, gain_db, q, sample_rate)
+        biquad_coefficients_matched_rust(band.filter_type, band.frequency, band.gain_db, q, sample_rate)
     } else {
-        biquad_coefficients_cookbook(filter_type, frequency, gain_db, q, sample_rate)
+        biquad_coefficients_cookbook(band.filter_type, band.frequency, band.gain_db, q, sample_rate)
     }
 }
 
+/// Designs coefficients independently of the band's enable, dynamic and routing fields.
 pub fn biquad_coefficients_designed(
-    filter_type: FeqFilterType,
-    frequency: f64,
-    gain_db: f64,
-    quality: f64,
+    band: &FeqChainEqBand,
     sample_rate: f64,
     model: FeqEqModel,
     amount: f64,
@@ -558,29 +558,20 @@ pub fn biquad_coefficients_designed(
 ) -> FeqBiquadCoefficients {
     #[cfg(feature = "link-cpp-core")]
     unsafe {
-        return fluideq_dsp_sys::feq_biquad_coefficients_designed(
-            filter_type,
-            frequency,
-            gain_db,
-            quality,
+        fluideq_dsp_sys::feq_biquad_coefficients_designed(
+            band.filter_type,
+            band.frequency,
+            band.gain_db,
+            band.quality,
             sample_rate,
             model,
             amount,
             if matched { 1 } else { 0 },
-        );
+        )
     }
     #[cfg(not(feature = "link-cpp-core"))]
     {
-        biquad_coefficients_designed_rust(
-            filter_type,
-            frequency,
-            gain_db,
-            quality,
-            sample_rate,
-            model,
-            amount,
-            matched,
-        )
+        biquad_coefficients_designed_rust(band, sample_rate, model, amount, matched)
     }
 }
 
@@ -782,7 +773,17 @@ mod cpp_parity_tests {
                         for &gain in &gains {
                             for &q in &qualities {
                                 let rust_c = biquad_coefficients_designed_rust(
-                                    ft, freq, gain, q, 48_000.0, model, 0.75, matched,
+                                    &FeqChainEqBand {
+                                        filter_type: ft,
+                                        frequency: freq,
+                                        gain_db: gain,
+                                        quality: q,
+                                        ..FeqChainEqBand::default()
+                                    },
+                                    48_000.0,
+                                    model,
+                                    0.75,
+                                    matched,
                                 );
                                 let cpp_c = unsafe {
                                     feq_biquad_coefficients_designed(
@@ -824,10 +825,13 @@ mod cpp_parity_tests {
 
         // Also verify sample-for-sample biquad_process_rust parity against C++ feq_biquad_process
         let coeffs = biquad_coefficients_designed_rust(
-            FeqFilterType::FEQ_FILTER_PK,
-            3200.0,
-            6.5,
-            1.8,
+            &FeqChainEqBand {
+                filter_type: FeqFilterType::FEQ_FILTER_PK,
+                frequency: 3200.0,
+                gain_db: 6.5,
+                quality: 1.8,
+                ..FeqChainEqBand::default()
+            },
             48_000.0,
             FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
             1.0,

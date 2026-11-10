@@ -31,6 +31,7 @@ use crate::apo_graph_and_guard::{
     describe_timing, judge_level_prediction, timing_step, InputHistory, LevelMailbox,
     LevelPrediction, LevelPredictionJudgement, LEVEL_HISTORY_SECONDS,
 };
+use crate::apo_process_and_stages::{ApoEndpointProperties, ConnectionFormat};
 pub use crate::apo_split_and_leveling::{sha256_digest, EndpointLevelingCoordinator};
 use crate::apo_split_tap_and_reader::{SplitReport, SplitState};
 use crate::chain_wire::decode_chain_settings_wire;
@@ -658,16 +659,13 @@ impl ApoWatcher {
     pub fn new(
         slot: Arc<GraphSlot>,
         log: EngineLog,
-        endpoint_guid: impl Into<String>,
-        endpoint_name: impl Into<String>,
+        endpoint: ApoEndpointProperties<'_>,
         config_dir: impl Into<String>,
-        sample_rate: u32,
-        channels: u32,
+        format: ConnectionFormat,
         max_frames: u32,
-        channel_mask: u32,
         default_mode: bool,
     ) -> Self {
-        let guid = endpoint_guid.into();
+        let guid = endpoint.guid.unwrap_or_default().to_string();
         let dir = config_dir.into();
         let status_root = Path::new(&dir)
             .parent()
@@ -677,12 +675,12 @@ impl ApoWatcher {
             slot,
             log,
             endpoint_guid: guid.clone(),
-            endpoint_name: endpoint_name.into(),
+            endpoint_name: endpoint.friendly_name.unwrap_or_default().to_string(),
             config_dir: dir,
-            sample_rate: sample_rate.max(1),
-            channels: channels.max(1),
+            sample_rate: format.rate.max(1),
+            channels: format.channels.max(1),
             max_frames: max_frames.max(1),
-            channel_mask,
+            channel_mask: format.mask,
             default_mode,
             leveling: if guid.is_empty() {
                 None
@@ -1813,13 +1811,18 @@ mod tests {
         let mut watcher = ApoWatcher::new(
             slot.clone(),
             log,
-            "{11111111-2222-3333-4444-555555555555}",
-            "Speakers",
+            ApoEndpointProperties {
+                guid: Some("{11111111-2222-3333-4444-555555555555}"),
+                friendly_name: Some("Speakers"),
+            },
             temp_dir.to_string_lossy().into_owned(),
-            48_000,
-            2,
+            ConnectionFormat {
+                acceptable: true,
+                rate: 48_000,
+                channels: 2,
+                mask: 0x3,
+            },
             480,
-            0x3,
             true,
         );
         watcher.open_level_prediction();

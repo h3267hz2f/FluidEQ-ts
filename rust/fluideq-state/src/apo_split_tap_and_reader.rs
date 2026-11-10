@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! - `/native/system-apo/src/split_tap.h` & `split_tap.cpp` (`SplitReport`, `SplitTap`, `is_output_rate`)
 
 use crate::apo_engine_runtime::{split_role_of, SplitRole};
+use crate::apo_process_and_stages::ConnectionFormat;
 use crate::apo_split_and_leveling::{
     lfe_channel_of, speaker_of_channel, split_transport_name, SplitClock, SplitRing, ROOM_SPEAKERS,
     SPLIT_RING_FRAMES, SPLIT_RING_STRIDE,
@@ -201,7 +202,7 @@ pub const SPLIT_TOO_FAR_SECONDS: f64 = 0.050;
 pub const SPLIT_LATE_BLOCKS: f64 = 3.0;
 pub const SPLIT_FADE_SECONDS: f64 = 0.005;
 pub const SPLIT_VOLUME_SECONDS: f64 = 0.020;
-const HALF_POWER: f32 = 0.70710678;
+const HALF_POWER: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 /// Windowed-sinc interpolation table (`1025 * 64 = 65,600` floats, ~260 kB) for one `(source_rate, target_rate)` pair.
 /// Built on the watcher control thread and shared lock-free with the audio thread.
@@ -469,9 +470,9 @@ impl SplitReader {
                 break;
             }
             self.fade = (self.fade - step).max(0.0);
-            for ch in 0..ch_count {
-                if frame < planes[ch].len() {
-                    planes[ch][frame] += self.last[ch] * self.gain * self.fade;
+            for (ch, plane) in planes[..ch_count].iter_mut().enumerate() {
+                if frame < plane.len() {
+                    plane[frame] += self.last[ch] * self.gain * self.fade;
                 }
             }
         }
@@ -636,12 +637,12 @@ impl SplitReader {
                 weights[tap] = a + (b - a) * blend;
             }
             let origin = (whole as i64).wrapping_sub(31) as u64;
-            for ch in 0..in_channels {
+            for (ch, sample) in input[..in_channels].iter_mut().enumerate() {
                 let mut val = 0.0f32;
-                for tap in 0..SINC_TAPS {
-                    val += ring.at(origin.wrapping_add(tap as u64), ch as u32) * weights[tap];
+                for (tap, &weight) in weights.iter().enumerate() {
+                    val += ring.at(origin.wrapping_add(tap as u64), ch as u32) * weight;
                 }
-                input[ch] = val;
+                *sample = val;
             }
             self.fade = (self.fade + fade_step).min(1.0);
             self.gain = if self.gain < volume {
@@ -649,14 +650,14 @@ impl SplitReader {
             } else {
                 (self.gain - volume_step).max(volume)
             };
-            for out_ch in 0..out_channels {
+            for (out_ch, plane) in planes[..out_channels].iter_mut().enumerate() {
                 let mut sample = 0.0f32;
-                for ch in 0..in_channels {
-                    sample += self.matrix[out_ch][ch] * input[ch];
+                for (ch, &input_sample) in input[..in_channels].iter().enumerate() {
+                    sample += self.matrix[out_ch][ch] * input_sample;
                 }
                 self.last[out_ch] = sample;
-                if frame < planes[out_ch].len() {
-                    planes[out_ch][frame] += sample * self.gain * self.fade;
+                if frame < plane.len() {
+                    plane[frame] += sample * self.gain * self.fade;
                 }
             }
             self.position += step;
@@ -755,13 +756,17 @@ impl SplitTap {
     pub fn new(
         board: &SplitBoard,
         endpoint: impl Into<String>,
-        rate: u32,
-        channels: u32,
-        mask: u32,
+        format: ConnectionFormat,
         default_mode: bool,
         ticks_per_second: i64,
         config_identity: impl Into<String>,
     ) -> Self {
+        let ConnectionFormat {
+            rate,
+            channels,
+            mask,
+            ..
+        } = format;
         let endpoint_str = endpoint.into();
         let config_id_str = config_identity.into();
         let own = board.split_endpoint(&endpoint_str, &config_id_str);
@@ -1094,9 +1099,9 @@ impl SplitTap {
             } else {
                 (self.output_gain - step).max(target)
             };
-            for ch in 0..ch_count {
-                if frame < planes[ch].len() {
-                    planes[ch][frame] *= self.output_gain;
+            for plane in &mut planes[..ch_count] {
+                if frame < plane.len() {
+                    plane[frame] *= self.output_gain;
                 }
             }
         }
@@ -1179,8 +1184,14 @@ mod tests {
             main_guid, main_guid, sec_guid
         );
 
-        let mut main_tap = SplitTap::new(&board, main_guid, 48_000, 2, 0x3, true, 1_000_000, "");
-        let mut sec_tap = SplitTap::new(&board, sec_guid, 48_000, 2, 0x3, true, 1_000_000, "");
+        let format = ConnectionFormat {
+            acceptable: true,
+            rate: 48_000,
+            channels: 2,
+            mask: 0x3,
+        };
+        let mut main_tap = SplitTap::new(&board, main_guid, format, true, 1_000_000, "");
+        let mut sec_tap = SplitTap::new(&board, sec_guid, format, true, 1_000_000, "");
 
         assert!(main_tap.follow(Some(&split_txt), true, &board));
         assert!(sec_tap.follow(Some(&split_txt), true, &board));

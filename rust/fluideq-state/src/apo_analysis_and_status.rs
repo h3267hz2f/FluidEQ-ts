@@ -726,9 +726,9 @@ impl AnalysisLink {
 
         let header_bytes = std::mem::size_of::<FeqWireAnalysisFrame>();
         let spectrum_bytes = std::mem::size_of::<f32>() * spectra_concat.len();
-        let scope_bytes = std::mem::size_of::<f32>() * scope_slice.len();
+        let scope_bytes = std::mem::size_of_val(scope_slice);
         let band_bytes = std::mem::size_of::<f32>() * band_count;
-        let detail_bytes = std::mem::size_of::<f32>() * detail_slice.len();
+        let detail_bytes = std::mem::size_of_val(detail_slice);
         let live_input_bytes = std::mem::size_of::<f32>() * 5;
 
         let mut packet = Vec::with_capacity(
