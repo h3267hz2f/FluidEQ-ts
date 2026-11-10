@@ -656,6 +656,38 @@ void detach_restores_sz_type() {
   CHECK(!kept.after.composite_was_sz[kEfx]);
 }
 
+void vendor_lists_with_apo_in_efx_take_the_endpoint_value() {
+  std::printf("vendor lists with APO in EFX take the endpoint value\n");
+  FxValues before;
+  before.single[kSfx] = kApoMfx;
+  before.single[kEfx] = kApoEfx;
+  before.composite[kSfx] = list({kVendorSfx});
+  before.composite[kMfx] = list({kVendorMfx});
+  before.composite[kEfx] = list({kVendorEfx});
+  before.modes[kEfx] = list({kVendorMode});
+
+  CHECK(default_slot_for(before, false) == Slot::EfxSingle);
+
+  FxValues expected = before;
+  expected.single[kEfx] = kOurs;
+  const FxPlan plan = plan_attach(before, kOurs, Slot::EfxSingle);
+  CHECK(plan.refused.empty());
+  CHECK(plan.changed);
+  expect_values(plan.after, expected,
+                "vendor_lists_with_apo_in_efx_take_the_endpoint_value");
+
+  const FxPlan gone = plan_detach(plan.after, before, kOurs);
+  expect_values(gone.after, before,
+                "vendor_lists_with_apo_in_efx_take_the_endpoint_value/detach");
+
+  // A vendor's own effect in the same value is still never taken, and the
+  // ladder stays on the lists.
+  FxValues vendor = before;
+  vendor.single[kEfx] = kVendorEfx;
+  CHECK(default_slot_for(vendor, false) == Slot::Efx);
+  CHECK(!plan_attach(vendor, kOurs, Slot::EfxSingle).refused.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -679,6 +711,7 @@ int main() {
   windows_defaults_in_the_singles_are_the_ladder();
   move_from_a_list_into_the_efx_single();
   an_occupied_single_is_never_taken();
+  vendor_lists_with_apo_in_efx_take_the_endpoint_value();
   windows_second_pair_of_defaults_is_also_windows();
   bare_endpoint_starts_at_efx();
   detach_restores_created_keys();

@@ -264,7 +264,10 @@ FxPlan plan_attach(const FxValues& before, std::wstring_view clsid, Slot slot) {
     // One value, one class id: ours goes in where nothing is, or where
     // Windows' own default effect is. A vendor registered there would be
     // switched off by the write, and this program never switches anybody's
-    // effect off to make room for its own.
+    // effect off to make room for its own. Equalizer APO is the exception:
+    // it is another EQ, the endpoint backup restores it on detach, and
+    // leaving it in the endpoint value is the one shape where Windows never
+    // creates ours at all.
     //
     // Nothing is mirrored into a list on the way, unlike the list attach
     // below: a list is the newer generation, and creating one is what would
@@ -274,7 +277,7 @@ FxPlan plan_attach(const FxValues& before, std::wstring_view clsid, Slot slot) {
     const std::optional<std::wstring>& held =
         legacy ? before.legacy[at] : before.single[at];
     if (holds_effect(held) && !equal_ci(*held, clsid) &&
-        !is_windows_default_apo(*held)) {
+        !is_windows_default_apo(*held) && !is_equalizer_apo(*held)) {
       plan.refused = std::wstring(one_value_name(slot)) +
                      L" already holds another effect, " + *held;
       return plan;
@@ -492,17 +495,35 @@ Slot default_slot_for(const FxValues& original, bool combined) {
       return Slot::Gfx;
     }
   }
-  // An endpoint whose driver registered only pids 5, 6 and 7 is read from
-  // them, and a list added beside them is what an attach used to make: on a
-  // Bluetooth headset that list was never once created by Windows. Newest
-  // first, and only where the value is free or holds Windows' own effect.
+  const std::optional<std::wstring>& efx = original.single[kEfx];
   if (is_single_only(original)) {
+    // An endpoint whose driver registered only pids 5, 6 and 7 is read from
+    // them, and a list added beside them is what an attach used to make: on a
+    // Bluetooth headset that list was never once created by Windows. Newest
+    // first, and only where the value is free or holds Windows' own effect.
     const Slot ones[] = {Slot::EfxSingle, Slot::MfxSingle, Slot::SfxSingle};
     for (const Slot slot : ones) {
       const std::optional<std::wstring>& held =
           original.single[single_index_of(slot)];
       if (!holds_effect(held) || is_windows_default_apo(*held)) {
         return slot;
+      }
+    }
+  } else {
+    bool has_composites = false;
+    for (int at = 0; at < kSlotCount; ++at) {
+      has_composites = has_composites || original.composite[at].has_value();
+    }
+    if (has_composites) {
+      // The driver registered its effects as composite lists. Windows falls
+      // back to the endpoint value (pid 7) when it cannot build that list with
+      // ours on the end — a Realtek output attached beside its own APOs was
+      // registered and never once loaded. Where that value is free, Windows'
+      // own, or Equalizer APO's, ours belongs there; EAPO is another EQ and
+      // the detach backup puts it back.
+      if (!holds_effect(efx) || is_windows_default_apo(*efx) ||
+          is_equalizer_apo(*efx)) {
+        return Slot::EfxSingle;
       }
     }
   }

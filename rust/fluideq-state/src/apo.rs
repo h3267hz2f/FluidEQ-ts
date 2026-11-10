@@ -962,11 +962,16 @@ pub fn is_single_only(values: &EndpointFxValues) -> bool {
 pub fn default_slot_for(original: &EndpointFxValues, combined: bool) -> ApoSlot {
     if is_legacy_only(original) {
         let gfx = &original.legacy[FX_LEGACY_GFX];
-        if !holds_effect(gfx) || gfx.as_deref().map(is_windows_default_apo_clsid).unwrap_or(false)
+        if !holds_effect(gfx)
+            || gfx
+                .as_deref()
+                .map(is_windows_default_apo_clsid)
+                .unwrap_or(false)
         {
             return ApoSlot::Gfx;
         }
     }
+    let efx = &original.single[FX_SLOT_EFX];
     if is_single_only(original) {
         for (slot, idx) in [
             (ApoSlot::EfxSingle, FX_SLOT_EFX),
@@ -982,6 +987,22 @@ pub fn default_slot_for(original: &EndpointFxValues, combined: bool) -> ApoSlot 
             {
                 return slot;
             }
+        }
+    } else if (0..FX_SLOT_COUNT).any(|i| original.composite[i].is_some()) {
+        // The driver registered its effects as composite lists. Windows falls
+        // back to the endpoint value (pid 7) when it cannot build that list
+        // with ours on the end — a Realtek output attached beside its own
+        // APOs was registered and never once loaded. Where that value is
+        // free, Windows' own, or Equalizer APO's, ours belongs there; EAPO is
+        // another EQ and the detach backup puts it back.
+        let efx_free = !holds_effect(efx)
+            || efx
+                .as_deref()
+                .map(is_windows_default_apo_clsid)
+                .unwrap_or(false)
+            || efx.as_deref().map(is_equalizer_apo_clsid).unwrap_or(false);
+        if efx_free {
+            return ApoSlot::EfxSingle;
         }
     }
     if combined {
@@ -1014,6 +1035,7 @@ pub fn plan_attach(before: &EndpointFxValues, clsid: &str, slot: ApoSlot) -> End
             if !existing.is_empty()
                 && !equal_clsid_ci(existing, clsid)
                 && !is_windows_default_apo_clsid(existing)
+                && !is_equalizer_apo_clsid(existing)
             {
                 return EndpointFxPlan {
                     after: before.clone(),
@@ -1799,6 +1821,35 @@ mod tests {
         assert_eq!(
             plan.after.single[FX_SLOT_MFX].as_deref(),
             Some(FLUID_ENGINE_APO_CLSID)
+        );
+    }
+
+    #[test]
+    fn vendor_composite_with_equalizer_apo_in_efx_takes_the_endpoint_value() {
+        let mut values = EndpointFxValues::default();
+        // Realtek-shaped: vendor APOs in the lists, Equalizer APO in the
+        // values Windows actually creates, and a free MFX value it never
+        // creates for a shared-mode stream.
+        values.single[FX_SLOT_SFX] = Some(EQUALIZER_APO_CLSIDS[0].to_string());
+        values.single[FX_SLOT_EFX] = Some(EQUALIZER_APO_CLSIDS[1].to_string());
+        values.composite[FX_SLOT_SFX] =
+            Some(vec!["{DA2C9ECE-7418-4906-B4FA-0A00B3EB88AA}".to_string()]);
+        values.composite[FX_SLOT_MFX] =
+            Some(vec!["{A296D363-EE83-4af9-9BE7-729C1296150A}".to_string()]);
+        values.composite[FX_SLOT_EFX] =
+            Some(vec!["{A29EB043-6CE2-4ee2-B38C-F58719E0D88F}".to_string()]);
+
+        assert_eq!(default_slot_for(&values, false), ApoSlot::EfxSingle);
+        let plan = plan_attach(&values, FLUID_ENGINE_APO_CLSID, ApoSlot::EfxSingle);
+        assert!(plan.refused.is_none(), "{:?}", plan.refused);
+        assert_eq!(
+            plan.after.single[FX_SLOT_EFX].as_deref(),
+            Some(FLUID_ENGINE_APO_CLSID)
+        );
+        let detached = plan_detach(&plan.after, &values, FLUID_ENGINE_APO_CLSID);
+        assert_eq!(
+            detached.after.single[FX_SLOT_EFX].as_deref(),
+            Some(EQUALIZER_APO_CLSIDS[1])
         );
     }
 
