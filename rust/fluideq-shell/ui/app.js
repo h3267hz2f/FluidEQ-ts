@@ -786,12 +786,26 @@ function renderCoreState() {
     .join(' · ');
 }
 
+function engineBlockers(status) {
+  if (!status?.installed) return [];
+  const blockers = [];
+  if (status.unsignedAllowed === false) {
+    blockers.push('Windows is blocking unsigned effects');
+  }
+  if (status.runtimeBeside === false) {
+    blockers.push('the engine runtime is missing');
+  }
+  if (status.serviceCanWrite === false) {
+    blockers.push('the audio service cannot write the engine folder');
+  }
+  return blockers;
+}
+
 function renderEngineStatus(status) {
   engineStatus = status;
   const endpoints = Array.isArray(status?.endpoints) ? status.endpoints : [];
   const attached = endpoints.filter((endpoint) => endpoint.attached).length;
   const installed = Boolean(status?.installed);
-  const active = installed && attached > 0;
   const attachable = endpoints.length > attached;
   const bypassed = endpoints.filter(
     (endpoint) => endpoint.attached && endpoint.tpBypassed
@@ -801,7 +815,10 @@ function renderEngineStatus(status) {
     Boolean(status?.dllVersion) &&
     Boolean(status?.bundledVersion) &&
     status.dllVersion !== status.bundledVersion;
-  const needsAttention = attachable || bypassed > 0 || stale;
+  const blockers = engineBlockers(status);
+  const blocked = blockers.length > 0;
+  const active = installed && attached > 0 && bypassed === 0 && !blocked;
+  const needsAttention = attachable || bypassed > 0 || stale || blocked;
 
   const device = status?.defaultDevice;
   if (device?.name) {
@@ -810,15 +827,18 @@ function renderEngineStatus(status) {
   renderCoreState();
 
   els.engineActivation.hidden = false;
+  els.engineActivation.title = blockers.join('\n');
   els.engineActivation.classList.toggle('active', active);
-  if (active) {
-    els.engineText.textContent = bypassed
-      ? `Windows is bypassing the engine on ${bypassed} output${bypassed === 1 ? '' : 's'}`
-      : stale
-        ? `Engine update available · ${status.dllVersion} → ${status.bundledVersion}`
-        : attachable
-          ? `Engine on ${attached} of ${endpoints.length} outputs`
-          : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
+  if (bypassed > 0) {
+    els.engineText.textContent = `Windows is bypassing the engine on ${bypassed} output${bypassed === 1 ? '' : 's'}`;
+  } else if (blocked) {
+    els.engineText.textContent = `Engine cannot load: ${blockers[0]}`;
+  } else if (active) {
+    els.engineText.textContent = stale
+      ? `Engine update available · ${status.dllVersion} → ${status.bundledVersion}`
+      : attachable
+        ? `Engine on ${attached} of ${endpoints.length} outputs`
+        : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
   } else if (installed) {
     els.engineText.textContent = endpoints.length
       ? 'Engine installed, not attached'
@@ -828,11 +848,13 @@ function renderEngineStatus(status) {
   }
   els.engineInstall.hidden = installed && !needsAttention;
   els.engineInstall.textContent = installed
-    ? bypassed
-      ? 'Fix engine activation'
-      : stale
-        ? 'Update engine'
-        : 'Attach all outputs'
+    ? blocked
+      ? 'Repair engine'
+      : bypassed
+        ? 'Fix engine activation'
+        : stale
+          ? 'Update engine'
+          : 'Attach all outputs'
     : 'Enable system audio';
 }
 
