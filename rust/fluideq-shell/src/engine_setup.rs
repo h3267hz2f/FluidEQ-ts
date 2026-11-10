@@ -198,17 +198,24 @@ mod platform {
 
         let wait = unsafe { WaitForSingleObject(process, INFINITE) }.0;
         let mut code = 0u32;
-        let code_read = unsafe { GetExitCodeProcess(process, &mut code) }.is_ok();
+        let read_code = unsafe { GetExitCodeProcess(process, &mut code) };
         unsafe {
             let _ = CloseHandle(process);
         }
 
-        if wait != WAIT_OBJECT_0 && !code_read {
+        if wait != WAIT_OBJECT_0 {
             let error = unsafe { GetLastError() }.0;
-            return Err(format!("could not wait for the elevated helper: {}", win32_error(error)));
+            return Err(format!(
+                "could not wait for the elevated helper: {}",
+                win32_error(error)
+            ));
         }
-        if !code_read {
-            return Ok(Some(SETUP_EXIT_DECLINED as u32));
+        // A read that failed is not a decline. Saying it was one sent the user
+        // to accept a prompt they had already accepted.
+        if let Err(error) = read_code {
+            return Err(format!(
+                "could not read the elevated helper's exit code: {error}"
+            ));
         }
         Ok(Some(code))
     }
