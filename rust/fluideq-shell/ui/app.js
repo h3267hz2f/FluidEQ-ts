@@ -767,7 +767,7 @@ window.addEventListener('resize', scheduleDraw);
 // window is open; asking again when it comes back to the front keeps the pill
 // from describing a state that has since changed.
 window.addEventListener('focus', () => {
-  if (invoke) refreshEngineStatus();
+  if (invoke && !engineInstallInFlight) refreshEngineStatus();
 });
 
 // ---------------------------------------------------------------------------
