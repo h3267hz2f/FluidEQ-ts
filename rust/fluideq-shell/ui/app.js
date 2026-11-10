@@ -810,6 +810,9 @@ function renderEngineStatus(status) {
   const bypassed = endpoints.filter(
     (endpoint) => endpoint.attached && endpoint.tpBypassed
   ).length;
+  const unloaded = endpoints.filter(
+    (endpoint) => endpoint.attached && endpoint.loaded === false
+  ).length;
   const stale =
     installed &&
     Boolean(status?.dllVersion) &&
@@ -818,6 +821,7 @@ function renderEngineStatus(status) {
   const blockers = engineBlockers(status);
   const blocked = blockers.length > 0;
   const active = installed && attached > 0 && bypassed === 0 && !blocked;
+  const working = active && unloaded < attached;
   const needsAttention = attachable || bypassed > 0 || stale || blocked;
 
   const device = status?.defaultDevice;
@@ -826,9 +830,16 @@ function renderEngineStatus(status) {
   }
   renderCoreState();
 
+  const notes = blockers.slice();
+  if (unloaded > 0) {
+    notes.push(
+      `${unloaded} attached output${unloaded === 1 ? ' has' : 's have'} never loaded the engine`
+    );
+  }
+
   els.engineActivation.hidden = false;
-  els.engineActivation.title = blockers.join('\n');
-  els.engineActivation.classList.toggle('active', active);
+  els.engineActivation.title = notes.join('\n');
+  els.engineActivation.classList.toggle('active', working);
   if (bypassed > 0) {
     els.engineText.textContent = `Windows is bypassing the engine on ${bypassed} output${bypassed === 1 ? '' : 's'}`;
   } else if (blocked) {
@@ -836,9 +847,13 @@ function renderEngineStatus(status) {
   } else if (active) {
     els.engineText.textContent = stale
       ? `Engine update available · ${status.dllVersion} → ${status.bundledVersion}`
-      : attachable
-        ? `Engine on ${attached} of ${endpoints.length} outputs`
-        : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
+      : unloaded === attached
+        ? 'Engine attached, never loaded'
+        : unloaded > 0
+          ? `Engine loaded on ${attached - unloaded} of ${attached} outputs`
+          : attachable
+            ? `Engine on ${attached} of ${endpoints.length} outputs`
+            : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
   } else if (installed) {
     els.engineText.textContent = endpoints.length
       ? 'Engine installed, not attached'

@@ -397,6 +397,19 @@ int print_status() {
     out += json_escape(endpoints[at].name);
     out += L"\",\"attached\":";
     out += attached ? L"true" : L"false";
+    // Whether this engine has ever run on this output. The effect writes
+    // `status-<endpoint>.json` the first time Windows creates it, and the file
+    // stays behind, so "attached and no file" is the honest per-output form of
+    // the machine-wide `everRan` above — and the only one that can say which
+    // output is silent when another one is working.
+    out += L",\"loaded\":";
+    {
+      const std::wstring root = engine_root();
+      const bool loaded =
+          !root.empty() &&
+          path_exists(root + L"\\status-" + endpoints[at].guid + L".json");
+      out += loaded ? L"true" : L"false";
+    }
     out += L",\"backupExists\":";
     out += backup_exists(endpoints[at].guid) ? L"true" : L"false";
     // Which slot it sits in, because that is the one thing the app can
