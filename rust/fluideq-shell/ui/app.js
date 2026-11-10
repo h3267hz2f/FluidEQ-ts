@@ -454,7 +454,7 @@ function renderHeader() {
   els.power.classList.toggle('on', Boolean(snapshot.master_power));
   els.power.setAttribute('aria-pressed', String(Boolean(snapshot.master_power)));
   els.chainState.textContent = snapshot.master_power
-    ? 'Mastering chain active'
+    ? 'Chain enabled'
     : 'Chain bypassed';
   els.autoHeadroom.textContent = snapshot.auto_headroom ? 'On' : 'Off';
   els.autoHeadroom.setAttribute('aria-pressed', String(Boolean(snapshot.auto_headroom)));
@@ -763,6 +763,12 @@ els.volumeIcon.addEventListener('click', () => {
 
 new ResizeObserver(scheduleDraw).observe(els.canvas.parentElement);
 window.addEventListener('resize', scheduleDraw);
+// The user may turn a device's enhancements on or off in Windows while this
+// window is open; asking again when it comes back to the front keeps the pill
+// from describing a state that has since changed.
+window.addEventListener('focus', () => {
+  if (invoke) refreshEngineStatus();
+});
 
 // ---------------------------------------------------------------------------
 // System engine activation
