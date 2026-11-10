@@ -772,11 +772,27 @@ els.volumeIcon.addEventListener('click', () => {
 new ResizeObserver(scheduleDraw).observe(els.canvas.parentElement);
 window.addEventListener('resize', scheduleDraw);
 // The user may turn a device's enhancements on or off in Windows while this
-// window is open; asking again when it comes back to the front keeps the pill
-// from describing a state that has since changed.
+// window is open, or switch the default output outright; asking again when it
+// comes back to the front keeps the pill, the footer and the volume honest.
 window.addEventListener('focus', () => {
-  if (invoke && !engineInstallInFlight) refreshEngineStatus();
+  if (!invoke || engineInstallInFlight) return;
+  refreshEngineStatus();
+  syncOutputVolume();
+  refreshEngineHost();
 });
+
+async function syncOutputVolume() {
+  try {
+    const volume = await invoke('get_output_volume');
+    volumeAvailable = true;
+    els.volume.disabled = false;
+    setVolume(volume);
+  } catch {
+    volumeAvailable = false;
+    els.volume.disabled = true;
+    els.volumeValue.textContent = '—';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // System engine activation
