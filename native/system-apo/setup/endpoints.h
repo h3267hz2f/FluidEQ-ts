@@ -35,6 +35,21 @@ struct Endpoint {
  */
 bool list_render_endpoints(std::vector<Endpoint>& out, std::wstring& error);
 
+/** What the user is actually listening on, and the rate it mixes at. */
+struct DefaultEndpoint {
+  std::wstring name;
+  /** The mix format's rate, or 0 when the endpoint would not answer. */
+  unsigned long sample_rate = 0;
+};
+
+/**
+ * The default render endpoint. The caller has already initialised COM.
+ *
+ * The name is what the app shows where it used to say "System default", and
+ * the rate is what the graph footer used to hard-code as 48 kHz.
+ */
+bool default_render_endpoint(DefaultEndpoint& out, std::wstring& error);
+
 }  // namespace fluideq_engine::setup
 
 #endif  // FLUIDEQ_ENGINE_SETUP_ENDPOINTS_H

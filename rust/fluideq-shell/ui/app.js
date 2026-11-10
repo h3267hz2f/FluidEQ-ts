@@ -87,6 +87,8 @@ const els = {
   engineActivation: document.getElementById('engine-activation'),
   engineText: document.getElementById('engine-text'),
   engineInstall: document.getElementById('engine-install'),
+  engineState: document.getElementById('engine-state'),
+  deviceName: document.querySelector('.device-name'),
 };
 
 let snapshot = demoSnapshot();
@@ -100,6 +102,7 @@ let lastAudibleVolume = 0.8;
 let bandCommitInFlight = false;
 let bandCommitQueued = false;
 let engineStatus = null;
+let hostStatus = null;
 let engineInstallInFlight = false;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
@@ -748,6 +751,18 @@ window.addEventListener('resize', scheduleDraw);
 // System engine activation
 // ---------------------------------------------------------------------------
 
+function renderCoreState() {
+  const rate = Number(engineStatus?.defaultDevice?.sampleRate);
+  const rateText =
+    Number.isFinite(rate) && rate > 0
+      ? `${(rate / 1000).toFixed(rate % 1000 === 0 ? 0 : 1)} kHz`
+      : '';
+  const core = hostStatus?.core_version || snapshot.native_abi_version || '';
+  els.engineState.textContent = ['C++ core', core, rateText]
+    .filter(Boolean)
+    .join(' · ');
+}
+
 function renderEngineStatus(status) {
   engineStatus = status;
   const endpoints = Array.isArray(status?.endpoints) ? status.endpoints : [];
@@ -758,16 +773,29 @@ function renderEngineStatus(status) {
   const bypassed = endpoints.filter(
     (endpoint) => endpoint.attached && endpoint.tpBypassed
   ).length;
-  const needsAttention = attachable || bypassed > 0;
+  const stale =
+    installed &&
+    Boolean(status?.dllVersion) &&
+    Boolean(status?.bundledVersion) &&
+    status.dllVersion !== status.bundledVersion;
+  const needsAttention = attachable || bypassed > 0 || stale;
+
+  const device = status?.defaultDevice;
+  if (device?.name) {
+    els.deviceName.textContent = device.name;
+  }
+  renderCoreState();
 
   els.engineActivation.hidden = false;
   els.engineActivation.classList.toggle('active', active);
   if (active) {
     els.engineText.textContent = bypassed
       ? `Windows is bypassing the engine on ${bypassed} output${bypassed === 1 ? '' : 's'}`
-      : attachable
-        ? `Engine on ${attached} of ${endpoints.length} outputs`
-        : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
+      : stale
+        ? `Engine update available · ${status.dllVersion} → ${status.bundledVersion}`
+        : attachable
+          ? `Engine on ${attached} of ${endpoints.length} outputs`
+          : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
   } else if (installed) {
     els.engineText.textContent = endpoints.length
       ? 'Engine installed, not attached'
@@ -779,8 +807,23 @@ function renderEngineStatus(status) {
   els.engineInstall.textContent = installed
     ? bypassed
       ? 'Fix engine activation'
-      : 'Attach all outputs'
+      : stale
+        ? 'Update engine'
+        : 'Attach all outputs'
     : 'Enable system audio';
+}
+
+async function refreshEngineHost() {
+  if (!invoke) return;
+  try {
+    hostStatus = await invoke('engine_host_status');
+  } catch {
+    hostStatus = null;
+  }
+  renderCoreState();
+  if (hostStatus?.last_error) {
+    showMessage(`DSP host: ${hostStatus.last_error}`);
+  }
 }
 
 async function refreshEngineStatus() {
@@ -818,6 +861,7 @@ els.engineInstall.addEventListener('click', async () => {
 
 async function boot() {
   renderAll();
+  renderCoreState();
   setRangeFill(els.volume, 80);
 
   if (!invoke) {
@@ -852,6 +896,8 @@ async function boot() {
     els.volumeValue.textContent = '—';
     showMessage(`System volume is unavailable: ${error}`);
   }
+
+  await refreshEngineHost();
 }
 
 boot();

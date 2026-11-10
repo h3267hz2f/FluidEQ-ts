@@ -20,6 +20,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <functiondiscoverykeys_devpkey.h>
 
+#include <audioclient.h>
+
 #include "endpoints.h"
 
 #include <string>
@@ -152,6 +154,45 @@ bool list_render_endpoints(std::vector<Endpoint>& out, std::wstring& error) {
     }
     endpoint.name = friendly_name(device.get());
     out.push_back(std::move(endpoint));
+  }
+  return true;
+}
+
+bool default_render_endpoint(DefaultEndpoint& out, std::wstring& error) {
+  out = DefaultEndpoint();
+  ComPtr<IMMDeviceEnumerator> enumerator;
+  HRESULT made = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  __uuidof(IMMDeviceEnumerator),
+                                  reinterpret_cast<void**>(
+                                      enumerator.receive()));
+  if (FAILED(made) || enumerator.get() == nullptr) {
+    error = L"could not reach the audio device list: " +
+            describe_hresult(made);
+    return false;
+  }
+  ComPtr<IMMDevice> device;
+  made = enumerator.get()->GetDefaultAudioEndpoint(eRender, eConsole,
+                                                   device.receive());
+  if (FAILED(made) || device.get() == nullptr) {
+    error = L"could not open the default output: " +
+            describe_hresult(made);
+    return false;
+  }
+  out.name = friendly_name(device.get());
+  ComPtr<IAudioClient> client;
+  const HRESULT activated = device.get()->Activate(
+      __uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+      reinterpret_cast<void**>(client.receive()));
+  if (FAILED(activated) || client.get() == nullptr) {
+    // The name is still worth having; the rate simply stays unknown rather
+    // than being guessed.
+    return true;
+  }
+  WAVEFORMATEX* format = nullptr;
+  if (SUCCEEDED(client.get()->GetMixFormat(&format)) && format != nullptr) {
+    out.sample_rate = format->nSamplesPerSec;
+    CoTaskMemFree(format);
   }
   return true;
 }

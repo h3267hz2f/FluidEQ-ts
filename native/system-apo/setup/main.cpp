@@ -76,6 +76,8 @@ using fluideq_engine::setup::Slot;
 using fluideq_engine::setup::backup_exists;
 using fluideq_engine::setup::borrow_caller_console;
 using fluideq_engine::setup::config_dir;
+using fluideq_engine::setup::default_render_endpoint;
+using fluideq_engine::setup::DefaultEndpoint;
 using fluideq_engine::setup::engine_root;
 using fluideq_engine::setup::ensure_engine_tree;
 using fluideq_engine::setup::files_matching;
@@ -109,6 +111,7 @@ using fluideq_engine::setup::describe_slots;
 using fluideq_engine::setup::held_slots;
 using fluideq_engine::setup::load_backup;
 using fluideq_engine::setup::mode_missing;
+using fluideq_engine::setup::module_dir;
 using fluideq_engine::setup::slot_from_name;
 using fluideq_engine::setup::remembered_slots;
 using fluideq_engine::setup::slot_name;
@@ -334,6 +337,11 @@ int print_status() {
   out += json_escape(installed ? registered : installed_dll_path());
   out += L"\",\"dllVersion\":\"";
   out += json_escape(installed ? dll_version(registered) : std::wstring());
+  // The version this app would install, so the pair can be compared without
+  // the app parsing a PE resource of its own. Empty in a build that staged no
+  // engine beside the helper, which reads as "nothing to compare".
+  out += L"\",\"bundledVersion\":\"";
+  out += json_escape(dll_version(module_dir() + L"\\FluidEQ-Engine.dll"));
   out += L"\",\"configDir\":\"";
   out += json_escape(config_dir());
   // The three machine-wide facts that decide whether audiodg.exe can load
@@ -358,6 +366,21 @@ int print_status() {
   // from nor write a status to. From outside, identical to never loading.
   out += L",\"serviceCanWrite\":";
   out += service_can_write(engine_root()) ? L"true" : L"false";
+  // What the listener is actually on, so the app can name the output and take
+  // its rate from the mix format instead of saying "System default" and a
+  // hard-coded 48 kHz. Null rather than a guess when the endpoint will not
+  // answer.
+  DefaultEndpoint default_output;
+  std::wstring default_error;
+  if (default_render_endpoint(default_output, default_error)) {
+    out += L",\"defaultDevice\":{\"name\":\"";
+    out += json_escape(default_output.name);
+    out += L"\",\"sampleRate\":";
+    out += std::to_wstring(default_output.sample_rate);
+    out += L'}';
+  } else {
+    out += L",\"defaultDevice\":null";
+  }
   out += L",\"endpoints\":[";
   for (size_t at = 0; at < endpoints.size(); ++at) {
     if (at != 0) {
