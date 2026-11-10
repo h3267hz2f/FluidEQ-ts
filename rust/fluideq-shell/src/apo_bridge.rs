@@ -33,10 +33,10 @@ pub fn render(snapshot: &AppStateSnapshot) -> String {
     let filters = rendered.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
     let mut text = String::new();
     if snapshot.auto_headroom {
-        text.push_str(&format!("Preamp: {:+.1} dB\n", snapshot.auto_preamp_db.min(0.0)));
+        text.push_str(&format!("Preamp: {:.1} dB\n", snapshot.auto_preamp_db.min(0.0)));
         text.push_str("# FluidEQAutoPreamp: ON\n");
     }
-    text.push_str(&format!("Preamp: {:+.1} dB\n", snapshot.preamp_db));
+    text.push_str(&format!("Preamp: {:.1} dB\n", snapshot.preamp_db));
     text.push_str(filters);
     if !text.ends_with('\n') {
         text.push('\n');
@@ -272,6 +272,16 @@ mod tests {
         assert!((resolved.bands[0].gain_db - 3.0).abs() < 0.11);
         assert!((resolved.bands[1].gain_db - -2.0).abs() < 0.11);
         assert!((resolved.preamp_db - -1.0).abs() < 0.11);
+    }
+
+    #[test]
+    fn positive_values_are_written_without_a_leading_plus() {
+        let snapshot = store_with_two_bands(true, false).snapshot();
+        let text = render(&snapshot);
+        assert!(text.contains("Gain 3.0 dB"));
+        // The engine parses numbers with `std::from_chars`, which takes a
+        // minus but not a plus; `+3.0` loses the whole filter line.
+        assert!(!text.contains('+'));
     }
 
     #[test]

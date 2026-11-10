@@ -58,6 +58,13 @@ std::vector<std::string_view> split_ws(std::string_view s) {
 }
 
 bool parse_double(std::string_view token, double& out) {
+  // `std::from_chars` takes an optional minus but not a plus, while Equalizer
+  // APO text in the wild (and FluidEQ's own earlier writer) writes `+3.5`.
+  // Dropping the sign here keeps the value; the rest of the token is parsed
+  // exactly as before, so `+` alone or `++1` still fail.
+  if (!token.empty() && token.front() == '+') {
+    token.remove_prefix(1);
+  }
   const auto result =
       std::from_chars(token.data(), token.data() + token.size(), out);
   // Finite only. `from_chars` reads "nan" and "inf" as numbers, and one of

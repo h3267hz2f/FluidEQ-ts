@@ -546,6 +546,20 @@ void what_one_config_may_ask_is_bounded() {
   CHECK(parse_graphic(curve).size() == kMaxGraphicPoints);
 }
 
+void a_leading_plus_is_still_a_number() {
+  std::printf("a leading plus is still a number\n");
+  Files files;
+  files[L"C:\\cfg\\config.txt"] =
+      "Preamp: +1.5 dB\r\n"
+      "Filter 1: ON PK Fc 1000 Hz Gain +3.5 dB Q 1.41\r\n";
+  const auto chain = resolve_chain(L"C:\\cfg", {L"", L""}, provider(files));
+  CHECK(chain.preamp_db == 1.5);
+  CHECK(chain.bands.size() == 1);
+  if (!chain.bands.empty()) {
+    CHECK(chain.bands[0].gain_db == 3.5);
+  }
+}
+
 int main() {
   std::printf("fluideq engine config\n");
   follows_includes_and_device_guards();
@@ -570,6 +584,7 @@ int main() {
   cuts_file_is_plain_cookbook_bands();
   every_layer_but_the_correction_plays_by_your_eqs_row();
   what_one_config_may_ask_is_bounded();
+  a_leading_plus_is_still_a_number();
   if (g_failures == 0) {
     std::printf("config: ok\n");
     return 0;

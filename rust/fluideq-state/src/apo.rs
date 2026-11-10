@@ -45,7 +45,9 @@ pub const APO_MAX_CHAIN_BANDS: usize = 256;
 
 pub fn format_bands_as_apo_lines(preamp_db: f64, bands: &[EqBandSpec]) -> String {
     let mut lines = Vec::with_capacity(bands.len() + 1);
-    lines.push(format!("Preamp: {:+.1} dB", preamp_db));
+    // No leading `+`: the engine parses numbers with `std::from_chars`, which
+    // rejects it, so a positive gain written that way loses its whole filter.
+    lines.push(format!("Preamp: {:.1} dB", preamp_db));
     for (idx, band) in bands.iter().enumerate() {
         let state = if band.enabled { "ON" } else { "OFF" };
         let kind = match band.filter_type {
@@ -62,7 +64,7 @@ pub fn format_bands_as_apo_lines(preamp_db: f64, bands: &[EqBandSpec]) -> String
             BandFilterKind::PK | BandFilterKind::LSC | BandFilterKind::HSC
         ) {
             lines.push(format!(
-                "Filter {}: {} {} Fc {:.1} Hz Gain {:+.1} dB Q {:.2}",
+                "Filter {}: {} {} Fc {:.1} Hz Gain {:.1} dB Q {:.2}",
                 idx + 1,
                 state,
                 kind,
