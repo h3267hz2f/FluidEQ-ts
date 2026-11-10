@@ -17,6 +17,10 @@ const F_MAX = 20_000;
 const DB_MIN = -18;
 const DB_MAX = 18;
 const SAMPLE_RATE = 48_000;
+const ISO_FREQUENCIES = [
+  25, 40, 63, 100, 160, 250, 400, 630, 1000, 1600, 2500, 4000, 6300, 10000,
+  16000,
+];
 
 const DEMO_BANDS = [
   [25, 3.5, 'LSC', 0.71],
@@ -731,8 +735,11 @@ els.bandQuality.addEventListener('change', commitBand);
 els.resetBand.addEventListener('click', () => {
   const band = selectedBand();
   if (!band) return;
+  const index = selectedIndex();
+  band.frequency = ISO_FREQUENCIES[index] ?? band.frequency;
   band.gain_db = 0;
-  band.quality = 1.41;
+  band.quality =
+    index === 0 || index === ISO_FREQUENCIES.length - 1 ? 0.71 : 1.41;
   renderBands();
   renderInspector();
   scheduleDraw();
