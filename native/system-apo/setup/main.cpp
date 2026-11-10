@@ -113,6 +113,7 @@ using fluideq_engine::setup::slot_from_name;
 using fluideq_engine::setup::remembered_slots;
 using fluideq_engine::setup::slot_name;
 using fluideq_engine::setup::slot_of;
+using fluideq_engine::setup::tp_bypass_value;
 
 const char kUsage[] =
     "FluidEQ-Engine-Setup <command> [options]\n"
