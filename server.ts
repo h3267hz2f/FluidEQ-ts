@@ -11,7 +11,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const OPRA_CURVES_DIR = path.resolve(__dirname, 'opra', 'curves');
-const FLUIDEQ_SHELL_BIN = path.resolve(__dirname, 'target', 'debug', 'fluideq-shell');
+const FLUIDEQ_SHELL_BIN = path.resolve(
+  __dirname,
+  'target',
+  'debug',
+  process.platform === 'win32' ? 'fluideq-shell.exe' : 'fluideq-shell',
+);
 
 interface NativeIpcResponse {
   kind: string;
