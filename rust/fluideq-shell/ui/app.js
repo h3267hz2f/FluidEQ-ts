@@ -531,7 +531,20 @@ function renderInspector() {
 
   setRangeValue(els.preamp, snapshot.preamp_db);
   setRangeFill(els.preamp, ((snapshot.preamp_db + 24) / 48) * 100);
-  els.preampValue.textContent = `${formatDb(snapshot.preamp_db)} dB`;
+  renderPreampReadout();
+}
+
+// With auto headroom on, the guard starts at the curve's own level and the
+// slider is a trim on top of it. Showing only the trim let a -24 dB trim look
+// like the whole gain while the chain actually sat at -62 dB.
+function renderPreampReadout() {
+  const manual = Number(snapshot.preamp_db) || 0;
+  const auto = snapshot.auto_headroom ? Number(snapshot.auto_preamp_db) || 0 : 0;
+  const total = manual + auto;
+  els.preampValue.textContent = `${formatDb(total)} dB`;
+  els.preampValue.title = snapshot.auto_headroom
+    ? `Auto headroom ${formatDb(auto)} dB + trim ${formatDb(manual)} dB`
+    : '';
 }
 
 function renderAll() {
@@ -756,7 +769,7 @@ els.resetBand.addEventListener('click', () => {
 els.preamp.addEventListener('input', () => {
   snapshot.preamp_db = Number(els.preamp.value);
   setRangeFill(els.preamp, ((snapshot.preamp_db + 24) / 48) * 100);
-  els.preampValue.textContent = `${formatDb(snapshot.preamp_db)} dB`;
+  renderPreampReadout();
   scheduleDraw();
 });
 els.preamp.addEventListener('change', commitPreamp);
