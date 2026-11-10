@@ -153,6 +153,12 @@ function clearMessage() {
   els.message.classList.remove('ok');
 }
 
+// A later successful read has to take back the error the earlier one left, or
+// the status bar keeps describing a failure that is over.
+function clearMessageStartingWith(prefix) {
+  if (els.message.textContent.startsWith(prefix)) clearMessage();
+}
+
 function setRangeFill(input, percentage) {
   input.style.setProperty('--fill', `${clamp(percentage, 0, 100)}%`);
 }
@@ -909,6 +915,7 @@ function renderEngineStatus(status) {
           ? 'Update engine'
           : 'Attach all outputs'
     : 'Enable system audio';
+  clearMessageStartingWith('Engine status:');
 }
 
 async function refreshEngineHost() {
@@ -921,6 +928,8 @@ async function refreshEngineHost() {
   renderCoreState();
   if (hostStatus?.last_error) {
     showMessage(`DSP host: ${hostStatus.last_error}`);
+  } else {
+    clearMessageStartingWith('DSP host:');
   }
 }
 
