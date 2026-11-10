@@ -1698,11 +1698,11 @@ impl NativeMetersHandle {
                 feq_meters_set_sample_rate(raw, sample_rate);
                 feq_meters_set_enabled(raw, 1);
             }
-            return Self {
+            Self {
                 enabled: true,
                 sample_rate,
                 raw,
-            };
+            }
         }
         #[cfg(not(feature = "link-cpp-core"))]
         {
@@ -1823,7 +1823,7 @@ impl NativeChainHandle {
         #[cfg(feature = "link-cpp-core")]
         unsafe {
             let raw = feq_chain_create(sample_rate as c_double, channels, maximum_block_frames);
-            return Self {
+            Self {
                 sample_rate,
                 channels,
                 maximum_block_frames,
@@ -1831,7 +1831,7 @@ impl NativeChainHandle {
                 voice_model_loaded: false,
                 eq_kernel_len: 0,
                 raw,
-            };
+            }
         }
         #[cfg(not(feature = "link-cpp-core"))]
         {
@@ -2059,7 +2059,7 @@ pub fn engine_abi_version() -> String {
             "2.1.0".to_string()
         };
         let abi = feq_core_abi_version();
-        return format!("FluidEQ C++20 Core {} (ABI v{})", ver_str, abi);
+        format!("FluidEQ C++20 Core {} (ABI v{})", ver_str, abi)
     }
     #[cfg(not(feature = "link-cpp-core"))]
     {
