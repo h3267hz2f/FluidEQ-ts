@@ -40,6 +40,23 @@ std::optional<FxValues> load_backup(const std::wstring& guid);
 void remove_backup(const std::wstring& guid);
 
 /**
+ * The third-party-effects bypass value this program cleared on an endpoint,
+ * in `<backup>\<guid>.bypass` — kept apart from the `.json` above because it
+ * is not part of the effect registration and is put back at the same moment
+ * the engine is detached.
+ *
+ * Written once, like the backup: a second attach must not record the zero this
+ * program wrote as if the user had chosen it.
+ */
+bool save_bypass_once(const std::wstring& guid, unsigned long value,
+                      std::wstring& error);
+
+/** The value to put back, or nothing when this program never cleared it. */
+std::optional<unsigned long> load_bypass(const std::wstring& guid);
+
+void remove_bypass(const std::wstring& guid);
+
+/**
  * The same, for the state an output was in before Equalizer APO was switched
  * off on it — `<engine root>\apo-off\<guid>.json`.
  *

@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "registry.h"
 
+#include <cstring>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,6 +28,16 @@ const wchar_t kRenderPath[] =
 const wchar_t kFxProperty[] = L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}";
 /** The signal-processing-mode property set that sits beside them. */
 const wchar_t kModeProperty[] = L"{d3993a3f-99c2-4402-b5ec-a92a0367664b}";
+
+/**
+ * The third-party-effects bypass, in a property set of its own. Member 0 is
+ * the one Windows writes when the "Audio enhancements" switch is turned off
+ * for an output, and while it is non-zero the audio engine skips every APO
+ * that did not ship with the driver.
+ */
+const wchar_t kTpBypassProperty[] =
+    L"{0f8412d3-dc5c-4db3-b174-dc47a859435c}";
+const int kTpBypassPid = 0;
 
 const int kSinglePid[kSlotCount] = {5, 6, 7};
 const int kCompositePid[kSlotCount] = {13, 14, 15};
@@ -226,6 +237,51 @@ bool endpoint_is_combined(const std::wstring& guid) {
                      L"{b3f8fa53-0004-438e-9003-51a46e139bfc},41", type,
                      bytes, present) &&
          present;
+}
+
+std::optional<unsigned long> tp_bypass_value(const std::wstring& guid) {
+  if (!is_valid_endpoint_guid(guid)) {
+    return std::nullopt;
+  }
+  RegKey key;
+  if (open_read(fx_path(guid), key) != ERROR_SUCCESS) {
+    return std::nullopt;
+  }
+  DWORD type = 0;
+  std::vector<BYTE> bytes;
+  bool present = false;
+  const std::wstring name = value_name(kTpBypassProperty, kTpBypassPid);
+  if (!query_value(key.get(), name, type, bytes, present) || !present ||
+      type != REG_DWORD || bytes.size() < sizeof(DWORD)) {
+    return std::nullopt;
+  }
+  DWORD value = 0;
+  std::memcpy(&value, bytes.data(), sizeof(value));
+  return static_cast<unsigned long>(value);
+}
+
+bool set_tp_bypass(const std::wstring& guid, unsigned long value,
+                   std::wstring& error) {
+  if (!is_valid_endpoint_guid(guid)) {
+    error = L"not an endpoint id: " + guid;
+    return false;
+  }
+  RegKey key;
+  const LSTATUS opened = create_write(fx_path(guid), key);
+  if (opened != ERROR_SUCCESS) {
+    error = L"could not open the effect properties of " + guid + L": " +
+            describe_error(static_cast<unsigned long>(opened));
+    return false;
+  }
+  const std::wstring name = value_name(kTpBypassProperty, kTpBypassPid);
+  const LSTATUS written =
+      set_dword(key.get(), name.c_str(), static_cast<DWORD>(value));
+  if (written != ERROR_SUCCESS) {
+    error = L"could not write " + name + L": " +
+            describe_error(static_cast<unsigned long>(written));
+    return false;
+  }
+  return true;
 }
 
 bool read_fx_values(const std::wstring& guid, FxValues& out,

@@ -81,6 +81,71 @@ void remove_backup(const std::wstring& guid) {
 
 namespace {
 
+std::wstring bypass_record_path(const std::wstring& guid) {
+  if (!is_valid_endpoint_guid(guid)) {
+    return std::wstring();
+  }
+  const std::wstring directory = backup_dir();
+  return directory.empty() ? directory : directory + L"\\" + guid + L".bypass";
+}
+
+}  // namespace
+
+bool save_bypass_once(const std::wstring& guid, unsigned long value,
+                      std::wstring& error) {
+  const std::wstring path = bypass_record_path(guid);
+  if (path.empty()) {
+    error = L"no bypass record location for " + guid;
+    return false;
+  }
+  if (path_exists(path)) {
+    return true;
+  }
+  if (!ensure_directory(backup_dir())) {
+    const unsigned long why = GetLastError();
+    error = L"could not create " + backup_dir() + L": " + describe_error(why);
+    return false;
+  }
+  if (!write_utf8(path, std::to_wstring(value))) {
+    const unsigned long why = GetLastError();
+    error = L"could not write " + path + L": " + describe_error(why);
+    return false;
+  }
+  return true;
+}
+
+std::optional<unsigned long> load_bypass(const std::wstring& guid) {
+  const std::wstring path = bypass_record_path(guid);
+  if (path.empty()) {
+    return std::nullopt;
+  }
+  const std::optional<std::wstring> text = read_utf8(path);
+  if (!text.has_value() || text->empty()) {
+    return std::nullopt;
+  }
+  unsigned long value = 0;
+  for (const wchar_t symbol : *text) {
+    if (symbol < L'0' || symbol > L'9') {
+      return std::nullopt;
+    }
+    const unsigned long digit = static_cast<unsigned long>(symbol - L'0');
+    if (value > (0xFFFFFFFFul - digit) / 10) {
+      return std::nullopt;
+    }
+    value = value * 10 + digit;
+  }
+  return value;
+}
+
+void remove_bypass(const std::wstring& guid) {
+  const std::wstring path = bypass_record_path(guid);
+  if (!path.empty()) {
+    DeleteFileW(path.c_str());
+  }
+}
+
+namespace {
+
 std::wstring apo_off_path(const std::wstring& guid) {
   // Same reasoning as `backup_path`: the guid check is what stops a name
   // becoming a path.

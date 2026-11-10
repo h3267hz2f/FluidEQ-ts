@@ -61,6 +61,27 @@ Slot slot_for(const std::wstring& guid, const FxValues& original) {
 }
 
 /**
+ * Clears the output's third-party-effects bypass, recording what it was.
+ *
+ * Windows keeps that switch in the same key as the effect values, and while
+ * it is on the audio engine creates none of the APOs a vendor did not ship
+ * with the driver — this one included. An attach that leaves it on produces
+ * an output that reads as attached on every check and never processes a
+ * sample, which is exactly the failure this program cannot explain from
+ * outside. The record is what an uninstall or a detach puts back.
+ */
+bool allow_third_party_effects(const std::wstring& guid, std::wstring& error) {
+  const std::optional<unsigned long> bypass = tp_bypass_value(guid);
+  if (!bypass.has_value() || *bypass == 0) {
+    return true;
+  }
+  if (!save_bypass_once(guid, *bypass, error)) {
+    return false;
+  }
+  return set_tp_bypass(guid, 0, error);
+}
+
+/**
  * Adds our class id to one endpoint, recording what was there first.
  *
  * The backup is written before anything is planned, not after: an attach that
@@ -112,6 +133,14 @@ bool attach_one(const std::wstring& guid, std::optional<Slot> named,
     remember_slot(guid, slot);
   }
   attached = is_attached(plan.after, kEngineClsid);
+  // Only now, and only where the engine is really registered: clearing the
+  // switch on an output the attach refused would be a change to somebody
+  // else's audio for nothing. A failure here is a failure of the attach,
+  // because an attached engine Windows is told to skip is not worth the
+  // "success" it would otherwise report.
+  if (attached && !allow_third_party_effects(guid, error)) {
+    return false;
+  }
   return true;
 }
 
@@ -133,6 +162,15 @@ bool detach_one(const std::wstring& guid, bool& attached,
   }
   attached = is_attached(plan.after, kEngineClsid);
   if (!attached) {
+    // The switch this program cleared on the way in goes back before the
+    // record of it is forgotten, so a failed write can be tried again.
+    const std::optional<unsigned long> bypass = load_bypass(guid);
+    if (bypass.has_value()) {
+      if (!set_tp_bypass(guid, *bypass, error)) {
+        return false;
+      }
+      remove_bypass(guid);
+    }
     remove_backup(guid);
   }
   return true;

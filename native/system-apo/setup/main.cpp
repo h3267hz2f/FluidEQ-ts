@@ -386,6 +386,14 @@ int print_status() {
     // reach it, which an attach into the same slot writes (`mode_missing`).
     out += L",\"modeMissing\":";
     out += mode_missing(values, kEngineClsid) ? L"true" : L"false";
+    // And whether Windows has been told to bypass third-party effects on this
+    // output at all, which is a different reason for the same silence and one
+    // the attach clears. Reported beside `attached` because "attached" alone
+    // is the answer that used to be wrong here.
+    const std::optional<unsigned long> bypass =
+        tp_bypass_value(endpoints[at].guid);
+    out += L",\"tpBypassed\":";
+    out += bypass.has_value() && *bypass != 0 ? L"true" : L"false";
     // And every slot this output has already been put in, oldest first. The
     // ladder walks newest to oldest, so where the engine is now says only
     // how far down it got — not which rungs were tried, which is a different

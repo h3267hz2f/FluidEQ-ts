@@ -19,6 +19,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef FLUIDEQ_ENGINE_SETUP_REGISTRY_H
 #define FLUIDEQ_ENGINE_SETUP_REGISTRY_H
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -47,6 +48,24 @@ bool endpoint_key_exists(const std::wstring& guid);
  * Unreadable reads as "no".
  */
 bool endpoint_is_combined(const std::wstring& guid);
+
+/**
+ * The third-party-effects bypass flag beside this endpoint's effect values:
+ * `{0f8412d3-dc5c-4db3-b174-dc47a859435c},0`, the value behind the "Audio
+ * enhancements" switch in Windows' sound settings. Non-zero means Windows
+ * creates none of the third-party APOs registered on the output — including
+ * this engine — so every "attached" answer would be true and nothing would be
+ * heard. Nothing when the value is absent, which reads as "not bypassed".
+ */
+std::optional<unsigned long> tp_bypass_value(const std::wstring& guid);
+
+/**
+ * Writes that flag back as a `REG_DWORD`. Only ever called with zero (so the
+ * engine runs at all) and with the value `tp_bypass_value` found (so an
+ * uninstall leaves the user's setting as it was).
+ */
+bool set_tp_bypass(const std::wstring& guid, unsigned long value,
+                   std::wstring& error);
 
 /**
  * Reads one endpoint's `FxProperties`. An absent key reads as empty.

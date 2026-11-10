@@ -755,13 +755,19 @@ function renderEngineStatus(status) {
   const installed = Boolean(status?.installed);
   const active = installed && attached > 0;
   const attachable = endpoints.length > attached;
+  const bypassed = endpoints.filter(
+    (endpoint) => endpoint.attached && endpoint.tpBypassed
+  ).length;
+  const needsAttention = attachable || bypassed > 0;
 
   els.engineActivation.hidden = false;
   els.engineActivation.classList.toggle('active', active);
   if (active) {
-    els.engineText.textContent = attachable
-      ? `Engine on ${attached} of ${endpoints.length} outputs`
-      : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
+    els.engineText.textContent = bypassed
+      ? `Windows is bypassing the engine on ${bypassed} output${bypassed === 1 ? '' : 's'}`
+      : attachable
+        ? `Engine on ${attached} of ${endpoints.length} outputs`
+        : `Engine on ${attached} output${attached === 1 ? '' : 's'}`;
   } else if (installed) {
     els.engineText.textContent = endpoints.length
       ? 'Engine installed, not attached'
@@ -769,8 +775,12 @@ function renderEngineStatus(status) {
   } else {
     els.engineText.textContent = 'System engine off';
   }
-  els.engineInstall.hidden = installed && !attachable;
-  els.engineInstall.textContent = installed ? 'Attach all outputs' : 'Enable system audio';
+  els.engineInstall.hidden = installed && !needsAttention;
+  els.engineInstall.textContent = installed
+    ? bypassed
+      ? 'Fix engine activation'
+      : 'Attach all outputs'
+    : 'Enable system audio';
 }
 
 async function refreshEngineStatus() {
