@@ -103,6 +103,7 @@ const els = {
   preampValue: document.getElementById('preamp-value'),
   preampWarning: document.getElementById('preamp-warning'),
   autoHeadroom: document.getElementById('auto-headroom'),
+  startup: document.getElementById('startup'),
   irLoad: document.getElementById('ir-load'),
   irFile: document.getElementById('ir-file'),
   irState: document.getElementById('ir-state'),
@@ -135,6 +136,8 @@ let hostStatus = null;
 let engineInstallInFlight = false;
 let presetNames = [];
 let presetBusy = false;
+let startupEnabled = false;
+let startupBusy = false;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -431,6 +434,42 @@ async function commitPower() {
   renderAll();
 }
 
+function renderStartup() {
+  els.startup.textContent = startupEnabled ? 'On' : 'Off';
+  els.startup.setAttribute('aria-pressed', String(startupEnabled));
+}
+
+async function refreshStartup() {
+  if (!invoke) return renderStartup();
+  try {
+    startupEnabled = await invoke('get_startup_enabled');
+  } catch {
+    startupEnabled = false;
+  }
+  renderStartup();
+}
+
+async function toggleStartup() {
+  if (!invoke || startupBusy) return;
+  startupBusy = true;
+  try {
+    startupEnabled = await invoke('set_startup_enabled', {
+      enabled: !startupEnabled,
+    });
+    showMessage(
+      startupEnabled
+        ? 'FluidEQ will start with Windows'
+        : 'FluidEQ will not start with Windows',
+      'ok'
+    );
+  } catch (error) {
+    showMessage(`Could not change the startup entry: ${error}`);
+  } finally {
+    startupBusy = false;
+    renderStartup();
+  }
+}
+
 async function commitAutoHeadroom() {
   const wanted = !snapshot.auto_headroom;
   snapshot.auto_headroom = wanted;
@@ -683,6 +722,7 @@ els.preamp.addEventListener('change', commitPreamp);
 
 els.power.addEventListener('click', commitPower);
 els.autoHeadroom.addEventListener('click', commitAutoHeadroom);
+els.startup.addEventListener('click', toggleStartup);
 
 els.volume.addEventListener('input', () => {
   setVolume(Number(els.volume.value));
@@ -705,6 +745,7 @@ window.addEventListener('focus', () => {
   refreshEngineStatus();
   syncOutputVolume();
   refreshEngineHost();
+  refreshStartup();
 });
 
 async function syncOutputVolume() {
@@ -940,6 +981,7 @@ async function boot() {
     clearMessage();
     refreshEngineStatus();
     refreshPresets();
+    refreshStartup();
   } catch (error) {
     setConnection('Rust state centre unavailable', 'preview');
     showMessage(`Could not read the state: ${error}`);

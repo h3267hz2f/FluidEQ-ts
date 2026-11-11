@@ -2610,6 +2610,15 @@ pub mod win32_daemon_ffi {
             lp_data: *mut u8,
             lpcb_data: *mut u32,
         ) -> i32;
+        pub fn RegSetValueExW(
+            h_key: Hkey,
+            lp_value_name: *const u16,
+            reserved: u32,
+            dw_type: u32,
+            lp_data: *const u8,
+            cb_data: u32,
+        ) -> i32;
+        pub fn RegDeleteValueW(h_key: Hkey, lp_value_name: *const u16) -> i32;
         pub fn RegNotifyChangeKeyValue(
             h_key: Hkey,
             b_watch_subtree: i32,

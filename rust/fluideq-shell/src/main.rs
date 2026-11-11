@@ -19,6 +19,7 @@ pub mod engine_setup;
 pub mod host_runtime;
 pub mod ipc;
 pub mod spectrum_bridge;
+pub mod startup;
 pub mod system_daemons;
 
 use fluideq_state::residency::WindowResidencyMode;
@@ -271,6 +272,17 @@ fn install_engine(app: tauri::AppHandle) -> Result<Value, String> {
 #[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
+}
+
+#[tauri::command]
+fn get_startup_enabled() -> Result<bool, String> {
+    startup::enabled()
+}
+
+#[tauri::command]
+fn set_startup_enabled(enabled: bool) -> Result<bool, String> {
+    startup::set(enabled)?;
+    startup::enabled()
 }
 
 /// The JSON-lines bridge the TypeScript preview server spawns with
@@ -628,6 +640,8 @@ fn main() {
             engine_status,
             install_engine,
             engine_host_status,
+            get_startup_enabled,
+            set_startup_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("FluidEQ failed to start");
