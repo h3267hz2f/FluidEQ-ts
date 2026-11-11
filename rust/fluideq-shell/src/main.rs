@@ -228,6 +228,24 @@ fn set_stage_enabled(
 }
 
 #[tauri::command]
+fn set_stage_parameter(
+    state: State<'_, ShellState>,
+    stage: String,
+    parameter: String,
+    value: f64,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let mut settings = store.snapshot().chain_settings;
+    fluideq_state::rack_stages::set_stage_parameter(&mut settings, &stage, &parameter, value)?;
+    store.update_chain_settings(settings);
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_band_gain(
     state: State<'_, ShellState>,
     band_id: u32,
@@ -855,6 +873,7 @@ fn main() {
             set_preamp_db,
             set_auto_headroom,
             set_stage_enabled,
+            set_stage_parameter,
             set_band_gain,
             list_presets,
             apply_preset,

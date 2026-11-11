@@ -926,6 +926,13 @@ kbd {
   max-width: 780px;
 }
 
+.rack-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 780px;
+}
+
 .rack-list {
   display: flex;
   flex-direction: column;
@@ -940,6 +947,16 @@ kbd {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+}
+
+.rack-stage.selected {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.rack-stage.selected.on {
+  border-color: var(--accent);
 }
 
 .rack-stage.on {
@@ -983,6 +1000,12 @@ kbd {
 
 .rack-stage .stat-toggle {
   flex: 0 0 auto;
+}
+
+.rack-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .bands {

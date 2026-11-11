@@ -180,13 +180,24 @@
         <section id="bands" class="bands" aria-label="EQ bands" data-view-panel="equalizer"></section>
 
         <section class="view-rack" data-view-panel="rack" hidden>
-          <div class="card settings-card rack-card">
-            <div class="settings-group">
-              <p class="eyebrow">Eleven stages</p>
-              <h2 class="settings-title">DSP rack</h2>
-              <p class="settings-note">The chain in the order it processes audio. A stage that is off is skipped whole; its settings stay as they were for when you turn it back on.</p>
+          <div class="rack-column">
+            <div class="card settings-card rack-card">
+              <div class="settings-group">
+                <p class="eyebrow">Eleven stages</p>
+                <h2 class="settings-title">DSP rack</h2>
+                <p class="settings-note">The chain in the order it processes audio. A stage that is off is skipped whole; its settings stay as they were for when you turn it back on.</p>
+              </div>
+              <div id="rack-stages" class="rack-list"></div>
             </div>
-            <div id="rack-stages" class="rack-list"></div>
+
+            <div class="card settings-card rack-card rack-editor" id="rack-editor" hidden>
+              <div class="settings-group">
+                <p class="eyebrow">Stage settings</p>
+                <h2 id="rack-editor-title" class="settings-title">Stage</h2>
+                <p id="rack-editor-detail" class="settings-note"></p>
+              </div>
+              <div id="rack-editor-controls" class="rack-controls"></div>
+            </div>
           </div>
         </section>
 

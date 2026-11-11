@@ -147,6 +147,10 @@ const els = {
   gamesExecutable: document.getElementById('games-executable'),
   gamesPreset: document.getElementById('games-preset'),
   rackStages: document.getElementById('rack-stages'),
+  rackEditor: document.getElementById('rack-editor'),
+  rackEditorTitle: document.getElementById('rack-editor-title'),
+  rackEditorDetail: document.getElementById('rack-editor-detail'),
+  rackEditorControls: document.getElementById('rack-editor-controls'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
@@ -177,6 +181,7 @@ let startupBusy = false;
 let hotkeyFailures = [];
 let gameRules = [];
 let gameWatchAvailable = false;
+let selectedRackStage = 'normalizer';
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -674,8 +679,15 @@ function renderRack() {
     ...rackStages.map((stage) => {
       const on = stageIsOn(settings, stage.id);
       const row = document.createElement('div');
-      row.className = `rack-stage${on ? ' on' : ''}`;
+      row.className = `rack-stage${on ? ' on' : ''}${
+        stage.id === selectedRackStage ? ' selected' : ''
+      }`;
       row.title = stage.description;
+      row.addEventListener('click', () => {
+        if (selectedRackStage === stage.id) return;
+        selectedRackStage = stage.id;
+        renderRack();
+      });
 
       const badge = document.createElement('span');
       badge.className = 'rack-badge';
@@ -697,12 +709,72 @@ function renderRack() {
       toggle.className = 'stat-toggle';
       toggle.setAttribute('aria-pressed', String(on));
       toggle.textContent = on ? 'On' : 'Off';
-      toggle.addEventListener('click', () => setRackStage(stage.id, !on));
+      toggle.addEventListener('click', (event) => {
+        event.stopPropagation();
+        setRackStage(stage.id, !on);
+      });
 
       row.append(badge, body, toggle);
       return row;
     })
   );
+  renderRackEditor(settings);
+}
+
+function renderRackEditor(settings) {
+  const stage =
+    rackStages.find((item) => item.id === selectedRackStage) ?? rackStages[0];
+  els.rackEditorTitle.textContent = stage.label;
+  els.rackEditorDetail.textContent = stage.description;
+  els.rackEditorControls.replaceChildren(
+    ...stage.parameters.map((parameter) => {
+      const value = parameter.value(settings);
+      const control = document.createElement('label');
+      control.className = 'control';
+
+      const head = document.createElement('span');
+      const label = document.createElement('span');
+      label.textContent = parameter.label;
+      const output = document.createElement('output');
+      output.textContent = parameter.format(value);
+      head.append(label, output);
+
+      const input = document.createElement('input');
+      input.className = 'range';
+      input.type = 'range';
+      input.min = String(parameter.min);
+      input.max = String(parameter.max);
+      input.step = String(parameter.step);
+      input.value = String(value);
+      const fill = (next) =>
+        ((next - parameter.min) / (parameter.max - parameter.min)) * 100;
+      setRangeFill(input, fill(value));
+      input.addEventListener('input', () => {
+        const next = Number(input.value);
+        output.textContent = parameter.format(next);
+        setRangeFill(input, fill(next));
+      });
+      input.addEventListener('change', () =>
+        setRackParameter(stage.id, parameter.id, Number(input.value))
+      );
+
+      control.append(head, input);
+      return control;
+    })
+  );
+  els.rackEditor.hidden = false;
+}
+
+async function setRackParameter(stage, parameter, value) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_stage_parameter', { stage, parameter, value });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not change ${stage} ${parameter}: ${error}`);
+    renderAll();
+  }
 }
 
 async function setRackStage(stage, enabled) {

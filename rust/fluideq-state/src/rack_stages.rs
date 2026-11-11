@@ -68,6 +68,121 @@ pub fn set_stage_enabled(
     Ok(())
 }
 
+/// The parameters the rack page may write, with the range each one accepts.
+/// The window draws the same ranges; the clamp here is what the engine gets.
+const PARAMETER_RANGES: [(&str, &str, f64, f64); 24] = [
+    ("normalizer", "target_lufs", -35.0, -5.0),
+    ("normalizer", "ceiling_db", -6.0, 0.0),
+    ("denoise", "hiss_amount", 0.0, 1.0),
+    ("denoise", "hiss_floor_db", -90.0, -30.0),
+    ("deesser", "sensitivity", 0.0, 1.0),
+    ("deesser", "range_db", 0.0, 24.0),
+    ("deesser", "low_hz", 1000.0, 16000.0),
+    ("deesser", "high_hz", 2000.0, 20000.0),
+    ("exciter", "organic_amount", 0.0, 1.0),
+    ("bass-forge", "drive_db", 0.0, 18.0),
+    ("bass-forge", "sub_amount", 0.0, 1.0),
+    ("bass-forge", "mix", 0.0, 1.0),
+    ("equaliser", "model_amount", 0.0, 1.0),
+    ("bass-punch", "attack", 0.0, 1.0),
+    ("bass-punch", "sustain", 0.0, 1.0),
+    ("bass-punch", "mix", 0.0, 1.0),
+    ("dimension", "mid_width", 0.0, 2.0),
+    ("dimension", "decorrelation", 0.0, 1.0),
+    ("room", "size_m", 2.0, 20.0),
+    ("room", "distance_m", 0.3, 10.0),
+    ("room", "ambience_mix", 0.0, 1.0),
+    ("maximizer", "drive_db", 0.0, 24.0),
+    ("master", "output_trim_db", -24.0, 12.0),
+    ("master", "loudness_target_lufs", -24.0, -8.0),
+];
+
+fn parameter_range(stage: &str, parameter: &str) -> Option<(f64, f64)> {
+    PARAMETER_RANGES
+        .iter()
+        .find(|(stage_id, parameter_id, _, _)| *stage_id == stage && *parameter_id == parameter)
+        .map(|(_, _, low, high)| (*low, *high))
+}
+
+pub fn set_stage_parameter(
+    settings: &mut FeqChainSettings,
+    stage: &str,
+    parameter: &str,
+    value: f64,
+) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err(format!("{stage}.{parameter} must be a finite number"));
+    }
+    let Some((low, high)) = parameter_range(stage, parameter) else {
+        return Err(format!(
+            "there is no parameter named \"{parameter}\" on the {stage} stage"
+        ));
+    };
+    let value = value.clamp(low, high);
+    match (stage, parameter) {
+        ("normalizer", "target_lufs") => settings.normalizer.target_lufs = value,
+        ("normalizer", "ceiling_db") => settings.normalizer.ceiling_db = value,
+        ("denoise", "hiss_amount") => settings.denoise.hiss.amount = value,
+        ("denoise", "hiss_floor_db") => settings.denoise.hiss.floor_db = value,
+        ("deesser", "sensitivity") => settings.deesser.sensitivity = value,
+        ("deesser", "range_db") => settings.deesser.range_db = value,
+        ("deesser", "low_hz") => settings.deesser.low_hz = value,
+        ("deesser", "high_hz") => settings.deesser.high_hz = value,
+        ("exciter", "organic_amount") => settings.exciter.organic_amount = value,
+        ("bass-forge", "drive_db") => settings.bass_forge.drive_db = value,
+        ("bass-forge", "sub_amount") => settings.bass_forge.sub_amount = value,
+        ("bass-forge", "mix") => settings.bass_forge.mix = value,
+        ("equaliser", "model_amount") => settings.eq.model_amount = value,
+        ("bass-punch", "attack") => settings.bass_punch.attack = value,
+        ("bass-punch", "sustain") => settings.bass_punch.sustain = value,
+        ("bass-punch", "mix") => settings.bass_punch.mix = value,
+        ("dimension", "mid_width") => settings.dimension.mid_width = value,
+        ("dimension", "decorrelation") => settings.dimension.decorrelation = value,
+        ("room", "size_m") => settings.room.size_m = value,
+        ("room", "distance_m") => settings.room.distance_m = value,
+        ("room", "ambience_mix") => settings.room.ambience_mix = value,
+        ("maximizer", "drive_db") => settings.maximizer.drive_db = value,
+        ("master", "output_trim_db") => settings.master.output_trim_db = value,
+        ("master", "loudness_target_lufs") => settings.master.loudness_target_lufs = value,
+        _ => unreachable!("the range table and the writes must name the same parameters"),
+    }
+    Ok(())
+}
+
+pub fn stage_parameter_value(
+    settings: &FeqChainSettings,
+    stage: &str,
+    parameter: &str,
+) -> Option<f64> {
+    match (stage, parameter) {
+        ("normalizer", "target_lufs") => Some(settings.normalizer.target_lufs),
+        ("normalizer", "ceiling_db") => Some(settings.normalizer.ceiling_db),
+        ("denoise", "hiss_amount") => Some(settings.denoise.hiss.amount),
+        ("denoise", "hiss_floor_db") => Some(settings.denoise.hiss.floor_db),
+        ("deesser", "sensitivity") => Some(settings.deesser.sensitivity),
+        ("deesser", "range_db") => Some(settings.deesser.range_db),
+        ("deesser", "low_hz") => Some(settings.deesser.low_hz),
+        ("deesser", "high_hz") => Some(settings.deesser.high_hz),
+        ("exciter", "organic_amount") => Some(settings.exciter.organic_amount),
+        ("bass-forge", "drive_db") => Some(settings.bass_forge.drive_db),
+        ("bass-forge", "sub_amount") => Some(settings.bass_forge.sub_amount),
+        ("bass-forge", "mix") => Some(settings.bass_forge.mix),
+        ("equaliser", "model_amount") => Some(settings.eq.model_amount),
+        ("bass-punch", "attack") => Some(settings.bass_punch.attack),
+        ("bass-punch", "sustain") => Some(settings.bass_punch.sustain),
+        ("bass-punch", "mix") => Some(settings.bass_punch.mix),
+        ("dimension", "mid_width") => Some(settings.dimension.mid_width),
+        ("dimension", "decorrelation") => Some(settings.dimension.decorrelation),
+        ("room", "size_m") => Some(settings.room.size_m),
+        ("room", "distance_m") => Some(settings.room.distance_m),
+        ("room", "ambience_mix") => Some(settings.room.ambience_mix),
+        ("maximizer", "drive_db") => Some(settings.maximizer.drive_db),
+        ("master", "output_trim_db") => Some(settings.master.output_trim_db),
+        ("master", "loudness_target_lufs") => Some(settings.master.loudness_target_lufs),
+        _ => None,
+    }
+}
+
 pub fn stage_enabled(settings: &FeqChainSettings, stage: &str) -> Option<bool> {
     match stage {
         "normalizer" => Some(
@@ -113,6 +228,33 @@ mod tests {
             settings.normalizer.mode,
             FeqNormalizerMode::FEQ_NORMALIZER_GUARD as c_int
         );
+    }
+
+    #[test]
+    fn every_rack_parameter_clamps_to_its_range() {
+        for (stage, parameter, low, high) in PARAMETER_RANGES {
+            let mut settings = FeqChainSettings::default();
+            set_stage_parameter(&mut settings, stage, parameter, high + 1000.0).expect("high");
+            assert_eq!(
+                stage_parameter_value(&settings, stage, parameter),
+                Some(high),
+                "{stage}.{parameter}"
+            );
+            set_stage_parameter(&mut settings, stage, parameter, low - 1000.0).expect("low");
+            assert_eq!(
+                stage_parameter_value(&settings, stage, parameter),
+                Some(low),
+                "{stage}.{parameter}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_parameter_is_refused_rather_than_ignored() {
+        let mut settings = FeqChainSettings::default();
+        assert!(set_stage_parameter(&mut settings, "room", "ceiling_db", 0.0).is_err());
+        assert!(set_stage_parameter(&mut settings, "denoise", "target_lufs", 0.0).is_err());
+        assert_eq!(stage_parameter_value(&settings, "room", "ceiling_db"), None);
     }
 
     #[test]
