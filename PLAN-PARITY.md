@@ -54,7 +54,7 @@
 | 顺序 | 页面 | 需要补的 Rust 命令 | 复用后端 |
 | --- | --- | --- | --- |
 | 1 | EQ 预设（`eq-presets`） | `list_presets` / `apply_preset` / `save_preset` / `delete_preset` | `models.rs`、持久化 |
-| 2 | 配置（`config`） | 每端点增益、平衡、处理模式、自动归一开关 | `device_profiles.rs`、`apo.rs` |
+| 2 | 配置（`config`）✅ 只读页 | 无新增命令，复用 `engine_status` 与快照：端点槽位/挂载/加载状态、已存端点档案、当前曲线与 preamp、引擎自身日志 | `device_profiles.rs`、`engine_status` |
 | 3 | 卷积（`convolution`） | `load_ir` / `clear_ir` / `ir_info` | `wav_ir.rs`、`linear_phase.rs` |
 | 4 | 游戏预设（`game-presets`） | 预设分组 + 一键应用 | 预设层 |
 | 5 | DSP rack | 机架阶段增删/排序/参数 | `apo_process_and_stages.rs` |

@@ -11,6 +11,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 import { registerView, viewFor } from './views/registry.js';
 import { equalizer } from './views/equalizer/index.js';
+import { config } from './views/config/index.js';
 import { settings } from './views/settings/index.js';
 import {
   F_MIN,
@@ -125,9 +126,17 @@ const els = {
   presetBar: document.querySelector('.preset-bar'),
   settingsDevice: document.getElementById('settings-device'),
   hotkeyState: document.getElementById('hotkey-state'),
+  configEndpoints: document.getElementById('config-endpoints'),
+  configEndpointsEmpty: document.getElementById('config-endpoints-empty'),
+  configNow: document.getElementById('config-now'),
+  configProfiles: document.getElementById('config-profiles'),
+  configProfilesEmpty: document.getElementById('config-profiles-empty'),
+  configLog: document.getElementById('config-log'),
+  configLogEmpty: document.getElementById('config-log-empty'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
+registerView(config);
 registerView(settings);
 
 let activeView = 'equalizer';
@@ -385,6 +394,7 @@ function renderAll() {
   renderBands();
   renderInspector();
   renderSettings();
+  if (activeView === 'config') renderConfig();
   drawGraph();
 }
 
@@ -403,6 +413,154 @@ function renderSettings() {
     els.hotkeyState.hidden = true;
     els.hotkeyState.textContent = '';
   }
+}
+
+const EQ_MODEL_NAMES = {
+  FEQ_EQ_MODEL_CLEAN: 'Clean',
+  FEQ_EQ_MODEL_PROPORTIONAL: 'Proportional Q',
+  FEQ_EQ_MODEL_WIDE: 'Wide tone',
+  FEQ_EQ_MODEL_ASYMMETRIC: 'Asymmetric',
+};
+
+function configRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'stat-row';
+  const name = document.createElement('span');
+  name.textContent = label;
+  const strong = document.createElement('strong');
+  strong.textContent = value;
+  row.append(name, strong);
+  return row;
+}
+
+function configCard(title, facts, mono, current) {
+  const row = document.createElement('div');
+  row.className = `config-endpoint${current ? ' current' : ''}`;
+
+  const head = document.createElement('div');
+  head.className = 'config-name';
+  const label = document.createElement('span');
+  label.textContent = title;
+  head.appendChild(label);
+  if (current) {
+    const badge = document.createElement('span');
+    badge.className = 'config-current';
+    badge.textContent = 'Active';
+    head.appendChild(badge);
+  }
+
+  const state = document.createElement('p');
+  state.className = 'config-meta';
+  state.textContent = facts.filter(Boolean).join(' · ');
+
+  const address = document.createElement('p');
+  address.className = 'config-mono';
+  address.textContent = mono || '';
+
+  row.append(head, state, address);
+  return row;
+}
+
+function configEndpointCard(endpoint, currentGuid) {
+  const emptySlots = Number(endpoint.emptySlots);
+  const facts = [
+    endpoint.slot ? `slot ${endpoint.slot}` : 'no slot',
+    endpoint.attached ? 'attached' : 'not attached',
+    endpoint.attached && !endpoint.loaded ? 'never loaded' : '',
+    endpoint.tpBypassed ? 'Windows bypassing effects' : '',
+    endpoint.modeMissing ? 'no processing mode' : '',
+    Array.isArray(endpoint.slotsTried) && endpoint.slotsTried.length > 0
+      ? `tried ${endpoint.slotsTried.join(' → ')}`
+      : '',
+    Number.isFinite(emptySlots)
+      ? `${emptySlots} empty slot${emptySlots === 1 ? '' : 's'}`
+      : '',
+  ];
+  const current = Boolean(currentGuid) && endpoint.guid === currentGuid;
+  return configCard(
+    endpoint.name || 'Unnamed output',
+    facts,
+    endpoint.guid,
+    current
+  );
+}
+
+function configProfileCard(profile, isActive) {
+  const bands = Array.isArray(profile.bands) ? profile.bands.length : 0;
+  const facts = [
+    profile.active_preset_name || 'Custom curve',
+    `${formatDb(Number(profile.preamp_db) || 0)} dB`,
+    `${bands} band${bands === 1 ? '' : 's'}`,
+  ];
+  return configCard(
+    profile.device_name || 'Unnamed output',
+    facts,
+    profile.guid,
+    isActive
+  );
+}
+
+// The page says what Windows and the engine actually carry, not what FluidEQ
+// intends: the endpoint list is the setup helper's answer, and every profile
+// is the one the state centre saved for that endpoint.
+function renderConfig() {
+  const endpoints = Array.isArray(engineStatus?.endpoints)
+    ? engineStatus.endpoints
+    : [];
+  const currentGuid =
+    engineStatus?.defaultDevice?.guid || snapshot.active_device_guid || '';
+  els.configEndpoints.replaceChildren(
+    ...endpoints.map((endpoint) => configEndpointCard(endpoint, currentGuid))
+  );
+  els.configEndpointsEmpty.hidden = endpoints.length > 0;
+
+  const autoPreamp = Number(snapshot.auto_preamp_db) || 0;
+  els.configNow.replaceChildren(
+    configRow(
+      'Output',
+      snapshot.active_device_name ||
+        engineStatus?.defaultDevice?.name ||
+        'System default'
+    ),
+    configRow('Preset', snapshot.active_preset_name || 'Custom curve'),
+    configRow('Bands', String(snapshot.bands?.length ?? 0)),
+    configRow('Preamp', `${formatDb(Number(snapshot.preamp_total_db) || 0)} dB`),
+    configRow(
+      'Auto headroom',
+      snapshot.auto_headroom ? `On (${formatDb(autoPreamp)} dB)` : 'Off'
+    ),
+    configRow(
+      'EQ model',
+      EQ_MODEL_NAMES[snapshot.eq_model] || snapshot.eq_model || 'Clean'
+    ),
+    configRow('Matched treble', snapshot.matched_treble ? 'On' : 'Off'),
+    configRow(
+      'Tone',
+      `bass ${formatDb(Number(snapshot.tone?.bass_db) || 0)} · treble ${formatDb(
+        Number(snapshot.tone?.treble_db) || 0
+      )} dB`
+    )
+  );
+
+  const registry = snapshot.device_profiles ?? {};
+  const profiles = Object.values(registry.profiles ?? {})
+    .filter((profile) => profile?.guid)
+    .sort((left, right) =>
+      String(left.device_name || '').localeCompare(String(right.device_name || ''))
+    );
+  els.configProfiles.replaceChildren(
+    ...profiles.map((profile) =>
+      configProfileCard(profile, profile.guid === registry.active_device_guid)
+    )
+  );
+  els.configProfilesEmpty.hidden = profiles.length > 0;
+
+  const log = Array.isArray(engineStatus?.engineLog)
+    ? engineStatus.engineLog
+    : [];
+  els.configLog.textContent = log.join('\n');
+  els.configLog.hidden = log.length === 0;
+  els.configLogEmpty.hidden = log.length > 0;
 }
 
 // One page at a time: the rail says which, the panels carry the same id, and
@@ -426,6 +584,7 @@ function showView(id) {
   els.presetBar.hidden = !equalizerView;
   if (!equalizerView) els.presetForm.hidden = true;
   if (equalizerView) scheduleDraw();
+  if (view.id === 'config') renderConfig();
   if (view.id === 'settings') renderSettings();
 }
 
@@ -1005,6 +1164,7 @@ function renderEngineStatus(status) {
     clearMessageStartingWith('Engine never loaded:');
     clearMessageStartingWith('Engine status:');
   }
+  if (activeView === 'config') renderConfig();
 }
 
 async function refreshEngineHost() {

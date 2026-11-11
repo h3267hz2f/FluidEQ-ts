@@ -25,6 +25,14 @@
               <circle cx="11" cy="17" r="2.2" />
             </svg>
           </button>
+          <button class="nav-btn" type="button" aria-label="Config" data-view="config">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+              <circle cx="9" cy="6" r="1.8" />
+              <circle cx="15" cy="12" r="1.8" />
+              <circle cx="8" cy="18" r="1.8" />
+            </svg>
+          </button>
           <button class="nav-btn" type="button" aria-label="DSP rack" title="DSP rack is not in this build yet" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="4" y="4" width="16" height="5" rx="1.6" />
@@ -164,6 +172,37 @@
         </section>
 
         <section id="bands" class="bands" aria-label="EQ bands" data-view-panel="equalizer"></section>
+
+        <section class="view-config" data-view-panel="config" hidden>
+          <div class="config-grid">
+            <div class="card config-card">
+              <p class="eyebrow">Endpoints</p>
+              <h2 class="settings-title">What Windows has attached</h2>
+              <div id="config-endpoints" class="config-list"></div>
+              <p id="config-endpoints-empty" class="settings-note" hidden>No render endpoints reported yet.</p>
+            </div>
+
+            <div class="card config-card">
+              <p class="eyebrow">Now playing</p>
+              <h2 class="settings-title">What FluidEQ holds</h2>
+              <div id="config-now" class="config-rows"></div>
+            </div>
+
+            <div class="card config-card config-wide">
+              <p class="eyebrow">Profiles</p>
+              <h2 class="settings-title">Saved per output</h2>
+              <div id="config-profiles" class="config-list"></div>
+              <p id="config-profiles-empty" class="settings-note">No output has saved a profile yet; the first switch writes one.</p>
+            </div>
+
+            <div class="card config-card config-wide">
+              <p class="eyebrow">Engine</p>
+              <h2 class="settings-title">The engine's own verdicts</h2>
+              <pre id="config-log" class="config-log"></pre>
+              <p id="config-log-empty" class="settings-note">The engine has not written a log line yet.</p>
+            </div>
+          </div>
+        </section>
 
         <section class="view-settings" data-view-panel="settings" hidden>
           <div class="card settings-card">
