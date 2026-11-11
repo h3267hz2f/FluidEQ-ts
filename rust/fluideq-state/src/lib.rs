@@ -26,6 +26,7 @@ pub mod apo_split_tap_and_reader;
 pub mod apo_watcher;
 pub mod biquad;
 pub mod chain_wire;
+pub mod compressed_audio;
 pub mod deck_transport;
 pub mod device_profiles;
 pub mod linear_phase;
