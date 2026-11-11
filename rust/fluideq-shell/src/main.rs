@@ -19,6 +19,7 @@ pub mod engine_setup;
 pub mod host_runtime;
 pub mod hotkeys;
 pub mod ipc;
+pub mod output_watch;
 pub mod spectrum_bridge;
 pub mod startup;
 pub mod system_daemons;
@@ -291,27 +292,64 @@ fn hotkey_failures() -> Vec<String> {
     hotkeys::failures()
 }
 
+fn apply_default_output(
+    state: &ShellState,
+    guid: &str,
+    name: &str,
+) -> Result<Option<AppStateSnapshot>, String> {
+    let normalized = fluideq_state::device_profiles::normalize_endpoint_guid(guid);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let mut store = store_of(state)?;
+    if store.active_device_guid() == Some(normalized.as_str()) {
+        return Ok(None);
+    }
+    let snapshot = store.switch_active_output_device(guid, name);
+    save(&store, state);
+    state
+        .host
+        .apply_chain(&store.export_wire_parameters(), snapshot.revision as u32);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(Some(snapshot))
+}
+
 #[tauri::command]
 fn follow_output_device(
     state: State<'_, ShellState>,
     guid: String,
     name: String,
 ) -> Result<Option<AppStateSnapshot>, String> {
-    let normalized = fluideq_state::device_profiles::normalize_endpoint_guid(&guid);
-    if normalized.is_empty() {
-        return Ok(None);
+    apply_default_output(state.inner(), &guid, &name)
+}
+
+/// The watcher's half: ask the engine helper which output is default now and
+/// move the chain there. Runs off the UI thread; the window is told when the
+/// profile actually changed.
+fn follow_default_output_now(app: &tauri::AppHandle) {
+    let Ok(status) = engine_setup::status(app) else {
+        return;
+    };
+    let Some(device) = status.get("defaultDevice") else {
+        return;
+    };
+    let guid = device
+        .get("guid")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let name = device
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Default Output");
+    if guid.is_empty() {
+        return;
     }
-    let mut store = store_of(&state)?;
-    if store.active_device_guid() == Some(normalized.as_str()) {
-        return Ok(None);
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    if let Ok(Some(snapshot)) = apply_default_output(state.inner(), guid, name) {
+        let _ = app.emit("snapshot", snapshot);
     }
-    let snapshot = store.switch_active_output_device(&guid, &name);
-    save(&store, &state);
-    state
-        .host
-        .apply_chain(&store.export_wire_parameters(), snapshot.revision as u32);
-    let _ = apo_bridge::publish(&snapshot);
-    Ok(Some(snapshot))
 }
 
 #[tauri::command]
@@ -645,6 +683,7 @@ fn main() {
             });
             setup_tray(app)?;
             hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
+            output_watch::spawn(app.handle().clone(), follow_default_output_now);
             // Closing the window puts FluidEQ in the tray: the engine keeps
             // processing and the curve is one click away, and quit is an
             // explicit tray entry rather than an accident of the X button.

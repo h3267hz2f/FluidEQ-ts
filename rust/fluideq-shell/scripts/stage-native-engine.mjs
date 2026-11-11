@@ -10,7 +10,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
  *
  * The base `tauri.conf.json` carries no engine resources so `tauri dev`
  * without a native build tree still starts. This script writes a separate
- * `tauri.bundle.conf.json` override that adds the three binaries as bundle
+ * `tauri.bundle.conf.json` override that adds the native binaries as bundle
  * resources only for a release bundle. The override and `engine-bin/` are
  * gitignored.
  */
@@ -45,6 +45,7 @@ const engineFiles = [
   'FluidEQ-Engine.dll',
   'FluidEQ-Engine-Setup.exe',
   'FluidEQ-DSP.exe',
+  'FluidEQ-Outputs.exe',
 ];
 const runtimeFiles = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'];
 const files = [...engineFiles, ...runtimeFiles];
@@ -156,6 +157,7 @@ run(
     'fluideq-engine',
     'fluideq-engine-setup',
     'fluideq-dsp-host',
+    'fluideq-output-watch',
     '--parallel',
   ],
   repoRoot,
