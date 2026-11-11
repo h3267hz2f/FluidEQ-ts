@@ -193,8 +193,19 @@ fn delete_preset(state: State<'_, ShellState>, name: String) -> Result<Vec<Strin
 
 #[tauri::command]
 fn load_ir(state: State<'_, ShellState>, bytes: Vec<u8>) -> Result<AppStateSnapshot, String> {
+    let folder = PathBuf::from(fluideq_state::apo_analysis_and_status::config_dir());
+    if folder.as_os_str().is_empty() {
+        return Err("the engine root could not be resolved".to_string());
+    }
     let mut store = store_of(&state)?;
     store.load_wav_impulse_response(&bytes)?;
+    if let Err(error) = apo_bridge::write_convolution(&folder, &bytes) {
+        store.clear_impulse_response();
+        return Err(format!(
+            "could not write {}: {error}",
+            folder.join(apo_bridge::CONVOLUTION_FILE).display()
+        ));
+    }
     let snapshot = store.snapshot();
     save(&store, &state);
     let _ = apo_bridge::publish(&snapshot);
@@ -207,6 +218,11 @@ fn clear_ir(state: State<'_, ShellState>) -> Result<AppStateSnapshot, String> {
     store.clear_impulse_response();
     let snapshot = store.snapshot();
     save(&store, &state);
+    let folder = PathBuf::from(fluideq_state::apo_analysis_and_status::config_dir());
+    if !folder.as_os_str().is_empty() {
+        apo_bridge::remove_convolution(&folder);
+        let _ = apo_bridge::publish(&snapshot);
+    }
     Ok(snapshot)
 }
 

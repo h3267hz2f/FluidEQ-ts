@@ -47,7 +47,11 @@ pub fn save_snapshot_atomic(path: &Path, snapshot: &AppStateSnapshot) -> Result<
         }
     }
 
-    let json = serde_json::to_vec_pretty(snapshot)
+    // The impulse response is a live verdict from this session's engine, not
+    // something a restart may come back claiming.
+    let mut persistable = snapshot.clone();
+    persistable.impulse_response = None;
+    let json = serde_json::to_vec_pretty(&persistable)
         .map_err(|e| format!("Failed to serialize state snapshot: {}", e))?;
 
     let tmp_path = temp_path_for(path);

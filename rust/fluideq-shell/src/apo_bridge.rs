@@ -21,6 +21,9 @@ use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const OWNER_MARKER: &str = "fluideq-owner.txt";
+/// The engine loads `Convolution:` paths relative to its config folder, so the
+/// app rewrites this one file rather than naming the user's original location.
+pub const CONVOLUTION_FILE: &str = "fluideq-convolution.wav";
 
 /// Why the last publish failed, so the app can say so instead of showing a
 /// chain that edits the window and nothing else.
@@ -73,10 +76,28 @@ pub fn render(snapshot: &AppStateSnapshot) -> String {
     }
     text.push_str(&format!("Preamp: {:.1} dB\n", snapshot.preamp_db));
     text.push_str(filters);
+    if snapshot.impulse_response.is_some() {
+        text.push_str(&format!("Convolution: {CONVOLUTION_FILE}\n"));
+    }
     if !text.ends_with('\n') {
         text.push('\n');
     }
     text
+}
+
+/// Writes the impulse response beside `config.txt`, where the engine resolves
+/// a relative `Convolution:` line. Through a temporary file, for the same reason
+/// the curve is: the watcher must never read a half-written WAV.
+pub fn write_convolution(folder: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(folder)?;
+    let temporary = folder.join(format!("{CONVOLUTION_FILE}.tmp"));
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, folder.join(CONVOLUTION_FILE))
+}
+
+/// Removes the impulse response file; a missing one is already the goal.
+pub fn remove_convolution(folder: &Path) {
+    let _ = std::fs::remove_file(folder.join(CONVOLUTION_FILE));
 }
 
 /// Writes `config.txt` whole through a temporary file, so the watcher never
@@ -280,6 +301,7 @@ mod tests {
     use super::*;
     use fluideq_state::apo::resolve_apo_endpoint_chain;
     use fluideq_state::biquad::{BandFilterKind, EqBandSpec};
+    use fluideq_state::wav_ir::IrSummary;
     use fluideq_state::{AppStateStore, ToneSettings};
     use std::collections::BTreeMap;
 
@@ -378,6 +400,51 @@ mod tests {
         assert!(updated.contains("2000.0 Hz"));
         assert!(!folder.join("config.txt.tmp").exists());
 
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    fn ir_summary() -> IrSummary {
+        IrSummary {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 480,
+            seconds: 0.01,
+            left_peak_db: -1.0,
+            right_peak_db: -1.0,
+        }
+    }
+
+    #[test]
+    fn a_loaded_impulse_response_names_the_engine_convolution_file() {
+        let mut snapshot = store_with_two_bands(true, false).snapshot();
+        assert!(!render(&snapshot).contains("Convolution:"));
+
+        snapshot.impulse_response = Some(ir_summary());
+        let text = render(&snapshot);
+        assert!(text.contains(&format!("Convolution: {CONVOLUTION_FILE}")));
+
+        // The bypassed chain is empty, so a loaded IR does not resurrect it.
+        snapshot.master_power = false;
+        assert_eq!(render(&snapshot), "");
+    }
+
+    #[test]
+    fn the_convolution_file_is_replaced_whole_and_removed() {
+        let folder = std::env::temp_dir().join(format!(
+            "fluideq-convolution-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        write_convolution(&folder, b"first").unwrap();
+        write_convolution(&folder, b"second").unwrap();
+        assert_eq!(
+            std::fs::read(folder.join(CONVOLUTION_FILE)).unwrap(),
+            b"second"
+        );
+        assert!(!folder.join(format!("{CONVOLUTION_FILE}.tmp")).exists());
+
+        remove_convolution(&folder);
+        assert!(!folder.join(CONVOLUTION_FILE).exists());
         let _ = std::fs::remove_dir_all(&folder);
     }
 }

@@ -121,10 +121,10 @@ pub struct AppStateSnapshot {
     pub chain_settings: FeqChainSettings,
     pub models: NeuralModelStatus,
     pub residency: MemoryFootprintEstimate,
-    /// The impulse response installed in this process. Not persisted: the host
-    /// loads it again from the file the user picked, and a restart must not
-    /// claim a convolution is running when the kernel is empty.
-    #[serde(skip)]
+    /// The impulse response installed in this process. Sent to the window, but
+    /// not restored from disk: a restart must not claim a convolution is
+    /// running when the kernel is empty.
+    #[serde(default, skip_deserializing)]
     pub impulse_response: Option<IrSummary>,
 }
 
@@ -158,6 +158,7 @@ pub struct AppStateStore {
     native_chain: NativeChainHandle,
     native_meters: NativeMetersHandle,
     impulse_response: Option<IrSummary>,
+    ir_kernel: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl Default for AppStateStore {
@@ -224,6 +225,7 @@ impl AppStateStore {
             native_chain: NativeChainHandle::new(sample_rate as u32, 2, 2048),
             native_meters: NativeMetersHandle::new(2, sample_rate),
             impulse_response: None,
+            ir_kernel: None,
         };
         store.sync_eq_and_tone_into_chain_settings();
         store.commit_chain_and_linear_phase_kernel();
@@ -287,6 +289,14 @@ impl AppStateStore {
     /// Commits `self.chain_settings` to `NativeChainHandle` and automatically synthesizes
     /// the 16,384-tap stereo linear-phase FIR kernel when `eq.phase == FEQ_PHASE_LINEAR`.
     fn commit_chain_and_linear_phase_kernel(&mut self) {
+        if let Some((left, right)) = &self.ir_kernel {
+            // A loaded impulse response owns the kernel stage. Configure first,
+            // because the EQ's own linear-phase refresh runs inside it and would
+            // otherwise clear or replace the IR on every band change.
+            let _ = self.native_chain.configure(&self.chain_settings);
+            let _ = self.native_chain.set_eq_kernel(left, right);
+            return;
+        }
         if self.chain_settings.eq.phase == FeqPhaseMode::FEQ_PHASE_LINEAR as i32 {
             let (left, right) =
                 synthesize_stereo_linear_phase_kernels(&self.chain_settings.eq, self.sample_rate);
@@ -372,7 +382,10 @@ impl AppStateStore {
     /// and installs it into the native convolution stage (`feq_chain_set_eq_kernel`).
     pub fn load_wav_impulse_response(&mut self, wav_bytes: &[u8]) -> Result<DecodedImpulseResponse, String> {
         let decoded = decode_pcm_impulse_response(wav_bytes)?;
-        let _ = self.native_chain.set_eq_kernel(&decoded.left, &decoded.right);
+        if !self.native_chain.set_eq_kernel(&decoded.left, &decoded.right) {
+            return Err("the native engine could not install the impulse response".to_string());
+        }
+        self.ir_kernel = Some((decoded.left.clone(), decoded.right.clone()));
         self.impulse_response = Some(IrSummary::from_decoded(&decoded));
         self.revision += 1;
         Ok(decoded)
@@ -381,9 +394,11 @@ impl AppStateStore {
     /// Removes the convolution kernel. The window keeps the summary in the
     /// snapshot, so this clears it too rather than leaving a stale "loaded".
     pub fn clear_impulse_response(&mut self) {
-        let _ = self.native_chain.set_eq_kernel(&[], &[]);
+        self.ir_kernel = None;
         self.impulse_response = None;
         self.revision += 1;
+        // Put back whatever the EQ itself wanted: a linear-phase kernel, or none.
+        self.commit_chain_and_linear_phase_kernel();
     }
 
     pub fn impulse_response(&self) -> Option<&IrSummary> {
@@ -408,7 +423,7 @@ impl AppStateStore {
     /// where the user left it: a preset is an EQ, not a power state.
     pub fn apply_preset(&mut self, preset: &presets::EqPreset) -> AppStateSnapshot {
         let master_power = self.master_power;
-        let mut snapshot = self.set_eq_bands_and_config(
+        self.set_eq_bands_and_config(
             preset.bands.clone(),
             &preset.eq_model,
             preset.matched_treble,
@@ -417,11 +432,14 @@ impl AppStateStore {
             preset.preamp_db,
             preset.tone.clone(),
         );
+        // The preset saves the character amount too, so a preset applied in a
+        // session that had it at another value must put it back.
+        self.eq_model_amount = preset.eq_model_amount.clamp(0.0, 1.0);
         self.active_preset_name = preset.name.clone();
         self.revision += 1;
-        snapshot.revision = self.revision;
-        snapshot.active_preset_name = self.active_preset_name.clone();
-        snapshot
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
     }
 
     /// Names the curve the window is showing, for a preset that was just
@@ -489,6 +507,7 @@ impl AppStateStore {
         self.auto_headroom = snap.auto_headroom;
         self.preamp_db = snap.preamp_db;
         self.active_preset_name = snap.active_preset_name.clone();
+        self.eq_model = Self::parse_eq_model(&snap.eq_model);
         self.eq_model_amount = snap.eq_model_amount;
         self.matched_treble = snap.matched_treble;
         self.tone = snap.tone.clone();
@@ -788,6 +807,69 @@ mod tests {
         // The default trim is zero, so a fresh store shows only the curve's
         // own headroom instead of an unexplained -1.5 dB.
         assert_eq!(AppStateStore::new(48_000.0).snapshot().preamp_db, 0.0);
+    }
+
+    #[test]
+    fn applying_a_preset_restores_its_character_amount_and_survives_a_reload() {
+        let mut store = AppStateStore::new(48_000.0);
+        store.eq_model_amount = 0.2;
+        let mut preset = presets::EqPreset::flat();
+        preset.name = "Warm".to_string();
+        preset.eq_model = "proportional".to_string();
+        preset.eq_model_amount = 0.65;
+
+        let applied = store.apply_preset(&preset);
+        assert_eq!(applied.eq_model_amount, 0.65);
+        assert_eq!(applied.eq_model, "proportional");
+        assert_eq!(applied.chain_settings.eq.model_amount, 0.65);
+        assert_eq!(applied.active_preset_name, "Warm");
+
+        let path = std::env::temp_dir().join(format!(
+            "fluideq-state-preset-{}.json",
+            std::process::id()
+        ));
+        store.save_to_file(&path).unwrap();
+        let mut reloaded = AppStateStore::new(48_000.0);
+        let restored = reloaded.load_from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(restored.eq_model, "proportional");
+        assert_eq!(restored.eq_model_amount, 0.65);
+    }
+
+    #[test]
+    fn a_loaded_impulse_response_owns_the_kernel_and_stays_out_of_the_state_file() {
+        use crate::wav_ir::IrSummary;
+
+        let mut store = AppStateStore::new(48_000.0);
+        store.ir_kernel = Some((vec![1.0_f32, 0.0], vec![1.0_f32, 0.0]));
+        store.impulse_response = Some(IrSummary {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 2,
+            seconds: 2.0 / 48_000.0,
+            left_peak_db: 0.0,
+            right_peak_db: 0.0,
+        });
+
+        // A band edit runs the EQ's own kernel refresh; the IR must survive it.
+        store.update_band_gain(1, 40.0, 4.0, 1.0);
+        assert_eq!(store.native_chain.eq_kernel_len(), 2);
+        let live = serde_json::to_value(store.snapshot()).unwrap();
+        assert_eq!(live["impulse_response"]["frames"], 2);
+
+        let path = std::env::temp_dir().join(format!(
+            "fluideq-state-ir-{}.json",
+            std::process::id()
+        ));
+        store.save_to_file(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(saved["impulse_response"].is_null());
+
+        store.clear_impulse_response();
+        assert_eq!(store.native_chain.eq_kernel_len(), 0);
+        assert!(store.snapshot().impulse_response.is_none());
     }
 
     #[test]
