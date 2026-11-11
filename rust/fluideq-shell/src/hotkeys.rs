@@ -57,6 +57,7 @@ pub fn spawn(app: tauri::AppHandle, on_bypass: fn(&tauri::AppHandle)) {
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
 
+    let (ready, wait) = std::sync::mpsc::channel();
     let thread = std::thread::Builder::new()
         .name("fluideq-hotkeys".to_string())
         .spawn(move || unsafe {
@@ -77,6 +78,9 @@ pub fn spawn(app: tauri::AppHandle, on_bypass: fn(&tauri::AppHandle)) {
                     record_failure(format!("{name} is already taken"));
                 }
             }
+            // The window asks for failures as soon as it boots; registration
+            // must be finished before this returns, not racing that question.
+            let _ = ready.send(());
             if !any {
                 return;
             }
@@ -92,8 +96,11 @@ pub fn spawn(app: tauri::AppHandle, on_bypass: fn(&tauri::AppHandle)) {
                 }
             }
         });
-    if let Err(error) = thread {
-        record_failure(format!("could not start the hotkey listener: {error}"));
+    match thread {
+        Ok(_) => {
+            let _ = wait.recv();
+        }
+        Err(error) => record_failure(format!("could not start the hotkey listener: {error}")),
     }
 }
 
