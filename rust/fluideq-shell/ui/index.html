@@ -33,7 +33,7 @@
               <circle cx="8" cy="18" r="1.8" />
             </svg>
           </button>
-          <button class="nav-btn" type="button" aria-label="DSP rack" title="DSP rack is not in this build yet" disabled>
+          <button class="nav-btn" type="button" aria-label="DSP rack" data-view="rack">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="4" y="4" width="16" height="5" rx="1.6" />
               <rect x="4" y="11.5" width="16" height="5" rx="1.6" />
@@ -178,6 +178,17 @@
         </section>
 
         <section id="bands" class="bands" aria-label="EQ bands" data-view-panel="equalizer"></section>
+
+        <section class="view-rack" data-view-panel="rack" hidden>
+          <div class="card settings-card rack-card">
+            <div class="settings-group">
+              <p class="eyebrow">Eleven stages</p>
+              <h2 class="settings-title">DSP rack</h2>
+              <p class="settings-note">The chain in the order it processes audio. A stage that is off is skipped whole; its settings stay as they were for when you turn it back on.</p>
+            </div>
+            <div id="rack-stages" class="rack-list"></div>
+          </div>
+        </section>
 
         <section class="view-config" data-view-panel="config" hidden>
           <div class="config-grid">

@@ -34,6 +34,7 @@ pub mod models;
 pub mod opra;
 pub mod persistence;
 pub mod presets;
+pub mod rack_stages;
 pub mod remote_audio_runtime;
 pub mod remote_playback;
 pub mod residency;

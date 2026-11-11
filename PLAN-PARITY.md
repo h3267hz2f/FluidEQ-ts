@@ -57,7 +57,7 @@
 | 2 | 配置（`config`）✅ 只读页 | 无新增命令，复用 `engine_status` 与快照：端点槽位/挂载/加载状态、已存端点档案、当前曲线与 preamp、引擎自身日志 | `device_profiles.rs`、`engine_status` |
 | 3 | 卷积（`convolution`）✅ | `load_ir` / `clear_ir` 已接，IR 摘要随快照下发 | `wav_ir.rs`、`linear_phase.rs` |
 | 4 | 游戏预设（`games`）✅ | `list_game_presets` / `set_game_preset` / `remove_game_preset` / `game_watch_available`；`FluidEQ-Games.exe` 监听前台、`hold` 跨 alt-tab、退出还原 | `game_presets.rs`、`foreground-watch` |
-| 5 | DSP rack | 机架阶段增删/排序/参数 | `apo_process_and_stages.rs` |
+| 5 | DSP rack ✅ 第一版 | `set_stage_enabled`（11 级开关）+ 每级关键参数摘要；阶段内完整参数编辑待补 | `rack_stages.rs`、链设置快照 |
 | 6 | Settings ⏳ | 启动项/关闭到托盘/热键状态已接；语言、主题、更新检查待补 | 现有 shell 命令 |
 | 7 | Room | 房间校正参数与测量入口 | `room_heads.rs` |
 | 8 | Library / Karaoke / Share audio / Online media / Plus | 见 P3 | `remote_playback.rs`、`system_daemons.rs` |

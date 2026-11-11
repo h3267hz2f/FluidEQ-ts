@@ -914,6 +914,77 @@ kbd {
   width: min(260px, 100%);
 }
 
+/* DSP rack: one row per stage, the chain's own order top to bottom. */
+.view-rack {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.rack-card {
+  max-width: 780px;
+}
+
+.rack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rack-stage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.rack-stage.on {
+  border-color: var(--accent-line);
+  background: rgba(59, 232, 196, 0.05);
+}
+
+.rack-badge {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rack-stage.on .rack-badge {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.rack-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.rack-name {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rack-summary {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.rack-stage .stat-toggle {
+  flex: 0 0 auto;
+}
+
 .bands {
   display: flex;
   gap: 8px;

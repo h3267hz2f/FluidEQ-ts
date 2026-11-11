@@ -13,6 +13,12 @@ import { registerView, viewFor } from './views/registry.js';
 import { equalizer } from './views/equalizer/index.js';
 import { config } from './views/config/index.js';
 import { games } from './views/games/index.js';
+import {
+  rack,
+  rackStages,
+  stageIsOn,
+  stageSummary,
+} from './views/rack/index.js';
 import { settings } from './views/settings/index.js';
 import {
   F_MIN,
@@ -140,10 +146,12 @@ const els = {
   gamesForm: document.getElementById('games-form'),
   gamesExecutable: document.getElementById('games-executable'),
   gamesPreset: document.getElementById('games-preset'),
+  rackStages: document.getElementById('rack-stages'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
 registerView(config);
+registerView(rack);
 registerView(games);
 registerView(settings);
 
@@ -407,6 +415,7 @@ function renderAll() {
   renderInspector();
   renderSettings();
   if (activeView === 'config') renderConfig();
+  if (activeView === 'rack') renderRack();
   drawGraph();
 }
 
@@ -657,6 +666,56 @@ async function deleteGameRule(executable) {
   }
 }
 
+// The rack is drawn from the snapshot's own chain settings, so every switch
+// shows what the engine will do on the next block, not what was clicked.
+function renderRack() {
+  const settings = snapshot.chain_settings ?? {};
+  els.rackStages.replaceChildren(
+    ...rackStages.map((stage) => {
+      const on = stageIsOn(settings, stage.id);
+      const row = document.createElement('div');
+      row.className = `rack-stage${on ? ' on' : ''}`;
+      row.title = stage.description;
+
+      const badge = document.createElement('span');
+      badge.className = 'rack-badge';
+      badge.setAttribute('aria-hidden', 'true');
+      badge.textContent = stage.badge;
+
+      const body = document.createElement('div');
+      body.className = 'rack-body';
+      const name = document.createElement('div');
+      name.className = 'rack-name';
+      name.textContent = stage.label;
+      const summary = document.createElement('p');
+      summary.className = 'rack-summary';
+      summary.textContent = stageSummary(stage, settings);
+      body.append(name, summary);
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'stat-toggle';
+      toggle.setAttribute('aria-pressed', String(on));
+      toggle.textContent = on ? 'On' : 'Off';
+      toggle.addEventListener('click', () => setRackStage(stage.id, !on));
+
+      row.append(badge, body, toggle);
+      return row;
+    })
+  );
+}
+
+async function setRackStage(stage, enabled) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_stage_enabled', { stage, enabled });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not switch the ${stage} stage: ${error}`);
+  }
+}
+
 async function refreshGameRules() {
   if (!invoke) return renderGames();
   try {
@@ -694,6 +753,7 @@ function showView(id) {
   if (!equalizerView) els.presetForm.hidden = true;
   if (equalizerView) scheduleDraw();
   if (view.id === 'config') renderConfig();
+  if (view.id === 'rack') renderRack();
   if (view.id === 'games') renderGames();
   if (view.id === 'settings') renderSettings();
 }
