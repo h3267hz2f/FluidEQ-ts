@@ -9,8 +9,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // No polling timers: system volume is written by the gesture that changes it,
 // and the canvas is redrawn on the next animation frame.
 
-import { registerView } from './views/registry.js';
+import { registerView, viewFor } from './views/registry.js';
 import { equalizer } from './views/equalizer/index.js';
+import { settings } from './views/settings/index.js';
 import {
   F_MIN,
   F_MAX,
@@ -119,9 +120,17 @@ const els = {
   engineInstall: document.getElementById('engine-install'),
   engineState: document.getElementById('engine-state'),
   deviceName: document.querySelector('.device-name'),
+  pageTitle: document.getElementById('page-title'),
+  pageEyebrow: document.getElementById('page-eyebrow'),
+  presetBar: document.querySelector('.preset-bar'),
+  settingsDevice: document.getElementById('settings-device'),
+  hotkeyState: document.getElementById('hotkey-state'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
+registerView(settings);
+
+let activeView = 'equalizer';
 
 let snapshot = demoSnapshot();
 let selectedId = 4;
@@ -140,6 +149,7 @@ let presetNames = [];
 let presetBusy = false;
 let startupEnabled = false;
 let startupBusy = false;
+let hotkeyFailures = [];
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -374,7 +384,49 @@ function renderAll() {
   renderHeader();
   renderBands();
   renderInspector();
+  renderSettings();
   drawGraph();
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+function renderSettings() {
+  renderStartup();
+  const device = engineStatus?.defaultDevice;
+  els.settingsDevice.textContent = device?.name || 'System default';
+  if (hotkeyFailures.length > 0) {
+    els.hotkeyState.hidden = false;
+    els.hotkeyState.textContent = `Unavailable on this machine: ${hotkeyFailures.join('; ')}`;
+  } else {
+    els.hotkeyState.hidden = true;
+    els.hotkeyState.textContent = '';
+  }
+}
+
+// One page at a time: the rail says which, the panels carry the same id, and
+// the header follows the page rather than repeating it in each view.
+function showView(id) {
+  const view = viewFor(id) ?? equalizer;
+  if (activeView === view.id) return;
+  activeView = view.id;
+  for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]')) {
+    const current = button.dataset.view === view.id;
+    button.classList.toggle('active', current);
+    if (current) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  for (const panel of document.querySelectorAll('[data-view-panel]')) {
+    panel.hidden = panel.dataset.viewPanel !== view.id;
+  }
+  els.pageTitle.textContent = view.title;
+  els.pageEyebrow.textContent = view.eyebrow;
+  const equalizerView = view.id === 'equalizer';
+  els.presetBar.hidden = !equalizerView;
+  if (!equalizerView) els.presetForm.hidden = true;
+  if (equalizerView) scheduleDraw();
+  if (view.id === 'settings') renderSettings();
 }
 
 // ---------------------------------------------------------------------------
@@ -450,12 +502,14 @@ async function refreshHotkeys() {
   if (!invoke) return;
   try {
     const failures = await invoke('hotkey_failures');
-    if (Array.isArray(failures) && failures.length > 0) {
-      showMessage(`Global hotkeys unavailable: ${failures.join('; ')}`);
+    hotkeyFailures = Array.isArray(failures) ? failures : [];
+    if (hotkeyFailures.length > 0) {
+      showMessage(`Global hotkeys unavailable: ${hotkeyFailures.join('; ')}`);
     }
   } catch {
     // An older shell without the command has no hotkey report to show.
   }
+  renderSettings();
 }
 
 async function refreshStartup() {
@@ -759,6 +813,10 @@ els.autoHeadroom.addEventListener('click', commitAutoHeadroom);
 els.closeToTray.addEventListener('click', commitCloseToTray);
 els.startup.addEventListener('click', toggleStartup);
 
+for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]')) {
+  button.addEventListener('click', () => showView(button.dataset.view));
+}
+
 els.volume.addEventListener('input', () => {
   setVolume(Number(els.volume.value));
   scheduleVolumeWrite();
@@ -884,6 +942,7 @@ function renderEngineStatus(status) {
   const device = status?.defaultDevice;
   if (device?.name) {
     els.deviceName.textContent = device.name;
+    els.settingsDevice.textContent = device.name;
   }
   const mixRate = Number(device?.sampleRate);
   if (Number.isFinite(mixRate) && mixRate > 0 && mixRate !== sampleRate) {

@@ -243,6 +243,12 @@ button {
   margin-top: 5px;
 }
 
+/* Same trap as `.preset-form[hidden]`: the layout display above wins over the
+   user agent's `[hidden]` rule. */
+.preset-bar[hidden] {
+  display: none;
+}
+
 .preset-select {
   min-width: 0;
   max-width: 220px;
@@ -683,6 +689,66 @@ button {
 
 .stat-toggle[aria-pressed="false"] {
   color: var(--muted);
+}
+
+/* One page at a time: a panel that is not the current view is gone, not just
+   invisible under a flex display. */
+[data-view-panel][hidden] {
+  display: none;
+}
+
+.view-settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  max-width: 720px;
+  padding: 26px 28px;
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-title {
+  margin: 2px 0 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.settings-note {
+  max-width: 58ch;
+  margin: 0;
+  color: var(--muted-soft);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.keys {
+  display: inline-flex;
+  gap: 4px;
+}
+
+kbd {
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
 }
 
 .bands {

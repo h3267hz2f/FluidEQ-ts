@@ -18,7 +18,7 @@
         </div>
 
         <nav class="rail-nav" aria-label="Sections">
-          <button class="nav-btn active" type="button" aria-label="Equalizer" aria-current="page">
+          <button class="nav-btn active" type="button" aria-label="Equalizer" aria-current="page" data-view="equalizer">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 7h7M15 7h5M4 17h5M13 17h7" />
               <circle cx="13" cy="7" r="2.2" />
@@ -38,7 +38,7 @@
               <path d="M9 18v-5h6v5" />
             </svg>
           </button>
-          <button class="nav-btn" type="button" aria-label="Settings" title="Settings are not in this build yet" disabled>
+          <button class="nav-btn" type="button" aria-label="Settings" data-view="settings">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
               <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" />
@@ -57,8 +57,8 @@
       <main class="workspace">
         <header class="topbar">
           <div class="title">
-            <p class="eyebrow">Parametric equalizer</p>
-            <h1>Equalizer</h1>
+            <p id="page-eyebrow" class="eyebrow">Parametric equalizer</p>
+            <h1 id="page-title">Equalizer</h1>
             <div class="preset-bar">
               <select id="preset" class="preset-select" aria-label="EQ preset"></select>
               <button id="preset-save" class="preset-action" type="button">Save as…</button>
@@ -91,7 +91,7 @@
           </div>
         </header>
 
-        <section class="hero">
+        <section class="hero" data-view-panel="equalizer">
           <div class="card graph-card">
             <div class="graph-head">
               <div>
@@ -153,8 +153,6 @@
 
             <div class="stat-row"><span>Auto headroom</span><button id="auto-headroom" class="stat-toggle" type="button" aria-pressed="true">On</button></div>
             <div class="stat-row"><span>Bands</span><strong id="band-count">15</strong></div>
-            <div class="stat-row"><span>Start with Windows</span><button id="startup" class="stat-toggle" type="button" aria-pressed="false">Off</button></div>
-            <div class="stat-row"><span>Close to tray</span><button id="close-to-tray" class="stat-toggle" type="button" aria-pressed="true">On</button></div>
 
             <div class="divider"></div>
 
@@ -165,7 +163,34 @@
           </aside>
         </section>
 
-        <section id="bands" class="bands" aria-label="EQ bands"></section>
+        <section id="bands" class="bands" aria-label="EQ bands" data-view-panel="equalizer"></section>
+
+        <section class="view-settings" data-view-panel="settings" hidden>
+          <div class="card settings-card">
+            <div class="settings-group">
+              <p class="eyebrow">Window</p>
+              <h2 class="settings-title">Startup and tray</h2>
+              <div class="stat-row"><span>Start with Windows</span><button id="startup" class="stat-toggle" type="button" aria-pressed="false">Off</button></div>
+              <div class="stat-row"><span>Close to tray</span><button id="close-to-tray" class="stat-toggle" type="button" aria-pressed="true">On</button></div>
+              <p class="settings-note">Closing the window keeps FluidEQ running in the tray, so the equalizer stays on while nothing is on screen.</p>
+            </div>
+
+            <div class="settings-group">
+              <p class="eyebrow">Output</p>
+              <h2 class="settings-title">The output FluidEQ follows</h2>
+              <div class="stat-row"><span>Windows default output</span><strong id="settings-device">System default</strong></div>
+              <p class="settings-note">Windows tells FluidEQ when the default output moves, so a headset plugged in while this window is in the tray still gets the profile saved for it.</p>
+            </div>
+
+            <div class="settings-group">
+              <p class="eyebrow">Shortcuts</p>
+              <h2 class="settings-title">Global hotkeys</h2>
+              <div class="stat-row"><span>Bypass the chain</span><span class="keys"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>B</kbd></span></div>
+              <div class="stat-row"><span>Volume</span><span class="keys"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>↑</kbd><kbd>↓</kbd></span></div>
+              <p id="hotkey-state" class="settings-note" hidden></p>
+            </div>
+          </div>
+        </section>
 
         <footer class="statusbar">
           <span id="connection" class="connection">Connecting to the Rust shell…</span>
