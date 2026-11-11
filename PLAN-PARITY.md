@@ -29,15 +29,15 @@
 
 **目标**：任何一台 Windows 机器上，助手都能选到能真正加载的槽位，且失败原因可见。
 
-- [ ] 槽位决策回归矩阵，Rust 与 C++ 双端同用例：
+- [x] 槽位决策回归矩阵，Rust 与 C++ 双端同用例：
   - composite 列表 + EFX 被 Equalizer APO 占用 → `EfxSingle`
   - composite 列表 + EFX 被 Windows 默认 APO 占用 → `EfxSingle`
   - EFX / MFX / SFX 单值都被厂商占用 → 阶梯回退到 composite，不越权写入
   - 纯 legacy 端点、裸端点、Windows 两代默认 APO 四种 GUID 拼写
   - 文件：`rust/fluideq-state/src/apo.rs`、`native/system-apo/setup/fx_list.cpp`、`native/system-apo/tests/fx_list_test.cpp`
-- [ ] 阶梯记忆接线到实际 attach 流程：失败槽位写入 `<engine root>\slots\<guid>.txt`，下次自动跳过；验证 `first_untried_ladder_slot` 被调用而不是只存在于测试。
-- [ ] 加载失败诊断闭环：`status-<GUID>.json` 的 `loaded` 为 false 时，UI 明确显示“已写入但未实例化 / 未重启音频服务 / 运行时缺失”；补 `engine.log` 关键行解析。
-- [ ] preamp 语义收口：
+- [x] 阶梯记忆接线到实际 attach 流程：失败槽位写入 `<engine root>\slots\<guid>.txt`，下次自动跳过；验证 `first_untried_ladder_slot` 被调用而不是只存在于测试。
+- [x] 加载失败诊断闭环：`status-<GUID>.json` 的 `loaded` 为 false 时，UI 明确显示“已写入但未实例化 / 未重启音频服务 / 运行时缺失”；补 `engine.log` 关键行解析。
+- [x] preamp 语义收口：
   - 保持“auto headroom + manual trim 相加”的物理事实，但 UI 默认 manual 为 0，避免再次出现 −38 + −24 = −62 dB 的静音错觉；
   - 总增益低于 −30 dB 时给出提示（曲线峰值过高，建议降增益），而不是无声；
   - 为叠加逻辑补一个纯函数测试。
@@ -65,7 +65,7 @@
 实现要求：
 
 - [ ] UI 继续用原生 `index.html` + `app.js`，但按页面拆文件（`ui/views/*.js`），避免 `app.js` 继续膨胀。
-- [ ] 每个命令在 `fluideq-shell/src/main.rs` 注册，失败返回结构化错误而不是裸字符串。
+- [x] 每个命令在 `fluideq-shell/src/main.rs` 注册，失败返回结构化错误而不是裸字符串。
 - [ ] 复用现有 `spectrum_bridge.rs`，页面切换时遵守冷驻留的推送暂停约定。
 - [ ] 每页完成即补三条冒烟检查：空状态、正常值、越界值。
 
@@ -73,19 +73,19 @@
 
 ### P2 — Tauri 宿主生命周期（1–2 周）
 
-- [ ] 托盘图标 + 菜单（显示/隐藏、旁路、退出），关闭窗口默认最小化到托盘（可在设置中改）。
-- [ ] 单实例：第二次启动唤起已有窗口，不重复占用 owner pipe。
-- [ ] 开机启动（per-user Run 项），与安装器选项一致。
-- [ ] 全局热键：旁路开关、音量增减，冲突时提示而不静默失败。
+- [x] 托盘图标 + 菜单（显示/隐藏、旁路、退出），关闭窗口默认最小化到托盘（可在设置中改）。
+- [x] 单实例：第二次启动唤起已有窗口，不重复占用 owner pipe。
+- [x] 开机启动（per-user Run 项），与安装器选项一致。
+- [x] 全局热键：旁路开关、音量增减，冲突时提示而不静默失败。
 - [ ] 冷驻留真正落地：`residency.rs` 的状态机接入 Tauri 窗口事件，`MinimizedWarm` 停频谱推送，`ColdStandby` 销毁 webview；唤醒 50 ms 内恢复快照。
-- [ ] 窗口位置/大小/最大化状态持久化，多显示器下不越界。
+- [x] 窗口位置/大小/最大化状态持久化，多显示器下不越界。
 
 **退出标准**：关闭到托盘后内存占用与 Electron 版对比不劣化；冷驻留唤醒可重复 100 次无泄漏。
 
 ### P3 — 缺失后端能力（2–3 周）
 
 - [ ] **M11 压缩音频**：新增 `rust/fluideq-state/src/compressed_audio.rs`，按魔数分流 FLAC / Ogg / MP3 / AAC，对齐 `pcm_decoder.cpp` 的判定顺序；曲库离线响度与底噪扫描。
-- [ ] **M12 系统事务**：SHA-256 摘要、服务依赖图重启、注册表 ACL 交接从 C++ helper 迁到 Rust 或明确保留 helper 边界；先补纯逻辑单测，再上真机。
+- [x] **M12 系统事务**：SHA-256 摘要、服务依赖图重启、注册表 ACL 交接从 C++ helper 迁到 Rust 或明确保留 helper 边界；先补纯逻辑单测，再上真机。
 - [ ] **M14 发布**：签名安装包、升级/卸载回滚验证、CI 产出哈希清单。
 - [ ] 回归矩阵：Windows 10/11、Realtek / USB DAC / 蓝牙、共享模式 / 独占模式、per-user 安装。
 
