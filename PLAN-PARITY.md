@@ -75,7 +75,7 @@
 | 顺序 | 模块 | 具体交付内容 | 复用后端 |
 | --- | --- | --- | --- |
 | 1 | **Tone 与高低切控件** | [x] 已完成：EQ 页补齐 Bass / Treble 搁架、Low cut / High cut 频率控制、EQ 模型（Clean / Proportional Q / Wide / Asymmetric）、Character 强度与 Matched treble 开关，同步到 APO 配置与实时曲线 | `ToneSettings`、`set_tone_and_voicing` |
-| 2 | **OPRA 耳机库选择器** | 暴露品牌/型号检索与曲线应用命令（`list_opra_vendors` / `list_opra_models` / `apply_opra_curve`），在 EQ 页或独立面板提供离线耳机纠偏选择 | `opra.rs`、`apply_opra_headphone_curve`、`/opra/curves` |
+| 2 | **OPRA 耳机库选择器** | [x] 已完成：暴露品牌与型号检索命令（`list_opra_vendors` / `list_opra_models` / `apply_opra_curve`），在 EQ 检查器中提供离线耳机库级联选择与一键曲线校准应用 | `opra.rs`、`apply_opra_headphone_curve`、`/opra/curves` |
 | 3 | **Room 独立页（启用导航）** | 解锁导航栏 Room 按钮：房间预设选择、KEMAR 头型（Small/Medium/Large）切换、尺寸/墙面/混响/距离/交叉频率/低音管理控制 | `room_heads.rs`、`load_room_head_from_text`、`FeqChainRoomSettings` |
 | 4 | **频谱与多级电表接入** | 将 `spectrum_bridge.rs` 接入 Tauri 事件循环，在 EQ 曲线底部绘制实时频谱，遵守 `MinimizedWarm` 暂停推送约定 | `spectrum_bridge.rs`、`residency.rs` |
 | 5 | **DSP 机架进阶控制** | 补齐各阶段 `isolate`（只听差值）开关、Normalizer 模式切换（Off / Guard / Leveler）、Master 交付目标预设（Streaming -14 LUFS / Cinema / Reference 等） | `FeqChainSettings`、`persistence.rs`（启动自动清零 `isolate`） |

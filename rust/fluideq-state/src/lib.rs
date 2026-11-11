@@ -438,6 +438,27 @@ impl AppStateStore {
         self.snapshot()
     }
 
+    /// Discovers all vendor slugs available in `opra_curves_dir` (including built-in fallbacks).
+    pub fn list_opra_vendors(&self, opra_curves_dir: &Path) -> Vec<String> {
+        let mut vendors = OpraShardCache::discover_vendor_slugs_in_dir(opra_curves_dir);
+        for fallback in ["sennheiser", "sony", "hifiman", "moondrop"] {
+            if !vendors.iter().any(|v| v.eq_ignore_ascii_case(fallback)) {
+                vendors.push(fallback.to_string());
+            }
+        }
+        vendors.sort();
+        vendors
+    }
+
+    /// Lists model slugs available for `vendor_slug`.
+    pub fn list_opra_models(
+        &mut self,
+        opra_curves_dir: &Path,
+        vendor_slug: &str,
+    ) -> Result<Vec<String>, String> {
+        self.opra_cache.list_products_for_vendor(opra_curves_dir, vendor_slug)
+    }
+
     /// Resolves and applies an OPRA headphone curve from `/opra/curves/<vendor_slug>.json`
     /// (or the D–Z flagship fallback catalog), updating `bands`, `preamp_db`, and `active_preset_name`.
     pub fn apply_opra_headphone_curve(
@@ -1203,5 +1224,25 @@ mod tests {
         assert_eq!(snap.eq_curve_db.len(), 160);
         // Bass shelf of +12 dB at 105 Hz should make 20 Hz low frequencies boosted > 6 dB
         assert!(snap.eq_curve_db[0] > 6.0);
+    }
+
+    #[test]
+    fn opra_vendor_listing_and_curve_application() {
+        let mut store = AppStateStore::new(48_000.0);
+        let curves_dir = std::path::Path::new("opra/curves");
+        let vendors = store.list_opra_vendors(curves_dir);
+        assert!(!vendors.is_empty());
+        assert!(vendors.iter().any(|v| v == "sennheiser"));
+        assert!(vendors.iter().any(|v| v == "sony"));
+
+        let models = store.list_opra_models(curves_dir, "sennheiser").unwrap();
+        assert!(models.contains(&"hd_600".to_string()));
+
+        let resolved = store
+            .apply_opra_headphone_curve(curves_dir, "sennheiser", "hd_600", None)
+            .unwrap();
+        assert!(resolved.contains("hd_600"));
+        assert_eq!(store.snapshot().active_preset_name, resolved);
+        assert!(store.snapshot().preamp_db < 0.0);
     }
 }

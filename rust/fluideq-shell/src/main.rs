@@ -50,6 +50,25 @@ fn presets_dir(state: &ShellState) -> PathBuf {
     state.data_dir.join("presets")
 }
 
+fn opra_curves_dir(app: &tauri::AppHandle) -> PathBuf {
+    if let Ok(resource_dir) = app.path().resolve("opra/curves", tauri::path::BaseDirectory::Resource) {
+        if resource_dir.exists() {
+            return resource_dir;
+        }
+    }
+    let local = PathBuf::from("opra/curves");
+    if local.exists() {
+        return local;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("opra").join("curves");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    local
+}
+
 fn store_of(state: &ShellState) -> Result<MutexGuard<'_, AppStateStore>, String> {
     state
         .store
@@ -397,6 +416,45 @@ fn clear_ir(state: State<'_, ShellState>) -> Result<AppStateSnapshot, String> {
         apo_bridge::remove_convolution(&folder);
         let _ = apo_bridge::publish(&snapshot);
     }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn list_opra_vendors(app: tauri::AppHandle, state: State<'_, ShellState>) -> Vec<String> {
+    let dir = opra_curves_dir(&app);
+    let store = match store_of(&state) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    store.list_opra_vendors(&dir)
+}
+
+#[tauri::command]
+fn list_opra_models(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    vendor: String,
+) -> Result<Vec<String>, String> {
+    let dir = opra_curves_dir(&app);
+    let mut store = store_of(&state)?;
+    store.list_opra_models(&dir, &vendor)
+}
+
+#[tauri::command]
+fn apply_opra_curve(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    vendor: String,
+    product: String,
+    curve_id: Option<String>,
+) -> Result<AppStateSnapshot, String> {
+    let dir = opra_curves_dir(&app);
+    let mut store = store_of(&state)?;
+    store.apply_opra_headphone_curve(&dir, &vendor, &product, curve_id.as_deref())?;
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
     Ok(snapshot)
 }
 
@@ -911,6 +969,9 @@ fn main() {
             game_watch_available,
             load_ir,
             clear_ir,
+            list_opra_vendors,
+            list_opra_models,
+            apply_opra_curve,
             get_output_volume,
             set_output_volume,
             engine_status,

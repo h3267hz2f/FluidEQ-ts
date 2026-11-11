@@ -142,6 +142,10 @@ const els = {
   irFile: document.getElementById('ir-file'),
   irState: document.getElementById('ir-state'),
   irClear: document.getElementById('ir-clear'),
+  opraVendor: document.getElementById('opra-vendor'),
+  opraModel: document.getElementById('opra-model'),
+  opraStatus: document.getElementById('opra-status'),
+  opraClear: document.getElementById('opra-clear'),
   bandCount: document.getElementById('band-count'),
   chainState: document.getElementById('chain-state'),
   connection: document.getElementById('connection'),
@@ -205,6 +209,10 @@ let hotkeyFailures = [];
 let gameRules = [];
 let gameWatchAvailable = false;
 let selectedRackStage = 'normalizer';
+let opraVendors = [];
+let opraModels = [];
+let activeOpraVendor = '';
+let activeOpraModel = '';
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -515,6 +523,118 @@ function renderAll() {
   if (activeView === 'config') renderConfig();
   if (activeView === 'rack') renderRack();
   drawGraph();
+}
+
+// ---------------------------------------------------------------------------
+// OPRA Headphone Library
+// ---------------------------------------------------------------------------
+
+function formatBrandName(slug) {
+  return String(slug || '')
+    .split('_')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function renderOpraVendors() {
+  const fragment = document.createDocumentFragment();
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select brand…';
+  fragment.appendChild(placeholder);
+  for (const vendor of opraVendors) {
+    const opt = document.createElement('option');
+    opt.value = vendor;
+    opt.textContent = formatBrandName(vendor);
+    fragment.appendChild(opt);
+  }
+  els.opraVendor.replaceChildren(fragment);
+  els.opraVendor.value = activeOpraVendor;
+}
+
+function renderOpraModels() {
+  const fragment = document.createDocumentFragment();
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select model…';
+  fragment.appendChild(placeholder);
+  for (const model of opraModels) {
+    const opt = document.createElement('option');
+    opt.value = model;
+    opt.textContent = formatBrandName(model);
+    fragment.appendChild(opt);
+  }
+  els.opraModel.replaceChildren(fragment);
+  els.opraModel.value = activeOpraModel;
+}
+
+async function refreshOpraVendors() {
+  if (!invoke) return;
+  try {
+    opraVendors = await invoke('list_opra_vendors');
+    renderOpraVendors();
+  } catch {
+    // Non-fatal if OPRA directory is missing
+  }
+}
+
+async function selectOpraVendor(vendor) {
+  activeOpraVendor = vendor;
+  activeOpraModel = '';
+  if (!vendor || !invoke) {
+    els.opraModel.disabled = true;
+    els.opraModel.replaceChildren();
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'Select model…';
+    els.opraModel.appendChild(opt);
+    return;
+  }
+  try {
+    opraModels = await invoke('list_opra_models', { vendor });
+    renderOpraModels();
+    els.opraModel.disabled = opraModels.length === 0;
+  } catch (error) {
+    showMessage(`Could not list models for ${vendor}: ${error}`);
+  }
+}
+
+async function applyOpraModel(model) {
+  if (!model || !activeOpraVendor || !invoke) return;
+  activeOpraModel = model;
+  try {
+    snapshot = await invoke('apply_opra_curve', {
+      vendor: activeOpraVendor,
+      product: model,
+      curveId: null,
+    });
+    clearMessage();
+    showMessage(
+      `Applied correction for ${formatBrandName(activeOpraVendor)} ${formatBrandName(model)}`,
+      'ok',
+    );
+    els.opraStatus.hidden = false;
+    els.opraStatus.textContent = `Correction applied: ${snapshot.active_preset_name}`;
+    els.opraClear.hidden = false;
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not apply curve for ${model}: ${error}`);
+  }
+}
+
+function clearOpraSelection() {
+  activeOpraVendor = '';
+  activeOpraModel = '';
+  els.opraVendor.value = '';
+  els.opraModel.replaceChildren();
+  const opt = document.createElement('option');
+  opt.value = '';
+  opt.textContent = 'Select model…';
+  els.opraModel.appendChild(opt);
+  els.opraModel.disabled = true;
+  els.opraStatus.hidden = true;
+  els.opraStatus.textContent = '';
+  els.opraClear.hidden = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,6 +1528,10 @@ els.resetTone.addEventListener('click', () => {
   commitToneAndVoicing();
 });
 
+els.opraVendor.addEventListener('change', () => selectOpraVendor(els.opraVendor.value));
+els.opraModel.addEventListener('change', () => applyOpraModel(els.opraModel.value));
+els.opraClear.addEventListener('click', clearOpraSelection);
+
 for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]')) {
   button.addEventListener('click', () => showView(button.dataset.view));
 }
@@ -1709,6 +1833,7 @@ async function boot() {
     refreshStartup();
     refreshHotkeys();
     refreshGameRules();
+    refreshOpraVendors();
   } catch (error) {
     setConnection('Rust state centre unavailable', 'preview');
     showMessage(`Could not read the state: ${error}`);

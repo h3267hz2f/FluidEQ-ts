@@ -221,6 +221,26 @@
             <input id="ir-file" type="file" accept=".wav,.aif,.aiff" hidden />
             <p id="ir-state" class="ir-state">No impulse response</p>
             <button id="ir-clear" class="ghost" type="button" hidden>Clear impulse response</button>
+
+            <div class="divider"></div>
+
+            <div class="inspector-subhead">
+              <p class="eyebrow">Headphone library (OPRA)</p>
+              <button id="opra-clear" class="preset-action" type="button" hidden>Clear</button>
+            </div>
+            <div class="stat-row">
+              <span>Brand</span>
+              <select id="opra-vendor" class="preset-select inspector-select" aria-label="Headphone brand">
+                <option value="">Select brand…</option>
+              </select>
+            </div>
+            <div class="stat-row">
+              <span>Model</span>
+              <select id="opra-model" class="preset-select inspector-select" aria-label="Headphone model" disabled>
+                <option value="">Select model…</option>
+              </select>
+            </div>
+            <p id="opra-status" class="settings-note" hidden></p>
           </aside>
         </section>
 

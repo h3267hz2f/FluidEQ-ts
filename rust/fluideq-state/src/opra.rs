@@ -187,6 +187,18 @@ impl OpraShardCache {
         Ok((resolved_id.clone(), spec.gain_db, bands))
     }
 
+    /// Lists all product model slugs for `vendor_slug` in sorted order.
+    pub fn list_products_for_vendor(
+        &mut self,
+        opra_curves_dir: &Path,
+        vendor_slug: &str,
+    ) -> Result<Vec<String>, String> {
+        let shard = self.load_vendor_from_dir(opra_curves_dir, vendor_slug)?;
+        let mut products: Vec<String> = shard.keys().cloned().collect();
+        products.sort();
+        Ok(products)
+    }
+
     /// Enumerates all `<vendor_slug>.json` files present in `opra_curves_dir` in sorted order.
     pub fn discover_vendor_slugs_in_dir(opra_curves_dir: &Path) -> Vec<String> {
         let Ok(entries) = fs::read_dir(opra_curves_dir) else {
