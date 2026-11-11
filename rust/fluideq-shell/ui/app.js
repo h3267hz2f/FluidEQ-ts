@@ -446,6 +446,18 @@ function renderStartup() {
   els.startup.setAttribute('aria-pressed', String(startupEnabled));
 }
 
+async function refreshHotkeys() {
+  if (!invoke) return;
+  try {
+    const failures = await invoke('hotkey_failures');
+    if (Array.isArray(failures) && failures.length > 0) {
+      showMessage(`Global hotkeys unavailable: ${failures.join('; ')}`);
+    }
+  } catch {
+    // An older shell without the command has no hotkey report to show.
+  }
+}
+
 async function refreshStartup() {
   if (!invoke) return renderStartup();
   try {
@@ -1005,6 +1017,7 @@ async function boot() {
     refreshEngineStatus();
     refreshPresets();
     refreshStartup();
+    refreshHotkeys();
   } catch (error) {
     setConnection('Rust state centre unavailable', 'preview');
     showMessage(`Could not read the state: ${error}`);
@@ -1033,5 +1046,9 @@ TAURI?.event?.listen?.('snapshot', (event) => {
   snapshot = event.payload;
   renderAll();
 });
+
+// The volume hotkeys change Windows directly; the slider follows the same
+// number rather than waiting for the next focus to notice.
+TAURI?.event?.listen?.('volume', (event) => setVolume(event.payload));
 
 boot();

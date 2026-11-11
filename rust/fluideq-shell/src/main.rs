@@ -17,6 +17,7 @@ pub mod audio_endpoint;
 pub mod engine_host;
 pub mod engine_setup;
 pub mod host_runtime;
+pub mod hotkeys;
 pub mod ipc;
 pub mod spectrum_bridge;
 pub mod startup;
@@ -286,6 +287,11 @@ fn set_close_to_tray(
 }
 
 #[tauri::command]
+fn hotkey_failures() -> Vec<String> {
+    hotkeys::failures()
+}
+
+#[tauri::command]
 fn get_startup_enabled() -> Result<bool, String> {
     startup::enabled()
 }
@@ -463,6 +469,12 @@ fn toggle_bypass(app: &tauri::AppHandle) -> Option<AppStateSnapshot> {
     Some(snapshot)
 }
 
+fn toggle_bypass_hotkey(app: &tauri::AppHandle) {
+    if let Some(snapshot) = toggle_bypass(app) {
+        let _ = app.emit("snapshot", snapshot);
+    }
+}
+
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     // No separate tray asset: the window icon is already embedded by the
     // bundle, and the tray is not a second place to keep one.
@@ -609,6 +621,7 @@ fn main() {
                 host,
             });
             setup_tray(app)?;
+            hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
             // Closing the window puts FluidEQ in the tray: the engine keeps
             // processing and the curve is one click away, and quit is an
             // explicit tray entry rather than an accident of the X button.
@@ -664,6 +677,7 @@ fn main() {
             get_startup_enabled,
             set_startup_enabled,
             set_close_to_tray,
+            hotkey_failures,
         ])
         .build(tauri::generate_context!())
         .expect("FluidEQ failed to start");
