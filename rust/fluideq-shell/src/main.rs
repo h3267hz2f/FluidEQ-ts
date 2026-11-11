@@ -21,11 +21,12 @@ pub mod ipc;
 pub mod spectrum_bridge;
 pub mod system_daemons;
 
+use fluideq_state::residency::WindowResidencyMode;
 use fluideq_state::{AppStateSnapshot, AppStateStore};
 use ipc::{dispatch_ipc_command, ShellIpcCommand, ShellIpcResponse};
 use serde_json::Value;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -303,6 +304,113 @@ fn run_stdio_ipc_loop() {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct WindowPlacement {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    maximized: bool,
+}
+
+/// A restored window has to leave a usable piece on one monitor: a titlebar
+/// corner is not enough to drag it back if the monitor it was saved on is gone.
+fn placement_is_visible(placement: &WindowPlacement, monitors: &[(i32, i32, u32, u32)]) -> bool {
+    const MIN_VISIBLE: i64 = 96;
+    monitors.iter().any(|&(mx, my, mw, mh)| {
+        let monitor_right = i64::from(mx) + i64::from(mw);
+        let monitor_bottom = i64::from(my) + i64::from(mh);
+        let window_right = i64::from(placement.x) + i64::from(placement.width);
+        let window_bottom = i64::from(placement.y) + i64::from(placement.height);
+        let overlap_width =
+            window_right.min(monitor_right) - i64::from(placement.x).max(i64::from(mx));
+        let overlap_height =
+            window_bottom.min(monitor_bottom) - i64::from(placement.y).max(i64::from(my));
+        overlap_width >= MIN_VISIBLE && overlap_height >= MIN_VISIBLE
+    })
+}
+
+fn load_window_placement(path: &Path) -> Option<WindowPlacement> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn save_window_placement(path: &Path, window: &tauri::WebviewWindow) {
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else {
+        return;
+    };
+    let placement = WindowPlacement {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized: window.is_maximized().unwrap_or(false),
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&placement) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn restore_window_placement(window: &tauri::WebviewWindow, path: &Path) {
+    let Some(saved) = load_window_placement(path) else {
+        return;
+    };
+    let monitors: Vec<(i32, i32, u32, u32)> = window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            (position.x, position.y, size.width, size.height)
+        })
+        .collect();
+    if monitors.is_empty() || !placement_is_visible(&saved, &monitors) {
+        return;
+    }
+    if saved.width > 0 && saved.height > 0 {
+        let _ = window.set_size(tauri::PhysicalSize::new(saved.width, saved.height));
+    }
+    let _ = window.set_position(tauri::PhysicalPosition::new(saved.x, saved.y));
+    if saved.maximized {
+        let _ = window.maximize();
+    }
+}
+
+/// A minimized window stops the meters; the curve and the chain keep running.
+fn minimize_to_warm(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let Ok(mut store) = state.store.lock() else {
+        return;
+    };
+    if store.residency_mode() == WindowResidencyMode::MinimizedWarm {
+        return;
+    }
+    let memory = store.enter_minimized_warm();
+    drop(store);
+    let _ = app.emit("residency", memory);
+}
+
+/// Coming back to the window restores the live meters and the full snapshot.
+fn wake_from_residency(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let Ok(mut store) = state.store.lock() else {
+        return;
+    };
+    if store.residency_mode() == WindowResidencyMode::Active {
+        return;
+    }
+    let snapshot = store.wake_to_active();
+    drop(store);
+    let _ = app.emit("snapshot", snapshot);
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -470,6 +578,7 @@ fn main() {
             // A dev build without the staged engine records the failure in the
             // host status; the window still opens.
             let _ = host.start();
+            let placement_path = data_dir.join("window.json");
             app.manage(ShellState {
                 store: Mutex::new(store),
                 state_path,
@@ -481,12 +590,23 @@ fn main() {
             // processing and the curve is one click away, and quit is an
             // explicit tray entry rather than an accident of the X button.
             if let Some(window) = app.get_webview_window("main") {
+                restore_window_placement(&window, &placement_path);
                 let window_for_event = window.clone();
-                window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
+                let placement_path_for_event = placement_path.clone();
+                let app_for_event = app.handle().clone();
+                window.on_window_event(move |event| match event {
+                    WindowEvent::CloseRequested { api, .. } => {
+                        save_window_placement(&placement_path_for_event, &window_for_event);
                         api.prevent_close();
                         let _ = window_for_event.hide();
                     }
+                    WindowEvent::Resized(_)
+                        if window_for_event.is_minimized().unwrap_or(false) =>
+                    {
+                        minimize_to_warm(&app_for_event);
+                    }
+                    WindowEvent::Focused(true) => wake_from_residency(&app_for_event),
+                    _ => {}
                 });
             }
             Ok(())
@@ -513,7 +633,75 @@ fn main() {
         .expect("FluidEQ failed to start");
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(window) = app.get_webview_window("main") {
+                let path = app.state::<ShellState>().data_dir.join("window.json");
+                save_window_placement(&path, &window);
+            }
             app.state::<ShellState>().host.shutdown();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MONITORS: [(i32, i32, u32, u32); 2] =
+        [(0, 0, 1920, 1080), (-2560, 0, 2560, 1440)];
+
+    #[test]
+    fn window_placements_lost_off_screen_are_not_restored() {
+        let inside = WindowPlacement {
+            x: 100,
+            y: 100,
+            width: 1280,
+            height: 720,
+            maximized: false,
+        };
+        assert!(placement_is_visible(&inside, &MONITORS));
+
+        let on_left_monitor = WindowPlacement {
+            x: -2000,
+            y: 200,
+            ..inside
+        };
+        assert!(placement_is_visible(&on_left_monitor, &MONITORS));
+
+        let off_screen = WindowPlacement {
+            x: 5000,
+            y: 100,
+            ..inside
+        };
+        assert!(!placement_is_visible(&off_screen, &MONITORS));
+
+        // A 20px sliver is not enough to grab the titlebar and drag it back.
+        let sliver = WindowPlacement {
+            x: 1900,
+            y: 100,
+            ..inside
+        };
+        assert!(!placement_is_visible(&sliver, &MONITORS));
+        assert!(!placement_is_visible(&inside, &[]));
+    }
+
+    #[test]
+    fn a_window_placement_round_trips_through_its_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "fluideq-window-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let path = directory.join("window.json");
+        let placement = WindowPlacement {
+            x: -12,
+            y: 40,
+            width: 1440,
+            height: 900,
+            maximized: true,
+        };
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, serde_json::to_string(&placement).unwrap()).unwrap();
+        assert_eq!(load_window_placement(&path), Some(placement));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

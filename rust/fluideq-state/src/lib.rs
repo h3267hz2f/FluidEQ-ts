@@ -668,6 +668,10 @@ impl AppStateStore {
         self.snapshot()
     }
 
+    pub fn residency_mode(&self) -> WindowResidencyMode {
+        self.residency.mode()
+    }
+
     pub fn set_audio_signal_active(&mut self, active: bool) -> MemoryFootprintEstimate {
         self.residency.set_audio_signal_active(active);
         let should_meter = self.residency.should_enable_native_meters();
