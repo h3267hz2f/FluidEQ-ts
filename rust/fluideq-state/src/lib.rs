@@ -661,6 +661,7 @@ impl AppStateStore {
             active_preset_name: self.active_preset_name.clone(),
             preamp_db: self.preamp_db,
             matched_treble: self.matched_treble,
+            eq_model: self.eq_model_name().to_string(),
             eq_model_amount: self.eq_model_amount,
             tone: self.tone.clone(),
             bands: self.bands.clone(),
@@ -669,6 +670,7 @@ impl AppStateStore {
             self.active_preset_name = restored.active_preset_name;
             self.preamp_db = restored.preamp_db;
             self.matched_treble = restored.matched_treble;
+            self.eq_model = Self::parse_eq_model(&restored.eq_model);
             self.eq_model_amount = restored.eq_model_amount;
             self.tone = restored.tone;
             self.bands = restored.bands;
@@ -689,6 +691,10 @@ impl AppStateStore {
         let mut hooks = residency::NativeResidencyHookBridge::new();
         let _ = self.apply_residency_transition_with_hooks(WindowResidencyMode::Active, &mut hooks);
         self.snapshot()
+    }
+
+    pub fn active_device_guid(&self) -> Option<&str> {
+        self.device_profiles.active_device_guid.as_deref()
     }
 
     pub fn residency_mode(&self) -> WindowResidencyMode {

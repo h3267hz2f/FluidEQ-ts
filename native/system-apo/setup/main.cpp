@@ -373,7 +373,11 @@ int print_status() {
   DefaultEndpoint default_output;
   std::wstring default_error;
   if (default_render_endpoint(default_output, default_error)) {
-    out += L",\"defaultDevice\":{\"name\":\"";
+    // The GUID is the identity the app keys per-output profiles by; the name
+    // is only what it shows.
+    out += L",\"defaultDevice\":{\"guid\":\"";
+    out += json_escape(default_output.guid);
+    out += L"\",\"name\":\"";
     out += json_escape(default_output.name);
     out += L"\",\"sampleRate\":";
     out += std::to_wstring(default_output.sample_rate);

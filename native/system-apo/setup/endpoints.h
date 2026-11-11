@@ -37,6 +37,8 @@ bool list_render_endpoints(std::vector<Endpoint>& out, std::wstring& error);
 
 /** What the user is actually listening on, and the rate it mixes at. */
 struct DefaultEndpoint {
+  /** The endpoint's `{GUID}`, upper cased, or empty if it would not answer. */
+  std::wstring guid;
   std::wstring name;
   /** The mix format's rate, or 0 when the endpoint would not answer. */
   unsigned long sample_rate = 0;

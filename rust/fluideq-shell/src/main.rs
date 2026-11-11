@@ -292,6 +292,29 @@ fn hotkey_failures() -> Vec<String> {
 }
 
 #[tauri::command]
+fn follow_output_device(
+    state: State<'_, ShellState>,
+    guid: String,
+    name: String,
+) -> Result<Option<AppStateSnapshot>, String> {
+    let normalized = fluideq_state::device_profiles::normalize_endpoint_guid(&guid);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let mut store = store_of(&state)?;
+    if store.active_device_guid() == Some(normalized.as_str()) {
+        return Ok(None);
+    }
+    let snapshot = store.switch_active_output_device(&guid, &name);
+    save(&store, &state);
+    state
+        .host
+        .apply_chain(&store.export_wire_parameters(), snapshot.revision as u32);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(Some(snapshot))
+}
+
+#[tauri::command]
 fn get_startup_enabled() -> Result<bool, String> {
     startup::enabled()
 }
@@ -678,6 +701,7 @@ fn main() {
             set_startup_enabled,
             set_close_to_tray,
             hotkey_failures,
+            follow_output_device,
         ])
         .build(tauri::generate_context!())
         .expect("FluidEQ failed to start");

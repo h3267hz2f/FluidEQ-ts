@@ -179,6 +179,11 @@ bool default_render_endpoint(DefaultEndpoint& out, std::wstring& error) {
             describe_hresult(made);
     return false;
   }
+  LPWSTR id = nullptr;
+  if (SUCCEEDED(device.get()->GetId(&id)) && id != nullptr) {
+    out.guid = guid_from_device_id(id);
+    CoTaskMemFree(id);
+  }
   out.name = friendly_name(device.get());
   ComPtr<IAudioClient> client;
   const HRESULT activated = device.get()->Activate(

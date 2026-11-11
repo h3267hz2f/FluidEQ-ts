@@ -25,6 +25,8 @@ pub struct DeviceEndpointProfile {
     pub active_preset_name: String,
     pub preamp_db: f64,
     pub matched_treble: bool,
+    #[serde(default)]
+    pub eq_model: String,
     pub eq_model_amount: f64,
     pub tone: ToneSettings,
     pub bands: Vec<EqBandSpec>,
@@ -110,6 +112,7 @@ mod tests {
             active_preset_name: "Speakers Warm".to_string(),
             preamp_db: -1.5,
             matched_treble: true,
+            eq_model: "Flat".to_string(),
             eq_model_amount: 1.0,
             tone: tone.clone(),
             bands: vec![],
@@ -123,6 +126,7 @@ mod tests {
             active_preset_name: "Speakers Warm".to_string(),
             preamp_db: -1.5,
             matched_treble: true,
+            eq_model: "Flat".to_string(),
             eq_model_amount: 1.0,
             tone: tone.clone(),
             bands: vec![],
@@ -138,6 +142,7 @@ mod tests {
                 active_preset_name: "HD 600 Harman".to_string(),
                 preamp_db: -5.2,
                 matched_treble: true,
+                eq_model: "HD 600".to_string(),
                 eq_model_amount: 1.0,
                 tone: tone.clone(),
                 bands: vec![],
@@ -155,6 +160,7 @@ mod tests {
                 active_preset_name: restored_speakers.active_preset_name.clone(),
                 preamp_db: restored_speakers.preamp_db,
                 matched_treble: true,
+                eq_model: "HD 600".to_string(),
                 eq_model_amount: 1.0,
                 tone: tone.clone(),
                 bands: vec![],
@@ -163,5 +169,6 @@ mod tests {
             .expect("Headset profile should be restored");
         assert_eq!(restored_headset_again.active_preset_name, "HD 600 Harman");
         assert_eq!(restored_headset_again.preamp_db, -5.2);
+        assert_eq!(restored_headset_again.eq_model, "HD 600");
     }
 }

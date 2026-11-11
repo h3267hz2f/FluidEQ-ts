@@ -963,9 +963,28 @@ async function refreshEngineHost() {
   }
 }
 
+async function followDefaultDevice(status) {
+  const device = status?.defaultDevice;
+  if (!invoke || !device?.guid || !device?.name) return;
+  try {
+    const followed = await invoke('follow_output_device', {
+      guid: device.guid,
+      name: device.name,
+    });
+    if (followed) {
+      snapshot = followed;
+      renderAll();
+    }
+  } catch (error) {
+    showMessage(`Could not follow the default output: ${error}`);
+  }
+}
+
 async function refreshEngineStatus() {
   try {
-    renderEngineStatus(await invoke('engine_status'));
+    const status = await invoke('engine_status');
+    renderEngineStatus(status);
+    await followDefaultDevice(status);
   } catch (error) {
     els.engineActivation.hidden = false;
     els.engineActivation.classList.remove('active');
