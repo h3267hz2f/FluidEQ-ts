@@ -170,6 +170,53 @@
 
             <div class="divider"></div>
 
+            <div class="inspector-subhead">
+              <p class="eyebrow">Tone &amp; voicing</p>
+              <button id="reset-tone" class="preset-action" type="button">Reset tone</button>
+            </div>
+
+            <label class="control">
+              <span>Bass <output id="tone-bass-value">0.0 dB</output></span>
+              <input id="tone-bass" class="range" type="range" min="-12" max="12" step="0.1" value="0" />
+            </label>
+
+            <label class="control">
+              <span>Treble <output id="tone-treble-value">0.0 dB</output></span>
+              <input id="tone-treble" class="range" type="range" min="-12" max="12" step="0.1" value="0" />
+            </label>
+
+            <label class="control">
+              <span>Low cut <output id="tone-low-cut-value">20 Hz</output></span>
+              <input id="tone-low-cut" class="range" type="range" min="20" max="250" step="1" value="20" />
+            </label>
+
+            <label class="control">
+              <span>High cut <output id="tone-high-cut-value">20 kHz</output></span>
+              <input id="tone-high-cut" class="range" type="range" min="4000" max="20000" step="50" value="20000" />
+            </label>
+
+            <div class="stat-row">
+              <span>EQ model</span>
+              <select id="eq-model" class="preset-select inspector-select" aria-label="EQ model">
+                <option value="clean">Clean</option>
+                <option value="proportional">Proportional Q</option>
+                <option value="wide">Wide tone</option>
+                <option value="asymmetric">Asymmetric</option>
+              </select>
+            </div>
+
+            <label class="control">
+              <span>Character <output id="eq-model-amount-value">100%</output></span>
+              <input id="eq-model-amount" class="range" type="range" min="0" max="1" step="0.01" value="1" />
+            </label>
+
+            <div class="stat-row">
+              <span>Matched treble</span>
+              <button id="matched-treble" class="stat-toggle" type="button" aria-pressed="true">Precise</button>
+            </div>
+
+            <div class="divider"></div>
+
             <div class="stat-row"><span>Convolution</span><button id="ir-load" class="stat-toggle" type="button">Load IR…</button></div>
             <input id="ir-file" type="file" accept=".wav,.aif,.aiff" hidden />
             <p id="ir-state" class="ir-state">No impulse response</p>

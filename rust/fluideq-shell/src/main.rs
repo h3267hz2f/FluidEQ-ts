@@ -210,6 +210,31 @@ fn set_auto_headroom(
     Ok(snapshot)
 }
 
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn set_tone_and_voicing(
+    state: State<'_, ShellState>,
+    bass_db: f64,
+    treble_db: f64,
+    low_cut_hz: f64,
+    high_cut_hz: f64,
+    eq_model: String,
+    eq_model_amount: f64,
+    matched_treble: bool,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let mut tone = store.snapshot().tone;
+    tone.bass_db = bass_db;
+    tone.treble_db = treble_db;
+    tone.low_cut_hz = low_cut_hz;
+    tone.high_cut_hz = high_cut_hz;
+    let snapshot = store.set_tone_and_voicing(tone, &eq_model, eq_model_amount, matched_treble);
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
 #[tauri::command]
 fn set_stage_enabled(
     state: State<'_, ShellState>,
@@ -872,6 +897,7 @@ fn main() {
             set_master_power,
             set_preamp_db,
             set_auto_headroom,
+            set_tone_and_voicing,
             set_stage_enabled,
             set_stage_parameter,
             set_band_gain,

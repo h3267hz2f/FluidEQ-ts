@@ -18,11 +18,54 @@ const PAD = { left: 44, right: 20, top: 10, bottom: 22 };
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
-function coefficients(band, sampleRate) {
+function modelledQuality(filterType, gainDb, quality, eqModel, eqModelAmount) {
+  const q = clamp(Number.isFinite(quality) ? quality : Math.SQRT1_2, 0.1, 18);
+  const noGain =
+    filterType === 'BP' ||
+    filterType === 'LPQ' ||
+    filterType === 'HPQ' ||
+    filterType === 'NO';
+  const model = String(eqModel || 'clean').toLowerCase();
+  const amount = clamp(Number(eqModelAmount) || 0, 0, 1);
+  if (
+    model === 'clean' ||
+    model === 'feq_eq_model_clean' ||
+    amount <= 0 ||
+    !Number.isFinite(gainDb) ||
+    gainDb === 0 ||
+    noGain
+  ) {
+    return q;
+  }
+  const driven = Math.min(Math.abs(gainDb), 20);
+  const narrowing = Math.sqrt(1 + driven / 12);
+  const factor = 1 + amount * (narrowing - 1);
+  if (model === 'proportional' || model === 'feq_eq_model_proportional') {
+    return Math.min(q * factor, 18);
+  }
+  if (model === 'asymmetric' || model === 'feq_eq_model_asymmetric') {
+    const shaped = gainDb > 0 ? q / factor : q * factor;
+    return clamp(shaped, 0.25, 18);
+  }
+  if (model === 'wide' || model === 'feq_eq_model_wide') {
+    const isShelf = filterType === 'LSC' || filterType === 'HSC';
+    const full = isShelf ? 0.4 : 0.45;
+    return Math.max(q * (1 - amount * (1 - full)), 0.25);
+  }
+  return q;
+}
+
+function coefficients(band, sampleRate, eqModel = 'clean', eqModelAmount = 1) {
   const frequency = clamp(Number(band.frequency) || 1000, 10, sampleRate / 2 - 1);
-  const q = clamp(Number(band.quality) || 1, 0.05, 40);
-  const gain = clamp(Number(band.gain_db) || 0, -60, 60);
   const type = band.filter_type || 'PK';
+  const gain = clamp(Number(band.gain_db) || 0, -60, 60);
+  const q = modelledQuality(
+    type,
+    gain,
+    clamp(Number(band.quality) || 1, 0.05, 40),
+    eqModel,
+    eqModelAmount,
+  );
   const w0 = (2 * Math.PI * frequency) / sampleRate;
   const cosw = Math.cos(w0);
   const sinw = Math.sin(w0);
@@ -106,8 +149,8 @@ function coefficients(band, sampleRate) {
   };
 }
 
-function magnitudeDb(band, frequency, sampleRate) {
-  const c = coefficients(band, sampleRate);
+function magnitudeDb(band, frequency, sampleRate, eqModel = 'clean', eqModelAmount = 1) {
+  const c = coefficients(band, sampleRate, eqModel, eqModelAmount);
   const w = (2 * Math.PI * frequency) / sampleRate;
   const cosw = Math.cos(w);
   const sinw = Math.sin(w);
@@ -124,10 +167,74 @@ function magnitudeDb(band, frequency, sampleRate) {
   return 20 * Math.log10(Math.max(numerator / Math.max(denominator, 1e-12), 1e-9));
 }
 
-function responseDb(bands, preampDb, frequency, sampleRate) {
+function responseDb(
+  bands,
+  preampDb,
+  frequency,
+  sampleRate,
+  tone = null,
+  eqModel = 'clean',
+  eqModelAmount = 1,
+) {
   let db = Number(preampDb) || 0;
   for (const band of bands) {
-    if (band.enabled) db += magnitudeDb(band, frequency, sampleRate);
+    if (band.enabled) {
+      db += magnitudeDb(band, frequency, sampleRate, eqModel, eqModelAmount);
+    }
+  }
+  if (tone) {
+    const bassDb = Number(tone.bass_db) || 0;
+    const trebleDb = Number(tone.treble_db) || 0;
+    const lowCutHz = Number(tone.low_cut_hz) || 20;
+    const highCutHz = Number(tone.high_cut_hz) || 20000;
+    if (Math.abs(bassDb) > 1e-4) {
+      db += magnitudeDb(
+        {
+          filter_type: 'LSC',
+          frequency: Number(tone.bass_freq_hz) || 105,
+          gain_db: bassDb,
+          quality: Number(tone.bass_q) || 0.71,
+        },
+        frequency,
+        sampleRate,
+      );
+    }
+    if (Math.abs(trebleDb) > 1e-4) {
+      db += magnitudeDb(
+        {
+          filter_type: 'HSC',
+          frequency: Number(tone.treble_freq_hz) || 8500,
+          gain_db: trebleDb,
+          quality: Number(tone.treble_q) || 0.71,
+        },
+        frequency,
+        sampleRate,
+      );
+    }
+    if (lowCutHz > 20.5) {
+      db += magnitudeDb(
+        {
+          filter_type: 'HPQ',
+          frequency: lowCutHz,
+          gain_db: 0,
+          quality: Math.SQRT1_2,
+        },
+        frequency,
+        sampleRate,
+      );
+    }
+    if (highCutHz < 19950) {
+      db += magnitudeDb(
+        {
+          filter_type: 'LPQ',
+          frequency: highCutHz,
+          gain_db: 0,
+          quality: Math.SQRT1_2,
+        },
+        frequency,
+        sampleRate,
+      );
+    }
   }
   return db;
 }
@@ -221,7 +328,15 @@ export function createGraph(canvas) {
     ctx.restore();
   }
 
-  function draw({ bands = [], preampDb = 0, selectedId = null, sampleRate = 48_000 }) {
+  function draw({
+    bands = [],
+    preampDb = 0,
+    selectedId = null,
+    sampleRate = 48_000,
+    tone = null,
+    eqModel = 'clean',
+    eqModelAmount = 1,
+  }) {
     const prepared = prepareCanvas();
     if (!prepared) return;
     const { ctx, width, height } = prepared;
@@ -239,7 +354,18 @@ export function createGraph(canvas) {
       const frequency = F_MIN * (F_MAX / F_MIN) ** ratio;
       points.push([
         left + ratio * (right - left),
-        yOf(responseDb(bands, preampDb, frequency, sampleRate), height),
+        yOf(
+          responseDb(
+            bands,
+            preampDb,
+            frequency,
+            sampleRate,
+            tone,
+            eqModel,
+            eqModelAmount,
+          ),
+          height,
+        ),
       ]);
     }
 

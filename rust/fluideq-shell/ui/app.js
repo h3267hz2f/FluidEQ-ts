@@ -79,9 +79,19 @@ const demoSnapshot = () => ({
   auto_preamp_db: 0,
   preamp_total_db: 0,
   active_preset_name: 'Harman Target 2018',
-  eq_model: 'FEQ_EQ_MODEL_CLEAN',
+  eq_model: 'clean',
   eq_model_amount: 1,
   matched_treble: true,
+  tone: {
+    bass_db: 0,
+    bass_freq_hz: 105,
+    bass_q: 0.71,
+    treble_db: 0,
+    treble_freq_hz: 8500,
+    treble_q: 0.71,
+    low_cut_hz: 20,
+    high_cut_hz: 20000,
+  },
   bands: DEMO_BANDS.map((band) => ({ ...band })),
   residency: {},
   models: {},
@@ -113,6 +123,19 @@ const els = {
   preampValue: document.getElementById('preamp-value'),
   preampWarning: document.getElementById('preamp-warning'),
   autoHeadroom: document.getElementById('auto-headroom'),
+  resetTone: document.getElementById('reset-tone'),
+  toneBass: document.getElementById('tone-bass'),
+  toneBassValue: document.getElementById('tone-bass-value'),
+  toneTreble: document.getElementById('tone-treble'),
+  toneTrebleValue: document.getElementById('tone-treble-value'),
+  toneLowCut: document.getElementById('tone-low-cut'),
+  toneLowCutValue: document.getElementById('tone-low-cut-value'),
+  toneHighCut: document.getElementById('tone-high-cut'),
+  toneHighCutValue: document.getElementById('tone-high-cut-value'),
+  eqModel: document.getElementById('eq-model'),
+  eqModelAmount: document.getElementById('eq-model-amount'),
+  eqModelAmountValue: document.getElementById('eq-model-amount-value'),
+  matchedTreble: document.getElementById('matched-treble'),
   startup: document.getElementById('startup'),
   closeToTray: document.getElementById('close-to-tray'),
   irLoad: document.getElementById('ir-load'),
@@ -254,6 +277,9 @@ function drawGraph() {
     preampDb: snapshot.preamp_db,
     selectedId,
     sampleRate,
+    tone: snapshot.tone,
+    eqModel: snapshot.eq_model,
+    eqModelAmount: snapshot.eq_model_amount,
   });
 }
 
@@ -391,7 +417,74 @@ function renderInspector() {
   setRangeValue(els.preamp, snapshot.preamp_db);
   setRangeFill(els.preamp, ((snapshot.preamp_db + 24) / 48) * 100);
   renderPreampReadout();
+  renderToneAndVoicing();
   renderIr();
+}
+
+function normalizeEqModelKey(model) {
+  const raw = String(model || 'clean').toLowerCase();
+  if (raw.includes('proportional')) return 'proportional';
+  if (raw.includes('wide')) return 'wide';
+  if (raw.includes('asymmetric')) return 'asymmetric';
+  return 'clean';
+}
+
+function ensureTone() {
+  if (!snapshot.tone) {
+    snapshot.tone = {
+      bass_db: 0,
+      bass_freq_hz: 105,
+      bass_q: 0.71,
+      treble_db: 0,
+      treble_freq_hz: 8500,
+      treble_q: 0.71,
+      low_cut_hz: 20,
+      high_cut_hz: 20000,
+    };
+  }
+  return snapshot.tone;
+}
+
+function renderToneAndVoicing() {
+  const tone = ensureTone();
+  const bassDb = clamp(Number(tone.bass_db) || 0, -12, 12);
+  const trebleDb = clamp(Number(tone.treble_db) || 0, -12, 12);
+  const lowCutHz = clamp(Number(tone.low_cut_hz) || 20, 20, 250);
+  const highCutHz = clamp(Number(tone.high_cut_hz) || 20000, 4000, 20000);
+  const modelKey = normalizeEqModelKey(snapshot.eq_model);
+  const modelAmount = clamp(
+    Number.isFinite(Number(snapshot.eq_model_amount))
+      ? Number(snapshot.eq_model_amount)
+      : 1,
+    0,
+    1,
+  );
+  const matched = snapshot.matched_treble !== false;
+
+  setRangeValue(els.toneBass, bassDb);
+  setRangeFill(els.toneBass, ((bassDb + 12) / 24) * 100);
+  els.toneBassValue.textContent = `${formatDb(bassDb)} dB`;
+
+  setRangeValue(els.toneTreble, trebleDb);
+  setRangeFill(els.toneTreble, ((trebleDb + 12) / 24) * 100);
+  els.toneTrebleValue.textContent = `${formatDb(trebleDb)} dB`;
+
+  setRangeValue(els.toneLowCut, lowCutHz);
+  setRangeFill(els.toneLowCut, ((lowCutHz - 20) / 230) * 100);
+  els.toneLowCutValue.textContent = formatHz(lowCutHz);
+
+  setRangeValue(els.toneHighCut, highCutHz);
+  setRangeFill(els.toneHighCut, ((highCutHz - 4000) / 16000) * 100);
+  els.toneHighCutValue.textContent = formatHz(highCutHz);
+
+  els.eqModel.value = modelKey;
+  setRangeValue(els.eqModelAmount, modelAmount);
+  setRangeFill(els.eqModelAmount, modelAmount * 100);
+  els.eqModelAmountValue.textContent = `${Math.round(modelAmount * 100)}%`;
+  els.eqModelAmount.disabled = modelKey === 'clean';
+
+  els.matchedTreble.textContent = matched ? 'Precise' : 'Classic';
+  els.matchedTreble.setAttribute('aria-pressed', String(matched));
 }
 
 // With auto headroom on, the guard starts at the curve's own level and the
@@ -442,6 +535,10 @@ function renderSettings() {
 }
 
 const EQ_MODEL_NAMES = {
+  clean: 'Clean',
+  proportional: 'Proportional Q',
+  wide: 'Wide tone',
+  asymmetric: 'Asymmetric',
   FEQ_EQ_MODEL_CLEAN: 'Clean',
   FEQ_EQ_MODEL_PROPORTIONAL: 'Proportional Q',
   FEQ_EQ_MODEL_WIDE: 'Wide tone',
@@ -565,6 +662,12 @@ function renderConfig() {
       `bass ${formatDb(Number(snapshot.tone?.bass_db) || 0)} · treble ${formatDb(
         Number(snapshot.tone?.treble_db) || 0
       )} dB`
+    ),
+    configRow(
+      'Cuts',
+      `${formatHz(Number(snapshot.tone?.low_cut_hz) || 20)} – ${formatHz(
+        Number(snapshot.tone?.high_cut_hz) || 20000
+      )}`
     )
   );
 
@@ -974,6 +1077,28 @@ async function commitAutoHeadroom() {
   renderAll();
 }
 
+async function commitToneAndVoicing() {
+  const tone = ensureTone();
+  if (!invoke) return renderAll();
+  try {
+    snapshot = await invoke('set_tone_and_voicing', {
+      bassDb: Number(tone.bass_db) || 0,
+      trebleDb: Number(tone.treble_db) || 0,
+      lowCutHz: Number(tone.low_cut_hz) || 20,
+      highCutHz: Number(tone.high_cut_hz) || 20000,
+      eqModel: normalizeEqModelKey(snapshot.eq_model),
+      eqModelAmount: Number.isFinite(Number(snapshot.eq_model_amount))
+        ? Number(snapshot.eq_model_amount)
+        : 1,
+      matchedTreble: snapshot.matched_treble !== false,
+    });
+    clearMessage();
+  } catch (error) {
+    showMessage(`Could not save tone settings: ${error}`);
+  }
+  renderAll();
+}
+
 // ---------------------------------------------------------------------------
 // Presets
 // ---------------------------------------------------------------------------
@@ -1213,6 +1338,75 @@ els.power.addEventListener('click', commitPower);
 els.autoHeadroom.addEventListener('click', commitAutoHeadroom);
 els.closeToTray.addEventListener('click', commitCloseToTray);
 els.startup.addEventListener('click', toggleStartup);
+
+els.toneBass.addEventListener('input', () => {
+  const tone = ensureTone();
+  tone.bass_db = Number(els.toneBass.value);
+  setRangeFill(els.toneBass, ((tone.bass_db + 12) / 24) * 100);
+  els.toneBassValue.textContent = `${formatDb(tone.bass_db)} dB`;
+  scheduleDraw();
+});
+els.toneBass.addEventListener('change', commitToneAndVoicing);
+
+els.toneTreble.addEventListener('input', () => {
+  const tone = ensureTone();
+  tone.treble_db = Number(els.toneTreble.value);
+  setRangeFill(els.toneTreble, ((tone.treble_db + 12) / 24) * 100);
+  els.toneTrebleValue.textContent = `${formatDb(tone.treble_db)} dB`;
+  scheduleDraw();
+});
+els.toneTreble.addEventListener('change', commitToneAndVoicing);
+
+els.toneLowCut.addEventListener('input', () => {
+  const tone = ensureTone();
+  tone.low_cut_hz = Number(els.toneLowCut.value);
+  setRangeFill(els.toneLowCut, ((tone.low_cut_hz - 20) / 230) * 100);
+  els.toneLowCutValue.textContent = formatHz(tone.low_cut_hz);
+  scheduleDraw();
+});
+els.toneLowCut.addEventListener('change', commitToneAndVoicing);
+
+els.toneHighCut.addEventListener('input', () => {
+  const tone = ensureTone();
+  tone.high_cut_hz = Number(els.toneHighCut.value);
+  setRangeFill(els.toneHighCut, ((tone.high_cut_hz - 4000) / 16000) * 100);
+  els.toneHighCutValue.textContent = formatHz(tone.high_cut_hz);
+  scheduleDraw();
+});
+els.toneHighCut.addEventListener('change', commitToneAndVoicing);
+
+els.eqModel.addEventListener('change', () => {
+  snapshot.eq_model = els.eqModel.value;
+  renderToneAndVoicing();
+  scheduleDraw();
+  commitToneAndVoicing();
+});
+
+els.eqModelAmount.addEventListener('input', () => {
+  snapshot.eq_model_amount = Number(els.eqModelAmount.value);
+  setRangeFill(els.eqModelAmount, snapshot.eq_model_amount * 100);
+  els.eqModelAmountValue.textContent = `${Math.round(snapshot.eq_model_amount * 100)}%`;
+  scheduleDraw();
+});
+els.eqModelAmount.addEventListener('change', commitToneAndVoicing);
+
+els.matchedTreble.addEventListener('click', () => {
+  snapshot.matched_treble = snapshot.matched_treble === false;
+  renderToneAndVoicing();
+  scheduleDraw();
+  commitToneAndVoicing();
+});
+
+els.resetTone.addEventListener('click', () => {
+  const tone = ensureTone();
+  tone.bass_db = 0;
+  tone.treble_db = 0;
+  tone.low_cut_hz = 20;
+  tone.high_cut_hz = 20000;
+  renderToneAndVoicing();
+  scheduleDraw();
+  commitToneAndVoicing();
+});
 
 for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]')) {
   button.addEventListener('click', () => showView(button.dataset.view));

@@ -259,11 +259,55 @@ impl AppStateStore {
 
     fn parse_eq_model(name: &str) -> FeqEqModel {
         match name.trim().to_ascii_lowercase().as_str() {
-            "proportional" => FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL,
-            "wide" => FeqEqModel::FEQ_EQ_MODEL_WIDE,
-            "asymmetric" => FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
+            "proportional" | "feq_eq_model_proportional" => FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL,
+            "wide" | "feq_eq_model_wide" => FeqEqModel::FEQ_EQ_MODEL_WIDE,
+            "asymmetric" | "feq_eq_model_asymmetric" => FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
             _ => FeqEqModel::FEQ_EQ_MODEL_CLEAN,
         }
+    }
+
+    pub fn sanitize_tone(mut tone: ToneSettings) -> ToneSettings {
+        tone.bass_db = if tone.bass_db.is_finite() {
+            tone.bass_db.clamp(-12.0, 12.0)
+        } else {
+            0.0
+        };
+        tone.bass_freq_hz = if tone.bass_freq_hz.is_finite() && tone.bass_freq_hz > 10.0 {
+            tone.bass_freq_hz.clamp(20.0, 500.0)
+        } else {
+            105.0
+        };
+        tone.bass_q = if tone.bass_q.is_finite() && tone.bass_q > 0.05 {
+            tone.bass_q.clamp(0.1, 10.0)
+        } else {
+            0.71
+        };
+        tone.treble_db = if tone.treble_db.is_finite() {
+            tone.treble_db.clamp(-12.0, 12.0)
+        } else {
+            0.0
+        };
+        tone.treble_freq_hz = if tone.treble_freq_hz.is_finite() && tone.treble_freq_hz > 500.0 {
+            tone.treble_freq_hz.clamp(1000.0, 20000.0)
+        } else {
+            8500.0
+        };
+        tone.treble_q = if tone.treble_q.is_finite() && tone.treble_q > 0.05 {
+            tone.treble_q.clamp(0.1, 10.0)
+        } else {
+            0.71
+        };
+        tone.low_cut_hz = if tone.low_cut_hz.is_finite() {
+            tone.low_cut_hz.clamp(20.0, 250.0)
+        } else {
+            20.0
+        };
+        tone.high_cut_hz = if tone.high_cut_hz.is_finite() {
+            tone.high_cut_hz.clamp(4000.0, 20000.0)
+        } else {
+            20000.0
+        };
+        tone
     }
 
     /// Synchronizes the high-level `bands` and `tone` state into `self.chain_settings`
@@ -364,7 +408,30 @@ impl AppStateStore {
         self.master_power = master_power;
         self.auto_headroom = auto_headroom;
         self.preamp_db = manual_preamp_db.clamp(-24.0, 24.0);
-        self.tone = tone;
+        self.tone = Self::sanitize_tone(tone);
+        self.revision += 1;
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
+    }
+
+    /// Updates the Tone shelves, low/high cut corners, EQ character model, model amount,
+    /// and analog-matched treble mode in one atomic step.
+    pub fn set_tone_and_voicing(
+        &mut self,
+        tone: ToneSettings,
+        eq_model: &str,
+        eq_model_amount: f64,
+        matched_treble: bool,
+    ) -> AppStateSnapshot {
+        self.tone = Self::sanitize_tone(tone);
+        self.eq_model = Self::parse_eq_model(eq_model);
+        self.eq_model_amount = if eq_model_amount.is_finite() {
+            eq_model_amount.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.matched_treble = matched_treble;
         self.revision += 1;
         self.sync_eq_and_tone_into_chain_settings();
         self.commit_chain_and_linear_phase_kernel();
@@ -756,8 +823,8 @@ impl AppStateStore {
         self.residency.estimate_memory()
     }
 
-    pub fn compute_current_auto_preamp_db(&self) -> f64 {
-        let coeffs: Vec<_> = self
+    fn eq_and_tone_coefficients(&self, include_cuts: bool) -> Vec<fluideq_dsp_sys::FeqBiquadCoefficients> {
+        let mut coeffs: Vec<_> = self
             .bands
             .iter()
             .filter(|b| b.enabled)
@@ -777,30 +844,66 @@ impl AppStateStore {
                 )
             })
             .collect();
+        if self.tone.bass_db.abs() > 1e-4 {
+            coeffs.push(biquad_coefficients_designed(
+                &FeqChainEqBand {
+                    filter_type: FeqFilterType::FEQ_FILTER_LSC,
+                    frequency: self.tone.bass_freq_hz,
+                    gain_db: self.tone.bass_db,
+                    quality: self.tone.bass_q,
+                    ..FeqChainEqBand::default()
+                },
+                self.sample_rate,
+                FeqEqModel::FEQ_EQ_MODEL_CLEAN,
+                1.0,
+                self.matched_treble,
+            ));
+        }
+        if self.tone.treble_db.abs() > 1e-4 {
+            coeffs.push(biquad_coefficients_designed(
+                &FeqChainEqBand {
+                    filter_type: FeqFilterType::FEQ_FILTER_HSC,
+                    frequency: self.tone.treble_freq_hz,
+                    gain_db: self.tone.treble_db,
+                    quality: self.tone.treble_q,
+                    ..FeqChainEqBand::default()
+                },
+                self.sample_rate,
+                FeqEqModel::FEQ_EQ_MODEL_CLEAN,
+                1.0,
+                self.matched_treble,
+            ));
+        }
+        if include_cuts {
+            if self.tone.low_cut_hz > 20.5 {
+                coeffs.push(biquad::biquad_coefficients_cookbook(
+                    FeqFilterType::FEQ_FILTER_HPQ,
+                    self.tone.low_cut_hz,
+                    0.0,
+                    0.707_106_781_186_547_5,
+                    self.sample_rate,
+                ));
+            }
+            if self.tone.high_cut_hz < 19_950.0 {
+                coeffs.push(biquad::biquad_coefficients_cookbook(
+                    FeqFilterType::FEQ_FILTER_LPQ,
+                    self.tone.high_cut_hz,
+                    0.0,
+                    0.707_106_781_186_547_5,
+                    self.sample_rate,
+                ));
+            }
+        }
+        coeffs
+    }
+
+    pub fn compute_current_auto_preamp_db(&self) -> f64 {
+        let coeffs = self.eq_and_tone_coefficients(false);
         compute_auto_preamp_db(&coeffs, self.sample_rate)
     }
 
     pub fn evaluate_eq_curve_160_points(&self) -> Vec<f64> {
-        let coeffs: Vec<_> = self
-            .bands
-            .iter()
-            .filter(|b| b.enabled)
-            .map(|b| {
-                biquad_coefficients_designed(
-                    &FeqChainEqBand {
-                        filter_type: b.filter_type.to_feq_type(),
-                        frequency: b.frequency,
-                        gain_db: b.gain_db,
-                        quality: b.quality,
-                        ..FeqChainEqBand::default()
-                    },
-                    self.sample_rate,
-                    self.eq_model,
-                    self.eq_model_amount,
-                    self.matched_treble,
-                )
-            })
-            .collect();
+        let coeffs = self.eq_and_tone_coefficients(true);
         let min_log = 20.0_f64.log10();
         let max_log = 20000.0_f64.log10();
         (0..160)
@@ -1072,5 +1175,33 @@ mod tests {
             target_store.snapshot().chain_settings.eq.bands[2].gain_db,
             -4.2
         );
+    }
+
+    #[test]
+    fn set_tone_and_voicing_clamps_and_reflects_in_curve() {
+        let mut store = AppStateStore::new(48_000.0);
+        let tone = ToneSettings {
+            bass_db: 18.0,      // should clamp to 12.0
+            bass_freq_hz: 5.0,  // should fallback to 105.0
+            bass_q: 0.01,       // should fallback to 0.71
+            treble_db: -20.0,   // should clamp to -12.0
+            treble_freq_hz: 30_000.0, // should clamp to 20_000.0
+            treble_q: 15.0,     // should clamp to 10.0
+            low_cut_hz: 20.0,
+            high_cut_hz: 20_000.0,
+        };
+        let snap = store.set_tone_and_voicing(tone, "asymmetric", 0.8, false);
+        assert_eq!(snap.tone.bass_db, 12.0);
+        assert_eq!(snap.tone.bass_freq_hz, 105.0);
+        assert_eq!(snap.tone.bass_q, 0.71);
+        assert_eq!(snap.tone.treble_db, -12.0);
+        assert_eq!(snap.tone.treble_freq_hz, 20_000.0);
+        assert_eq!(snap.tone.treble_q, 10.0);
+        assert_eq!(snap.eq_model, "asymmetric");
+        assert_eq!(snap.eq_model_amount, 0.8);
+        assert!(!snap.matched_treble);
+        assert_eq!(snap.eq_curve_db.len(), 160);
+        // Bass shelf of +12 dB at 105 Hz should make 20 Hz low frequencies boosted > 6 dB
+        assert!(snap.eq_curve_db[0] > 6.0);
     }
 }

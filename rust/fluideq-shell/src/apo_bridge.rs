@@ -11,8 +11,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! open for as long as it runs. Without both halves an EQ edit changes the
 //! window and nothing else.
 
+use fluideq_dsp_sys::FeqEqModel;
 use fluideq_state::apo::format_bands_as_apo_lines;
 use fluideq_state::apo_analysis_and_status::{config_dir, owner_pipe_name};
+use fluideq_state::biquad::{modelled_quality, BandFilterKind, EqBandSpec};
 use fluideq_state::AppStateSnapshot;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -56,6 +58,15 @@ pub fn last_error() -> Option<String> {
     None
 }
 
+fn parse_model(name: &str) -> FeqEqModel {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "proportional" | "feq_eq_model_proportional" => FeqEqModel::FEQ_EQ_MODEL_PROPORTIONAL,
+        "wide" | "feq_eq_model_wide" => FeqEqModel::FEQ_EQ_MODEL_WIDE,
+        "asymmetric" | "feq_eq_model_asymmetric" => FeqEqModel::FEQ_EQ_MODEL_ASYMMETRIC,
+        _ => FeqEqModel::FEQ_EQ_MODEL_CLEAN,
+    }
+}
+
 /// The Equalizer APO text the engine parses, for the current state.
 ///
 /// Powered off is an empty file, which the engine reads as a pass-through
@@ -67,7 +78,75 @@ pub fn render(snapshot: &AppStateSnapshot) -> String {
     if !snapshot.master_power {
         return String::new();
     }
-    let rendered = format_bands_as_apo_lines(0.0, &snapshot.bands);
+    let model = parse_model(&snapshot.eq_model);
+    let mut voiced_bands: Vec<EqBandSpec> = snapshot
+        .bands
+        .iter()
+        .map(|band| {
+            let mut b = *band;
+            b.quality = modelled_quality(
+                b.filter_type.to_feq_type(),
+                b.gain_db,
+                b.quality,
+                model,
+                snapshot.eq_model_amount,
+            );
+            b
+        })
+        .collect();
+    if snapshot.tone.bass_db.abs() > 1e-4 {
+        voiced_bands.push(EqBandSpec {
+            id: (voiced_bands.len() + 1) as u32,
+            enabled: true,
+            filter_type: BandFilterKind::LSC,
+            frequency: snapshot.tone.bass_freq_hz,
+            gain_db: snapshot.tone.bass_db,
+            quality: snapshot.tone.bass_q,
+            dynamic: false,
+            threshold_db: -18.0,
+            ear: 0,
+        });
+    }
+    if snapshot.tone.treble_db.abs() > 1e-4 {
+        voiced_bands.push(EqBandSpec {
+            id: (voiced_bands.len() + 1) as u32,
+            enabled: true,
+            filter_type: BandFilterKind::HSC,
+            frequency: snapshot.tone.treble_freq_hz,
+            gain_db: snapshot.tone.treble_db,
+            quality: snapshot.tone.treble_q,
+            dynamic: false,
+            threshold_db: -18.0,
+            ear: 0,
+        });
+    }
+    if snapshot.tone.low_cut_hz > 20.5 {
+        voiced_bands.push(EqBandSpec {
+            id: (voiced_bands.len() + 1) as u32,
+            enabled: true,
+            filter_type: BandFilterKind::HPQ,
+            frequency: snapshot.tone.low_cut_hz,
+            gain_db: 0.0,
+            quality: 0.71,
+            dynamic: false,
+            threshold_db: -18.0,
+            ear: 0,
+        });
+    }
+    if snapshot.tone.high_cut_hz < 19_950.0 {
+        voiced_bands.push(EqBandSpec {
+            id: (voiced_bands.len() + 1) as u32,
+            enabled: true,
+            filter_type: BandFilterKind::LPQ,
+            frequency: snapshot.tone.high_cut_hz,
+            gain_db: 0.0,
+            quality: 0.71,
+            dynamic: false,
+            threshold_db: -18.0,
+            ear: 0,
+        });
+    }
+    let rendered = format_bands_as_apo_lines(0.0, &voiced_bands);
     let filters = rendered.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
     let mut text = String::new();
     if snapshot.auto_headroom {
@@ -75,7 +154,15 @@ pub fn render(snapshot: &AppStateSnapshot) -> String {
         text.push_str("# FluidEQAutoPreamp: ON\n");
     }
     text.push_str(&format!("Preamp: {:.1} dB\n", snapshot.preamp_db));
+    text.push_str(if snapshot.matched_treble {
+        "# FluidEQFilterDesign: MATCHED\n"
+    } else {
+        "# FluidEQFilterDesign: COOKBOOK\n"
+    });
     text.push_str(filters);
+    if !filters.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
     if snapshot.impulse_response.is_some() {
         text.push_str(&format!("Convolution: {CONVOLUTION_FILE}\n"));
     }
@@ -446,5 +533,27 @@ mod tests {
         remove_convolution(&folder);
         assert!(!folder.join(CONVOLUTION_FILE).exists());
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn tone_and_voicing_are_rendered_to_apo_lines() {
+        let mut store = store_with_two_bands(true, false);
+        let tone = ToneSettings {
+            bass_db: 3.5,
+            bass_freq_hz: 100.0,
+            bass_q: 0.71,
+            treble_db: -2.5,
+            treble_freq_hz: 8000.0,
+            treble_q: 0.71,
+            low_cut_hz: 35.0,
+            high_cut_hz: 18000.0,
+        };
+        store.set_tone_and_voicing(tone, "proportional", 0.75, true);
+        let text = render(&store.snapshot());
+        assert!(text.contains("# FluidEQFilterDesign: MATCHED"));
+        assert!(text.contains("LSC Fc 100.0 Hz Gain 3.5 dB Q 0.71"));
+        assert!(text.contains("HSC Fc 8000.0 Hz Gain -2.5 dB Q 0.71"));
+        assert!(text.contains("HPQ Fc 35.0 Hz Q 0.71"));
+        assert!(text.contains("LPQ Fc 18000.0 Hz Q 0.71"));
     }
 }
