@@ -40,7 +40,7 @@
               <path d="M8 19h8" />
             </svg>
           </button>
-          <button class="nav-btn" type="button" aria-label="Room" title="Room is not in this build yet" disabled>
+          <button class="nav-btn" type="button" aria-label="Room" data-view="room">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 18V9l8-5 8 5v9" />
               <path d="M9 18v-5h6v5" />
@@ -264,6 +264,81 @@
                 <p id="rack-editor-detail" class="settings-note"></p>
               </div>
               <div id="rack-editor-controls" class="rack-controls"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-room" data-view-panel="room" hidden>
+          <div class="card settings-card room-card">
+            <div class="settings-group">
+              <p class="eyebrow">Binaural spatial acoustic model</p>
+              <h2 class="settings-title">Room simulation</h2>
+              <div class="stat-row">
+                <span>Room processing</span>
+                <button id="room-power" class="stat-toggle" type="button" aria-pressed="false">Off</button>
+              </div>
+              <p class="settings-note">Virtualises surround and stereo sound through KEMAR HRTF impulse responses, modelling reflections, early delay and boundary absorption.</p>
+            </div>
+
+            <div class="settings-group">
+              <h3 class="games-heading">Room preset</h3>
+              <div id="room-preset-chips" class="room-chips"></div>
+            </div>
+
+            <div class="settings-group">
+              <h3 class="games-heading">KEMAR head size</h3>
+              <div id="room-head-chips" class="room-chips"></div>
+            </div>
+
+            <div class="settings-group">
+              <h3 class="games-heading">Space geometry</h3>
+              <label class="control">
+                <span>Room size <output id="room-size-val">6.0 m</output></span>
+                <input id="room-size" class="range" type="range" min="2" max="20" step="0.1" value="6" />
+              </label>
+
+              <label class="control">
+                <span>Listening distance <output id="room-dist-val">1.0 m</output></span>
+                <input id="room-dist" class="range" type="range" min="0.3" max="10" step="0.1" value="1" />
+              </label>
+
+              <label class="control">
+                <span>Wall absorption <output id="room-walls-val">45%</output></span>
+                <input id="room-walls" class="range" type="range" min="0" max="1" step="0.01" value="0.45" />
+              </label>
+
+              <label class="control">
+                <span>Ambience mix <output id="room-ambience-val">20%</output></span>
+                <input id="room-ambience" class="range" type="range" min="0" max="1" step="0.01" value="0.2" />
+              </label>
+
+              <label class="control">
+                <span>Ambience decay <output id="room-decay-val">0.8 s</output></span>
+                <input id="room-decay" class="range" type="range" min="0.1" max="5" step="0.05" value="0.8" />
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <h3 class="games-heading">Low frequency &amp; balance</h3>
+              <div class="stat-row">
+                <span>Bass management</span>
+                <button id="room-bass-mgmt" class="stat-toggle" type="button" aria-pressed="false">Off</button>
+              </div>
+
+              <label class="control">
+                <span>Crossover frequency <output id="room-crossover-val">80 Hz</output></span>
+                <input id="room-crossover" class="range" type="range" min="40" max="160" step="1" value="80" />
+              </label>
+
+              <label class="control">
+                <span>Centre level <output id="room-centre-val">0.0 dB</output></span>
+                <input id="room-centre" class="range" type="range" min="-12" max="6" step="0.5" value="0" />
+              </label>
+
+              <label class="control">
+                <span>Subwoofer level <output id="room-sub-val">0.0 dB</output></span>
+                <input id="room-sub" class="range" type="range" min="-12" max="6" step="0.5" value="0" />
+              </label>
             </div>
           </div>
         </section>

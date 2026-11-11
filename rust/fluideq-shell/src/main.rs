@@ -69,6 +69,25 @@ fn opra_curves_dir(app: &tauri::AppHandle) -> PathBuf {
     local
 }
 
+fn room_heads_dir(app: &tauri::AppHandle) -> PathBuf {
+    if let Ok(resource_dir) = app.path().resolve("assets/room/heads", tauri::path::BaseDirectory::Resource) {
+        if resource_dir.exists() {
+            return resource_dir;
+        }
+    }
+    let local = PathBuf::from("assets/room/heads");
+    if local.exists() {
+        return local;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("assets").join("room").join("heads");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    local
+}
+
 fn store_of(state: &ShellState) -> Result<MutexGuard<'_, AppStateStore>, String> {
     state
         .store
@@ -452,6 +471,47 @@ fn apply_opra_curve(
     let mut store = store_of(&state)?;
     store.apply_opra_headphone_curve(&dir, &vendor, &product, curve_id.as_deref())?;
     let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_room_preset(
+    state: State<'_, ShellState>,
+    preset: i32,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.set_room_preset(preset);
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_room_head(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    head: i32,
+) -> Result<AppStateSnapshot, String> {
+    let dir = room_heads_dir(&app);
+    let mut store = store_of(&state)?;
+    let snapshot = store.set_room_head_choice(head, &dir)?;
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_room_bass_management(
+    state: State<'_, ShellState>,
+    enabled: bool,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.set_room_bass_management(enabled);
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
     let _ = apo_bridge::publish(&snapshot);
@@ -972,6 +1032,9 @@ fn main() {
             list_opra_vendors,
             list_opra_models,
             apply_opra_curve,
+            set_room_preset,
+            set_room_head,
+            set_room_bass_management,
             get_output_volume,
             set_output_volume,
             engine_status,

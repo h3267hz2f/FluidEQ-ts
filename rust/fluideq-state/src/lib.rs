@@ -650,6 +650,55 @@ impl AppStateStore {
         Ok(self.snapshot())
     }
 
+    pub fn set_room_preset(&mut self, preset_id: i32) -> AppStateSnapshot {
+        let (size_m, distance_m, walls, ambience_mix, ambience_decay_s) = match preset_id {
+            0 => (4.5, 1.2, 0.65, 0.15, 0.35),  // Studio
+            2 => (12.0, 4.0, 0.35, 0.35, 1.20), // Cinema
+            3 => (18.0, 6.0, 0.20, 0.45, 2.20), // Arena
+            4 => (6.5, 2.0, 0.50, 0.30, 0.65),  // Club
+            _ => (8.0, 2.5, 0.45, 0.28, 0.85),  // Stage (1)
+        };
+        self.chain_settings.room.preset = preset_id.clamp(0, 4);
+        self.chain_settings.room.size_m = size_m;
+        self.chain_settings.room.distance_m = distance_m;
+        self.chain_settings.room.walls = walls;
+        self.chain_settings.room.ambience_mix = ambience_mix;
+        self.chain_settings.room.ambience_decay_s = ambience_decay_s;
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
+    }
+
+    pub fn set_room_head_choice(
+        &mut self,
+        head: i32,
+        heads_dir: &Path,
+    ) -> Result<AppStateSnapshot, String> {
+        let head_choice = head.clamp(0, 2);
+        self.chain_settings.room.head = head_choice;
+        let head_name = match head_choice {
+            0 => "small",
+            2 => "large",
+            _ => "medium",
+        };
+        let file_path = heads_dir.join(format!("{}.txt", head_name));
+        if file_path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&file_path) {
+                let _ = self.load_room_head_from_text(&text);
+            }
+        }
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        Ok(self.snapshot())
+    }
+
+    pub fn set_room_bass_management(&mut self, enabled: bool) -> AppStateSnapshot {
+        self.chain_settings.room.bass_management = if enabled { 1 } else { 0 };
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
+    }
+
     /// Parses and loads a KEMAR room head text asset (`small.txt`, `medium.txt`, `large.txt`)
     /// into the native C++ `FeqChain` convolution stage.
     pub fn load_room_head_from_text(&mut self, text: &str) -> Result<String, String> {
@@ -1244,5 +1293,21 @@ mod tests {
         assert!(resolved.contains("hd_600"));
         assert_eq!(store.snapshot().active_preset_name, resolved);
         assert!(store.snapshot().preamp_db < 0.0);
+    }
+
+    #[test]
+    fn room_preset_and_head_selection() {
+        let mut store = AppStateStore::new(48_000.0);
+        let snap = store.set_room_preset(2); // Cinema
+        assert_eq!(snap.chain_settings.room.preset, 2);
+        assert_eq!(snap.chain_settings.room.size_m, 12.0);
+        assert_eq!(snap.chain_settings.room.distance_m, 4.0);
+
+        let heads_dir = std::path::Path::new("assets/room/heads");
+        let head_snap = store.set_room_head_choice(0, heads_dir).unwrap(); // Small
+        assert_eq!(head_snap.chain_settings.room.head, 0);
+
+        let bass_snap = store.set_room_bass_management(true);
+        assert_eq!(bass_snap.chain_settings.room.bass_management, 1);
     }
 }

@@ -70,7 +70,7 @@ pub fn set_stage_enabled(
 
 /// The parameters the rack page may write, with the range each one accepts.
 /// The window draws the same ranges; the clamp here is what the engine gets.
-const PARAMETER_RANGES: [(&str, &str, f64, f64); 24] = [
+const PARAMETER_RANGES: [(&str, &str, f64, f64); 29] = [
     ("normalizer", "target_lufs", -35.0, -5.0),
     ("normalizer", "ceiling_db", -6.0, 0.0),
     ("denoise", "hiss_amount", 0.0, 1.0),
@@ -92,6 +92,11 @@ const PARAMETER_RANGES: [(&str, &str, f64, f64); 24] = [
     ("room", "size_m", 2.0, 20.0),
     ("room", "distance_m", 0.3, 10.0),
     ("room", "ambience_mix", 0.0, 1.0),
+    ("room", "walls", 0.0, 1.0),
+    ("room", "ambience_decay_s", 0.1, 5.0),
+    ("room", "crossover_hz", 40.0, 160.0),
+    ("room", "centre_db", -12.0, 6.0),
+    ("room", "sub_db", -12.0, 6.0),
     ("maximizer", "drive_db", 0.0, 24.0),
     ("master", "output_trim_db", -24.0, 12.0),
     ("master", "loudness_target_lufs", -24.0, -8.0),
@@ -141,6 +146,11 @@ pub fn set_stage_parameter(
         ("room", "size_m") => settings.room.size_m = value,
         ("room", "distance_m") => settings.room.distance_m = value,
         ("room", "ambience_mix") => settings.room.ambience_mix = value,
+        ("room", "walls") => settings.room.walls = value,
+        ("room", "ambience_decay_s") => settings.room.ambience_decay_s = value,
+        ("room", "crossover_hz") => settings.room.crossover_hz = value,
+        ("room", "centre_db") => settings.room.centre_db = value,
+        ("room", "sub_db") => settings.room.sub_db = value,
         ("maximizer", "drive_db") => settings.maximizer.drive_db = value,
         ("master", "output_trim_db") => settings.master.output_trim_db = value,
         ("master", "loudness_target_lufs") => settings.master.loudness_target_lufs = value,
@@ -176,6 +186,11 @@ pub fn stage_parameter_value(
         ("room", "size_m") => Some(settings.room.size_m),
         ("room", "distance_m") => Some(settings.room.distance_m),
         ("room", "ambience_mix") => Some(settings.room.ambience_mix),
+        ("room", "walls") => Some(settings.room.walls),
+        ("room", "ambience_decay_s") => Some(settings.room.ambience_decay_s),
+        ("room", "crossover_hz") => Some(settings.room.crossover_hz),
+        ("room", "centre_db") => Some(settings.room.centre_db),
+        ("room", "sub_db") => Some(settings.room.sub_db),
         ("maximizer", "drive_db") => Some(settings.maximizer.drive_db),
         ("master", "output_trim_db") => Some(settings.master.output_trim_db),
         ("master", "loudness_target_lufs") => Some(settings.master.loudness_target_lufs),

@@ -934,6 +934,62 @@ kbd {
   width: min(260px, 100%);
 }
 
+.view-room {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.room-card {
+  max-width: 780px;
+}
+
+.room-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.room-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    color 150ms ease,
+    border-color 150ms ease,
+    background 150ms ease;
+}
+
+.room-chip:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.room-chip.selected {
+  color: var(--text);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.room-chip .chip-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.room-chip .chip-detail {
+  font-size: 10px;
+  color: var(--muted-soft);
+}
+
 /* DSP rack: one row per stage, the chain's own order top to bottom. */
 .view-rack {
   flex: 1;

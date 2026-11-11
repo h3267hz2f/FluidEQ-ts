@@ -20,6 +20,7 @@ import {
   stageSummary,
 } from './views/rack/index.js';
 import { settings } from './views/settings/index.js';
+import { room, ROOM_PRESETS, KEMAR_HEADS } from './views/room/index.js';
 import {
   F_MIN,
   F_MAX,
@@ -178,11 +179,32 @@ const els = {
   rackEditorTitle: document.getElementById('rack-editor-title'),
   rackEditorDetail: document.getElementById('rack-editor-detail'),
   rackEditorControls: document.getElementById('rack-editor-controls'),
+  roomPower: document.getElementById('room-power'),
+  roomPresetChips: document.getElementById('room-preset-chips'),
+  roomHeadChips: document.getElementById('room-head-chips'),
+  roomSize: document.getElementById('room-size'),
+  roomSizeVal: document.getElementById('room-size-val'),
+  roomDist: document.getElementById('room-dist'),
+  roomDistVal: document.getElementById('room-dist-val'),
+  roomWalls: document.getElementById('room-walls'),
+  roomWallsVal: document.getElementById('room-walls-val'),
+  roomAmbience: document.getElementById('room-ambience'),
+  roomAmbienceVal: document.getElementById('room-ambience-val'),
+  roomDecay: document.getElementById('room-decay'),
+  roomDecayVal: document.getElementById('room-decay-val'),
+  roomBassMgmt: document.getElementById('room-bass-mgmt'),
+  roomCrossover: document.getElementById('room-crossover'),
+  roomCrossoverVal: document.getElementById('room-crossover-val'),
+  roomCentre: document.getElementById('room-centre'),
+  roomCentreVal: document.getElementById('room-centre-val'),
+  roomSub: document.getElementById('room-sub'),
+  roomSubVal: document.getElementById('room-sub-val'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
 registerView(config);
 registerView(rack);
+registerView(room);
 registerView(games);
 registerView(settings);
 
@@ -522,6 +544,7 @@ function renderAll() {
   renderSettings();
   if (activeView === 'config') renderConfig();
   if (activeView === 'rack') renderRack();
+  if (activeView === 'room') renderRoom();
   drawGraph();
 }
 
@@ -1011,6 +1034,138 @@ async function setRackStage(stage, enabled) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Room view
+// ---------------------------------------------------------------------------
+
+function renderRoom() {
+  const settings = snapshot.chain_settings?.room ?? {};
+  const enabled = Boolean(settings.enabled);
+  els.roomPower.textContent = enabled ? 'On' : 'Off';
+  els.roomPower.setAttribute('aria-pressed', String(enabled));
+
+  const currentPreset = Number(settings.preset) || 0;
+  els.roomPresetChips.replaceChildren(
+    ...ROOM_PRESETS.map((p) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `room-chip${p.id === currentPreset ? ' selected' : ''}`;
+      chip.setAttribute('aria-pressed', String(p.id === currentPreset));
+      const lbl = document.createElement('span');
+      lbl.className = 'chip-label';
+      lbl.textContent = p.label;
+      const dtl = document.createElement('span');
+      dtl.className = 'chip-detail';
+      dtl.textContent = p.detail;
+      chip.append(lbl, dtl);
+      chip.addEventListener('click', () => applyRoomPreset(p.id));
+      return chip;
+    })
+  );
+
+  const currentHead = Number(settings.head) || 1;
+  els.roomHeadChips.replaceChildren(
+    ...KEMAR_HEADS.map((h) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `room-chip${h.id === currentHead ? ' selected' : ''}`;
+      chip.setAttribute('aria-pressed', String(h.id === currentHead));
+      const lbl = document.createElement('span');
+      lbl.className = 'chip-label';
+      lbl.textContent = h.label;
+      const dtl = document.createElement('span');
+      dtl.className = 'chip-detail';
+      dtl.textContent = h.detail;
+      chip.append(lbl, dtl);
+      chip.addEventListener('click', () => applyRoomHead(h.id));
+      return chip;
+    })
+  );
+
+  const size = Number(settings.size_m) || 6;
+  setRangeValue(els.roomSize, size);
+  setRangeFill(els.roomSize, ((size - 2) / 18) * 100);
+  els.roomSizeVal.textContent = `${size.toFixed(1)} m`;
+
+  const dist = Number(settings.distance_m) || 1;
+  setRangeValue(els.roomDist, dist);
+  setRangeFill(els.roomDist, ((dist - 0.3) / 9.7) * 100);
+  els.roomDistVal.textContent = `${dist.toFixed(1)} m`;
+
+  const walls = Number(settings.walls) || 0.45;
+  setRangeValue(els.roomWalls, walls);
+  setRangeFill(els.roomWalls, walls * 100);
+  els.roomWallsVal.textContent = `${Math.round(walls * 100)}%`;
+
+  const ambience = Number(settings.ambience_mix) || 0.2;
+  setRangeValue(els.roomAmbience, ambience);
+  setRangeFill(els.roomAmbience, ambience * 100);
+  els.roomAmbienceVal.textContent = `${Math.round(ambience * 100)}%`;
+
+  const decay = Number(settings.ambience_decay_s) || 0.8;
+  setRangeValue(els.roomDecay, decay);
+  setRangeFill(els.roomDecay, ((decay - 0.1) / 4.9) * 100);
+  els.roomDecayVal.textContent = `${decay.toFixed(2)} s`;
+
+  const bassMgmt = Boolean(settings.bass_management);
+  els.roomBassMgmt.textContent = bassMgmt ? 'On' : 'Off';
+  els.roomBassMgmt.setAttribute('aria-pressed', String(bassMgmt));
+
+  const crossover = Number(settings.crossover_hz) || 80;
+  setRangeValue(els.roomCrossover, crossover);
+  setRangeFill(els.roomCrossover, ((crossover - 40) / 120) * 100);
+  els.roomCrossoverVal.textContent = `${Math.round(crossover)} Hz`;
+
+  const centre = Number(settings.centre_db) || 0;
+  setRangeValue(els.roomCentre, centre);
+  setRangeFill(els.roomCentre, ((centre + 12) / 18) * 100);
+  els.roomCentreVal.textContent = `${formatDb(centre)} dB`;
+
+  const sub = Number(settings.sub_db) || 0;
+  setRangeValue(els.roomSub, sub);
+  setRangeFill(els.roomSub, ((sub + 12) / 18) * 100);
+  els.roomSubVal.textContent = `${formatDb(sub)} dB`;
+}
+
+async function applyRoomPreset(preset) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_room_preset', { preset });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not apply room preset: ${error}`);
+  }
+}
+
+async function applyRoomHead(head) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_room_head', { head });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not apply KEMAR head: ${error}`);
+  }
+}
+
+async function toggleRoomPower() {
+  const on = Boolean(snapshot.chain_settings?.room?.enabled);
+  await setRackStage('room', !on);
+}
+
+async function toggleRoomBassManagement() {
+  if (!invoke) return;
+  const on = Boolean(snapshot.chain_settings?.room?.bass_management);
+  try {
+    snapshot = await invoke('set_room_bass_management', { enabled: !on });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not change bass management: ${error}`);
+  }
+}
+
 async function refreshGameRules() {
   if (!invoke) return renderGames();
   try {
@@ -1049,6 +1204,7 @@ function showView(id) {
   if (equalizerView) scheduleDraw();
   if (view.id === 'config') renderConfig();
   if (view.id === 'rack') renderRack();
+  if (view.id === 'room') renderRoom();
   if (view.id === 'games') renderGames();
   if (view.id === 'settings') renderSettings();
 }
@@ -1531,6 +1687,81 @@ els.resetTone.addEventListener('click', () => {
 els.opraVendor.addEventListener('change', () => selectOpraVendor(els.opraVendor.value));
 els.opraModel.addEventListener('change', () => applyOpraModel(els.opraModel.value));
 els.opraClear.addEventListener('click', clearOpraSelection);
+
+els.roomPower.addEventListener('click', toggleRoomPower);
+els.roomBassMgmt.addEventListener('click', toggleRoomBassManagement);
+
+els.roomSize.addEventListener('input', () => {
+  const size = Number(els.roomSize.value);
+  setRangeFill(els.roomSize, ((size - 2) / 18) * 100);
+  els.roomSizeVal.textContent = `${size.toFixed(1)} m`;
+});
+els.roomSize.addEventListener('change', () =>
+  setRackParameter('room', 'size_m', Number(els.roomSize.value))
+);
+
+els.roomDist.addEventListener('input', () => {
+  const dist = Number(els.roomDist.value);
+  setRangeFill(els.roomDist, ((dist - 0.3) / 9.7) * 100);
+  els.roomDistVal.textContent = `${dist.toFixed(1)} m`;
+});
+els.roomDist.addEventListener('change', () =>
+  setRackParameter('room', 'distance_m', Number(els.roomDist.value))
+);
+
+els.roomWalls.addEventListener('input', () => {
+  const walls = Number(els.roomWalls.value);
+  setRangeFill(els.roomWalls, walls * 100);
+  els.roomWallsVal.textContent = `${Math.round(walls * 100)}%`;
+});
+els.roomWalls.addEventListener('change', () =>
+  setRackParameter('room', 'walls', Number(els.roomWalls.value))
+);
+
+els.roomAmbience.addEventListener('input', () => {
+  const ambience = Number(els.roomAmbience.value);
+  setRangeFill(els.roomAmbience, ambience * 100);
+  els.roomAmbienceVal.textContent = `${Math.round(ambience * 100)}%`;
+});
+els.roomAmbience.addEventListener('change', () =>
+  setRackParameter('room', 'ambience_mix', Number(els.roomAmbience.value))
+);
+
+els.roomDecay.addEventListener('input', () => {
+  const decay = Number(els.roomDecay.value);
+  setRangeFill(els.roomDecay, ((decay - 0.1) / 4.9) * 100);
+  els.roomDecayVal.textContent = `${decay.toFixed(2)} s`;
+});
+els.roomDecay.addEventListener('change', () =>
+  setRackParameter('room', 'ambience_decay_s', Number(els.roomDecay.value))
+);
+
+els.roomCrossover.addEventListener('input', () => {
+  const crossover = Number(els.roomCrossover.value);
+  setRangeFill(els.roomCrossover, ((crossover - 40) / 120) * 100);
+  els.roomCrossoverVal.textContent = `${Math.round(crossover)} Hz`;
+});
+els.roomCrossover.addEventListener('change', () =>
+  setRackParameter('room', 'crossover_hz', Number(els.roomCrossover.value))
+);
+
+els.roomCentre.addEventListener('input', () => {
+  const centre = Number(els.roomCentre.value);
+  setRangeFill(els.roomCentre, ((centre + 12) / 18) * 100);
+  els.roomCentreVal.textContent = `${formatDb(centre)} dB`;
+});
+els.roomCentre.addEventListener('change', () =>
+  setRackParameter('room', 'centre_db', Number(els.roomCentre.value))
+);
+
+els.roomSub.addEventListener('input', () => {
+  const sub = Number(els.roomSub.value);
+  setRangeFill(els.roomSub, ((sub + 12) / 18) * 100);
+  els.roomSubVal.textContent = `${formatDb(sub)} dB`;
+});
+els.roomSub.addEventListener('change', () =>
+  setRackParameter('room', 'sub_db', Number(els.roomSub.value))
+);
 
 for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]')) {
   button.addEventListener('click', () => showView(button.dataset.view));
