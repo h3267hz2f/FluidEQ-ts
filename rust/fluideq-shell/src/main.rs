@@ -275,6 +275,17 @@ fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::Engin
 }
 
 #[tauri::command]
+fn set_close_to_tray(
+    state: State<'_, ShellState>,
+    enabled: bool,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.set_close_to_tray(enabled);
+    save(&store, &state);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn get_startup_enabled() -> Result<bool, String> {
     startup::enabled()
 }
@@ -609,8 +620,18 @@ fn main() {
                 window.on_window_event(move |event| match event {
                     WindowEvent::CloseRequested { api, .. } => {
                         save_window_placement(&placement_path_for_event, &window_for_event);
-                        api.prevent_close();
-                        let _ = window_for_event.hide();
+                        let close_to_tray =
+                            match app_for_event.try_state::<ShellState>() {
+                                Some(state) => match state.store.lock() {
+                                    Ok(store) => store.close_to_tray(),
+                                    Err(_) => true,
+                                },
+                                None => true,
+                            };
+                        if close_to_tray {
+                            api.prevent_close();
+                            let _ = window_for_event.hide();
+                        }
                     }
                     WindowEvent::Resized(_)
                         if window_for_event.is_minimized().unwrap_or(false) =>
@@ -642,6 +663,7 @@ fn main() {
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,
+            set_close_to_tray,
         ])
         .build(tauri::generate_context!())
         .expect("FluidEQ failed to start");

@@ -65,6 +65,7 @@ const demoSnapshot = () => ({
   revision: 1,
   master_power: true,
   auto_headroom: true,
+  close_to_tray: true,
   preamp_db: 0,
   auto_preamp_db: 0,
   preamp_total_db: 0,
@@ -104,6 +105,7 @@ const els = {
   preampWarning: document.getElementById('preamp-warning'),
   autoHeadroom: document.getElementById('auto-headroom'),
   startup: document.getElementById('startup'),
+  closeToTray: document.getElementById('close-to-tray'),
   irLoad: document.getElementById('ir-load'),
   irFile: document.getElementById('ir-file'),
   irState: document.getElementById('ir-state'),
@@ -277,6 +279,11 @@ function renderHeader() {
     : 'Chain bypassed';
   els.autoHeadroom.textContent = snapshot.auto_headroom ? 'On' : 'Off';
   els.autoHeadroom.setAttribute('aria-pressed', String(Boolean(snapshot.auto_headroom)));
+  els.closeToTray.textContent = snapshot.close_to_tray ? 'On' : 'Off';
+  els.closeToTray.setAttribute(
+    'aria-pressed',
+    String(Boolean(snapshot.close_to_tray))
+  );
   els.bandCount.textContent = String(snapshot.bands?.length ?? 0);
 }
 
@@ -468,6 +475,21 @@ async function toggleStartup() {
     startupBusy = false;
     renderStartup();
   }
+}
+
+async function commitCloseToTray() {
+  const wanted = !snapshot.close_to_tray;
+  snapshot.close_to_tray = wanted;
+  renderHeader();
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_close_to_tray', { enabled: wanted });
+    clearMessage();
+  } catch (error) {
+    snapshot.close_to_tray = !wanted;
+    showMessage(`Could not change the close behavior: ${error}`);
+  }
+  renderAll();
 }
 
 async function commitAutoHeadroom() {
@@ -722,6 +744,7 @@ els.preamp.addEventListener('change', commitPreamp);
 
 els.power.addEventListener('click', commitPower);
 els.autoHeadroom.addEventListener('click', commitAutoHeadroom);
+els.closeToTray.addEventListener('click', commitCloseToTray);
 els.startup.addEventListener('click', toggleStartup);
 
 els.volume.addEventListener('input', () => {

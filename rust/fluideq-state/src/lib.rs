@@ -95,6 +95,10 @@ pub struct AppStateSnapshot {
     pub revision: u64,
     pub master_power: bool,
     pub auto_headroom: bool,
+    /// Whether the window's close button hides it to the tray instead of
+    /// quitting. Defaults to on, so an old state file keeps the current habit.
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
     pub preamp_db: f64,
     pub auto_preamp_db: f64,
     #[serde(default)]
@@ -133,6 +137,10 @@ pub struct AppStateSnapshot {
 /// user's own trim. The window shows this sum, not the trim alone, because a
 /// -24 dB trim under a -38 dB guard read as a 24 dB cut while the chain sat at
 /// -62 dB and looked broken.
+fn default_close_to_tray() -> bool {
+    true
+}
+
 pub fn total_preamp_db(manual_db: f64, auto_db: f64, auto_headroom: bool) -> f64 {
     manual_db + if auto_headroom { auto_db.min(0.0) } else { 0.0 }
 }
@@ -142,6 +150,7 @@ pub struct AppStateStore {
     sample_rate: f64,
     master_power: bool,
     auto_headroom: bool,
+    close_to_tray: bool,
     preamp_db: f64,
     active_preset_name: String,
     eq_model: FeqEqModel,
@@ -209,6 +218,7 @@ impl AppStateStore {
             sample_rate,
             master_power: true,
             auto_headroom: true,
+            close_to_tray: true,
             preamp_db: 0.0,
             active_preset_name: "Modern Country".to_string(),
             eq_model: FeqEqModel::FEQ_EQ_MODEL_CLEAN,
@@ -506,6 +516,7 @@ impl AppStateStore {
         let snap = load_snapshot_or_recover(path)?;
         self.master_power = snap.master_power;
         self.auto_headroom = snap.auto_headroom;
+        self.close_to_tray = snap.close_to_tray;
         self.preamp_db = snap.preamp_db;
         self.active_preset_name = snap.active_preset_name.clone();
         self.eq_model = Self::parse_eq_model(&snap.eq_model);
@@ -673,6 +684,16 @@ impl AppStateStore {
         self.residency.mode()
     }
 
+    pub fn close_to_tray(&self) -> bool {
+        self.close_to_tray
+    }
+
+    pub fn set_close_to_tray(&mut self, enabled: bool) -> AppStateSnapshot {
+        self.close_to_tray = enabled;
+        self.revision += 1;
+        self.snapshot()
+    }
+
     pub fn set_audio_signal_active(&mut self, active: bool) -> MemoryFootprintEstimate {
         self.residency.set_audio_signal_active(active);
         let should_meter = self.residency.should_enable_native_meters();
@@ -770,6 +791,7 @@ impl AppStateStore {
             revision: self.revision,
             master_power: self.master_power,
             auto_headroom: self.auto_headroom,
+            close_to_tray: self.close_to_tray,
             preamp_db: self.preamp_db,
             auto_preamp_db,
             preamp_total_db: total_preamp_db(
@@ -812,6 +834,29 @@ mod tests {
         // The default trim is zero, so a fresh store shows only the curve's
         // own headroom instead of an unexplained -1.5 dB.
         assert_eq!(AppStateStore::new(48_000.0).snapshot().preamp_db, 0.0);
+    }
+
+    #[test]
+    fn close_to_tray_defaults_on_and_survives_a_reload() {
+        let mut store = AppStateStore::new(48_000.0);
+        assert!(store.snapshot().close_to_tray);
+        assert!(!store.set_close_to_tray(false).close_to_tray);
+
+        let path = std::env::temp_dir().join(format!(
+            "fluideq-state-tray-{}.json",
+            std::process::id()
+        ));
+        store.save_to_file(&path).unwrap();
+        let mut reloaded = AppStateStore::new(48_000.0);
+        let restored = reloaded.load_from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!restored.close_to_tray);
+
+        // A state file written before the setting existed keeps the old habit.
+        let mut old = serde_json::to_value(AppStateStore::new(48_000.0).snapshot()).unwrap();
+        old.as_object_mut().unwrap().remove("close_to_tray");
+        let parsed: AppStateSnapshot = serde_json::from_value(old).unwrap();
+        assert!(parsed.close_to_tray);
     }
 
     #[test]
