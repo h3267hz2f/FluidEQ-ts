@@ -125,6 +125,10 @@ pub struct AppStateSnapshot {
     pub native_working_set_bytes: u64,
     pub chain_settings: FeqChainSettings,
     pub models: NeuralModelStatus,
+    /// Every endpoint's saved EQ and rack, so switching back after a restart
+    /// restores the device instead of starting it from the current curve.
+    #[serde(default)]
+    pub device_profiles: DeviceProfileRegistry,
     pub residency: MemoryFootprintEstimate,
     /// The impulse response installed in this process. Sent to the window, but
     /// not restored from disk: a restart must not claim a convolution is
@@ -519,6 +523,13 @@ impl AppStateStore {
         self.close_to_tray = snap.close_to_tray;
         self.preamp_db = snap.preamp_db;
         self.active_preset_name = snap.active_preset_name.clone();
+        self.device_profiles = snap.device_profiles.clone();
+        if self.device_profiles.active_device_guid.is_none() {
+            // A file written before profiles were saved still names the output
+            // that was active; keep that identity for the next switch.
+            self.device_profiles.active_device_guid = snap.active_device_guid.clone();
+            self.device_profiles.active_device_name = snap.active_device_name.clone();
+        }
         self.eq_model = Self::parse_eq_model(&snap.eq_model);
         self.eq_model_amount = snap.eq_model_amount;
         self.matched_treble = snap.matched_treble;
@@ -814,6 +825,7 @@ impl AppStateStore {
             native_working_set_bytes,
             chain_settings: self.chain_settings,
             models: self.models.clone(),
+            device_profiles: self.device_profiles.clone(),
             residency: self.residency.estimate_memory(),
             impulse_response: self.impulse_response.clone(),
         }
@@ -857,6 +869,57 @@ mod tests {
         old.as_object_mut().unwrap().remove("close_to_tray");
         let parsed: AppStateSnapshot = serde_json::from_value(old).unwrap();
         assert!(parsed.close_to_tray);
+    }
+
+    #[test]
+    fn endpoint_profiles_survive_a_reload_and_old_files_keep_the_active_name() {
+        let mut store = AppStateStore::new(48_000.0);
+        store.update_band_gain(2, 250.0, 4.0, 1.0);
+        store.switch_active_output_device("{device-a}", "Device A");
+        store.update_band_gain(2, 250.0, -3.0, 1.0);
+        store.switch_active_output_device("{device-b}", "Device B");
+
+        let saved = store
+            .snapshot()
+            .device_profiles
+            .profiles
+            .get("{device-a}")
+            .cloned()
+            .expect("the outgoing endpoint should be saved");
+        let saved_band = saved.bands.iter().find(|band| band.id == 2).unwrap();
+        assert!((saved_band.gain_db - -3.0).abs() < 0.001);
+
+        let path = std::env::temp_dir().join(format!(
+            "fluideq-state-profiles-{}.json",
+            std::process::id()
+        ));
+        store.save_to_file(&path).unwrap();
+        let mut reloaded = AppStateStore::new(48_000.0);
+        let restored = reloaded.load_from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(restored.active_device_guid.as_deref(), Some("{device-b}"));
+        assert!(restored.device_profiles.profiles.contains_key("{device-a}"));
+
+        // Files written before profiles were saved still name the active output.
+        let mut legacy = serde_json::to_value(store.snapshot()).unwrap();
+        legacy.as_object_mut().unwrap().remove("device_profiles");
+        let legacy_path = std::env::temp_dir().join(format!(
+            "fluideq-state-profiles-legacy-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&legacy_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+        let mut legacy_store = AppStateStore::new(48_000.0);
+        let adopted = legacy_store.load_from_file(&legacy_path).unwrap();
+        let _ = std::fs::remove_file(&legacy_path);
+        assert!(adopted.device_profiles.profiles.is_empty());
+        assert_eq!(adopted.active_device_guid.as_deref(), Some("{device-b}"));
+        assert_eq!(
+            legacy_store
+                .switch_active_output_device("{device-c}", "Device C")
+                .active_device_guid
+                .as_deref(),
+            Some("{device-c}")
+        );
     }
 
     #[test]
