@@ -55,9 +55,7 @@ pub fn spawn(app: tauri::AppHandle, on_bypass: fn(&tauri::AppHandle)) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
 
     let thread = std::thread::Builder::new()
         .name("fluideq-hotkeys".to_string())
