@@ -46,6 +46,7 @@ const engineFiles = [
   'FluidEQ-Engine-Setup.exe',
   'FluidEQ-DSP.exe',
   'FluidEQ-Outputs.exe',
+  'FluidEQ-Games.exe',
 ];
 const runtimeFiles = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'];
 const files = [...engineFiles, ...runtimeFiles];
@@ -158,6 +159,7 @@ run(
     'fluideq-engine-setup',
     'fluideq-dsp-host',
     'fluideq-output-watch',
+    'fluideq-foreground-watch',
     '--parallel',
   ],
   repoRoot,

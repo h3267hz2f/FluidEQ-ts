@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 import { registerView, viewFor } from './views/registry.js';
 import { equalizer } from './views/equalizer/index.js';
 import { config } from './views/config/index.js';
+import { games } from './views/games/index.js';
 import { settings } from './views/settings/index.js';
 import {
   F_MIN,
@@ -133,10 +134,17 @@ const els = {
   configProfilesEmpty: document.getElementById('config-profiles-empty'),
   configLog: document.getElementById('config-log'),
   configLogEmpty: document.getElementById('config-log-empty'),
+  gamesList: document.getElementById('games-list'),
+  gamesEmpty: document.getElementById('games-empty'),
+  gamesUnavailable: document.getElementById('games-unavailable'),
+  gamesForm: document.getElementById('games-form'),
+  gamesExecutable: document.getElementById('games-executable'),
+  gamesPreset: document.getElementById('games-preset'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
 registerView(config);
+registerView(games);
 registerView(settings);
 
 let activeView = 'equalizer';
@@ -159,6 +167,8 @@ let presetBusy = false;
 let startupEnabled = false;
 let startupBusy = false;
 let hotkeyFailures = [];
+let gameRules = [];
+let gameWatchAvailable = false;
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -265,6 +275,8 @@ async function refreshPresets() {
     return;
   }
   renderPresetSelect();
+  if (activeView === 'games') renderGames();
+  else renderGamePresetChoices();
 }
 
 function renderIr() {
@@ -563,6 +575,103 @@ function renderConfig() {
   els.configLogEmpty.hidden = log.length > 0;
 }
 
+function renderGamePresetChoices() {
+  const current = els.gamesPreset.value;
+  els.gamesPreset.replaceChildren(
+    ...presetNames.map((name) => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      return option;
+    })
+  );
+  if (presetNames.includes(current)) els.gamesPreset.value = current;
+}
+
+// One row per executable. Changing a row's preset writes the mapping through
+// the same command as adding it, so the file on disk is always the one the
+// list shows.
+function renderGames() {
+  els.gamesList.replaceChildren(
+    ...gameRules.map((rule) => {
+      const row = document.createElement('div');
+      row.className = 'game-row';
+
+      const name = document.createElement('span');
+      name.className = 'game-name';
+      name.textContent = rule.executable;
+
+      const select = document.createElement('select');
+      select.className = 'preset-select';
+      select.setAttribute('aria-label', `Preset for ${rule.executable}`);
+      const choices = presetNames.includes(rule.preset)
+        ? presetNames
+        : [...presetNames, rule.preset];
+      for (const choice of choices) {
+        const option = document.createElement('option');
+        option.value = choice;
+        option.textContent = choice;
+        option.selected = choice === rule.preset;
+        select.appendChild(option);
+      }
+      select.addEventListener('change', () =>
+        saveGameRule(rule.executable, select.value)
+      );
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'ghost';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => deleteGameRule(rule.executable));
+
+      row.append(name, select, remove);
+      return row;
+    })
+  );
+  els.gamesEmpty.hidden = gameRules.length > 0;
+  els.gamesUnavailable.hidden = gameWatchAvailable;
+  renderGamePresetChoices();
+}
+
+async function saveGameRule(executable, preset) {
+  if (!invoke) return false;
+  try {
+    gameRules = await invoke('set_game_preset', { executable, preset });
+    clearMessage();
+    renderGames();
+    return true;
+  } catch (error) {
+    showMessage(`Could not map ${executable}: ${error}`);
+    return false;
+  }
+}
+
+async function deleteGameRule(executable) {
+  if (!invoke) return;
+  try {
+    gameRules = await invoke('remove_game_preset', { executable });
+    clearMessage();
+    renderGames();
+  } catch (error) {
+    showMessage(`Could not remove ${executable}: ${error}`);
+  }
+}
+
+async function refreshGameRules() {
+  if (!invoke) return renderGames();
+  try {
+    gameRules = await invoke('list_game_presets');
+  } catch {
+    gameRules = [];
+  }
+  try {
+    gameWatchAvailable = await invoke('game_watch_available');
+  } catch {
+    gameWatchAvailable = false;
+  }
+  renderGames();
+}
+
 // One page at a time: the rail says which, the panels carry the same id, and
 // the header follows the page rather than repeating it in each view.
 function showView(id) {
@@ -585,6 +694,7 @@ function showView(id) {
   if (!equalizerView) els.presetForm.hidden = true;
   if (equalizerView) scheduleDraw();
   if (view.id === 'config') renderConfig();
+  if (view.id === 'games') renderGames();
   if (view.id === 'settings') renderSettings();
 }
 
@@ -976,6 +1086,22 @@ for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]'))
   button.addEventListener('click', () => showView(button.dataset.view));
 }
 
+els.gamesForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const executable = els.gamesExecutable.value.trim();
+  if (!executable) {
+    showMessage('Name the game executable');
+    return;
+  }
+  if (!els.gamesPreset.value) {
+    showMessage('Save a preset before mapping a game');
+    return;
+  }
+  if (await saveGameRule(executable, els.gamesPreset.value)) {
+    els.gamesExecutable.value = '';
+  }
+});
+
 els.volume.addEventListener('input', () => {
   setVolume(Number(els.volume.value));
   scheduleVolumeWrite();
@@ -1256,6 +1382,7 @@ async function boot() {
     refreshPresets();
     refreshStartup();
     refreshHotkeys();
+    refreshGameRules();
   } catch (error) {
     setConnection('Rust state centre unavailable', 'preview');
     showMessage(`Could not read the state: ${error}`);

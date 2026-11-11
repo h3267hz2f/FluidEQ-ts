@@ -46,6 +46,12 @@
               <path d="M9 18v-5h6v5" />
             </svg>
           </button>
+          <button class="nav-btn" type="button" aria-label="Games" data-view="games">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 8h10a4 4 0 0 1 3.9 4.8l-1 4a2.5 2.5 0 0 1-4.4 1.2L14 16h-4l-1.5 2a2.5 2.5 0 0 1-4.4-1.2l-1-4A4 4 0 0 1 7 8Z" />
+              <path d="M8 11v2M7 12h2M15.5 11.5h.01M17 13.5h.01" />
+            </svg>
+          </button>
           <button class="nav-btn" type="button" aria-label="Settings" data-view="settings">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
@@ -201,6 +207,29 @@
               <pre id="config-log" class="config-log"></pre>
               <p id="config-log-empty" class="settings-note">The engine has not written a log line yet.</p>
             </div>
+          </div>
+        </section>
+
+        <section class="view-games" data-view-panel="games" hidden>
+          <div class="card settings-card games-card">
+            <div class="settings-group">
+              <p class="eyebrow">Automatic foreground watcher</p>
+              <h2 class="settings-title">Every game, its own sound</h2>
+              <p class="settings-note">Map an executable to a preset: when Windows puts it in front FluidEQ applies that curve, keeps it while you alt-tab, and puts back what you had when the game closes.</p>
+            </div>
+
+            <div class="settings-group">
+              <h3 class="games-heading">Mapped games</h3>
+              <div id="games-list" class="games-list"></div>
+              <p id="games-empty" class="settings-note">No game has a preset yet.</p>
+              <p id="games-unavailable" class="settings-note" hidden>The foreground watcher is not installed in this build, so a mapping is saved but cannot switch on its own.</p>
+            </div>
+
+            <form id="games-form" class="games-form">
+              <input id="games-executable" class="preset-name" type="text" placeholder="Game executable, e.g. cs2.exe" aria-label="Game executable" maxlength="260" />
+              <select id="games-preset" class="preset-select" aria-label="Preset for the game"></select>
+              <button class="preset-action accent" type="submit">Add game</button>
+            </form>
           </div>
         </section>
 

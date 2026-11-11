@@ -465,6 +465,26 @@ impl AppStateStore {
         self.snapshot()
     }
 
+    /// Puts back the curve a game interrupted: bands, voicing, headroom, the
+    /// model's character amount and the preset's name. The output, engine
+    /// state and meters are left alone — a game changes the sound, not the
+    /// machine.
+    pub fn restore_curve(&mut self, curve: &AppStateSnapshot) -> AppStateSnapshot {
+        self.eq_model_amount = curve.eq_model_amount.clamp(0.0, 1.0);
+        self.set_eq_bands_and_config(
+            curve.bands.clone(),
+            &curve.eq_model,
+            curve.matched_treble,
+            curve.master_power,
+            curve.auto_headroom,
+            curve.preamp_db,
+            curve.tone.clone(),
+        );
+        self.active_preset_name = curve.active_preset_name.trim().to_string();
+        self.revision += 1;
+        self.snapshot()
+    }
+
     /// Loads a track onto a player deck (`0`, `1`, `FEQ_DECK_HANDOFF = 2`, or `FEQ_DECK_SPARE = 3`),
     /// resetting the native chain (`FEQ_CHAIN_RESET_SOURCE_CHANGE`) only if the target deck was audible.
     pub fn load_player_deck(&mut self, asked_deck: u32, path: &str, cue_seconds: f64) -> DeckLoadOutcome {
@@ -1016,6 +1036,23 @@ mod tests {
         let silent = store.set_audio_signal_active(false);
         assert_eq!(silent.spectrum_target_fps, 0);
         assert!(!silent.meters_fft_enabled);
+    }
+
+    #[test]
+    fn a_restored_curve_keeps_its_name_and_character() {
+        let mut store = AppStateStore::new(48_000.0);
+        store.update_band_gain(3, 75.0, -4.2, 1.8);
+        store.set_active_preset_name("Saved curve");
+        let saved = store.snapshot();
+
+        store.apply_preset(&presets::EqPreset::modern_country());
+        assert_ne!(store.snapshot().active_preset_name, saved.active_preset_name);
+
+        let restored = store.restore_curve(&saved);
+        assert_eq!(restored.active_preset_name, "Saved curve");
+        assert_eq!(restored.eq_model_amount, saved.eq_model_amount);
+        assert_eq!(restored.bands, saved.bands);
+        assert_eq!(restored.preamp_db, saved.preamp_db);
     }
 
     #[test]

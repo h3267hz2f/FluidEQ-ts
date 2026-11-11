@@ -40,7 +40,7 @@ jobs:
         run: >
           cmake --build native/.build/engine --config Release
           --target fluideq-engine fluideq-engine-setup fluideq-dsp-host
-          fluideq-output-watch
+          fluideq-output-watch fluideq-foreground-watch
           --parallel
 
       - name: Build attachment regression tests
@@ -73,7 +73,8 @@ jobs:
           foreach ($file in @(
             "native/.build/engine/bin/FluidEQ-Engine-Setup.exe",
             "native/.build/engine/bin/FluidEQ-DSP.exe",
-            "native/.build/engine/bin/FluidEQ-Outputs.exe"
+            "native/.build/engine/bin/FluidEQ-Outputs.exe",
+            "native/.build/engine/bin/FluidEQ-Games.exe"
           )) {
             if (-not (Test-Path $file)) { throw "missing $file" }
           }
@@ -86,5 +87,6 @@ jobs:
             native/.build/engine/bin/FluidEQ-Engine-Setup.exe
             native/.build/engine/bin/FluidEQ-DSP.exe
             native/.build/engine/bin/FluidEQ-Outputs.exe
+            native/.build/engine/bin/FluidEQ-Games.exe
           if-no-files-found: error
           retention-days: 14

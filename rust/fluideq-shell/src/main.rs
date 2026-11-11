@@ -16,6 +16,7 @@ pub mod apo_bridge;
 pub mod audio_endpoint;
 pub mod engine_host;
 pub mod engine_setup;
+pub mod game_presets;
 pub mod host_runtime;
 pub mod hotkeys;
 pub mod ipc;
@@ -40,6 +41,9 @@ struct ShellState {
     state_path: PathBuf,
     data_dir: PathBuf,
     host: engine_host::EngineHost,
+    game_watch: Mutex<Option<game_presets::Watch>>,
+    /// The curve a game interrupted, put back when its process ends.
+    game_restore: Mutex<Option<AppStateSnapshot>>,
 }
 
 fn presets_dir(state: &ShellState) -> PathBuf {
@@ -63,6 +67,79 @@ fn save(store: &AppStateStore, state: &ShellState) {
 /// holds a partial opinion about the sound.
 fn push_chain(store: &AppStateStore, state: &ShellState, revision: u64) {
     state.host.apply_chain(&store.export_wire_parameters(), revision as u32);
+}
+
+/// A mapped game came to the front: remember the curve it interrupted, apply
+/// its preset, and tell the window. Returns false when the preset is gone, so
+/// the watcher does not hold a game it cannot switch.
+fn engage_game(app: &tauri::AppHandle, preset_name: &str) -> bool {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return false;
+    };
+    let Ok(preset) = fluideq_state::presets::load(&presets_dir(&state), preset_name) else {
+        return false;
+    };
+    let Ok(mut store) = store_of(&state) else {
+        return false;
+    };
+    if let Ok(mut slot) = state.game_restore.lock() {
+        slot.get_or_insert(store.snapshot());
+    }
+    let snapshot = store.apply_preset(&preset);
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    let _ = app.emit("snapshot", snapshot);
+    true
+}
+
+/// The held game ended: put back the curve it interrupted.
+fn release_game(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let Some(saved) = state
+        .game_restore
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+    else {
+        return;
+    };
+    let Ok(mut store) = store_of(&state) else {
+        return;
+    };
+    let snapshot = store.restore_curve(&saved);
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    let _ = app.emit("snapshot", snapshot);
+}
+
+/// Restarts the watcher against the rules on disk: an edit is rare, and one
+/// helper for the newest rules is simpler than teaching a running one to
+/// replace its list. A game it was holding is released first, so editing the
+/// rules cannot strand a game's curve on the machine.
+fn restart_game_watch(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let Ok(mut slot) = state.game_watch.lock() else {
+        return;
+    };
+    if let Some(mut watch) = slot.take() {
+        if watch.holds_game() {
+            release_game(app);
+        }
+        watch.stop();
+    }
+    let rules = game_presets::load(&state.data_dir);
+    if rules.is_empty() {
+        return;
+    }
+    if let Some(watch) = game_presets::spawn(app.clone(), rules, engage_game, release_game) {
+        *slot = Some(watch);
+    }
 }
 
 #[tauri::command]
@@ -193,6 +270,39 @@ fn delete_preset(state: State<'_, ShellState>, name: String) -> Result<Vec<Strin
         let _ = apo_bridge::publish(&snapshot);
     }
     Ok(fluideq_state::presets::list(&presets_dir(&state)))
+}
+
+#[tauri::command]
+fn list_game_presets(state: State<'_, ShellState>) -> Vec<game_presets::GameRule> {
+    game_presets::load(&state.data_dir)
+}
+
+#[tauri::command]
+fn set_game_preset(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    executable: String,
+    preset: String,
+) -> Result<Vec<game_presets::GameRule>, String> {
+    let rules = game_presets::upsert(&state.data_dir, &executable, &preset)?;
+    restart_game_watch(&app);
+    Ok(rules)
+}
+
+#[tauri::command]
+fn remove_game_preset(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    executable: String,
+) -> Result<Vec<game_presets::GameRule>, String> {
+    let rules = game_presets::remove(&state.data_dir, &executable)?;
+    restart_game_watch(&app);
+    Ok(rules)
+}
+
+#[tauri::command]
+fn game_watch_available(app: tauri::AppHandle) -> bool {
+    game_presets::watcher_available(&app)
 }
 
 #[tauri::command]
@@ -680,10 +790,13 @@ fn main() {
                 state_path,
                 data_dir,
                 host,
+                game_watch: Mutex::new(None),
+                game_restore: Mutex::new(None),
             });
             setup_tray(app)?;
             hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
             output_watch::spawn(app.handle().clone(), follow_default_output_now);
+            restart_game_watch(app.handle());
             // Closing the window puts FluidEQ in the tray: the engine keeps
             // processing and the curve is one click away, and quit is an
             // explicit tray entry rather than an accident of the X button.
@@ -729,6 +842,10 @@ fn main() {
             apply_preset,
             save_preset,
             delete_preset,
+            list_game_presets,
+            set_game_preset,
+            remove_game_preset,
+            game_watch_available,
             load_ir,
             clear_ir,
             get_output_volume,
