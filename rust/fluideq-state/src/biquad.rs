@@ -56,6 +56,33 @@ impl BandFilterKind {
             Self::BP => FeqFilterType::FEQ_FILTER_BP,
         }
     }
+
+    /// The names the API and the window use: `PK`, `LSC`, `HSC`, `LP`, `HP`,
+    /// `BP`, `NO`, with the cookbook spellings accepted as aliases.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_uppercase().as_str() {
+            "PK" => Some(Self::PK),
+            "NO" | "NOTCH" => Some(Self::NO),
+            "LSC" | "LS" | "LOWSHELF" => Some(Self::LSC),
+            "HSC" | "HS" | "HIGHSHELF" => Some(Self::HSC),
+            "LPQ" | "LP" | "LOWPASS" => Some(Self::LPQ),
+            "HPQ" | "HP" | "HIGHPASS" => Some(Self::HPQ),
+            "BP" | "BANDPASS" => Some(Self::BP),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PK => "PK",
+            Self::NO => "NO",
+            Self::LSC => "LSC",
+            Self::HSC => "HSC",
+            Self::LPQ => "LP",
+            Self::HPQ => "HP",
+            Self::BP => "BP",
+        }
+    }
 }
 
 pub fn clamp(v: f64, lo: f64, hi: f64) -> f64 {

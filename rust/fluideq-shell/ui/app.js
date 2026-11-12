@@ -120,6 +120,9 @@ const els = {
   bandNumber: document.getElementById('band-number'),
   bandFreq: document.getElementById('band-freq'),
   bandType: document.getElementById('band-type'),
+  bandFilter: document.getElementById('band-filter'),
+  bandEar: document.getElementById('band-ear'),
+  bandEnable: document.getElementById('band-enable'),
   bandGainValue: document.getElementById('band-gain-value'),
   bandGain: document.getElementById('band-gain'),
   bandFrequency: document.getElementById('band-frequency'),
@@ -446,6 +449,7 @@ function renderBands() {
     gain.append(label, meter);
 
     button.append(frequency, gain);
+    if (band.enabled === false) button.classList.add('off');
     button.addEventListener('click', () => {
       selectedId = band.id;
       renderBands();
@@ -465,6 +469,13 @@ function renderInspector() {
   els.bandFreq.textContent = formatHz(band.frequency);
   els.bandType.textContent = band.filter_type || 'PK';
   els.bandGainValue.textContent = formatDb(band.gain_db);
+
+  const filterKey = band.filter_type || 'PK';
+  els.bandFilter.value = filterKey;
+  els.bandEar.value = String(Number(band.ear) || 0);
+  const enabled = band.enabled !== false;
+  els.bandEnable.textContent = enabled ? 'On' : 'Bypass';
+  els.bandEnable.setAttribute('aria-pressed', String(enabled));
 
   setRangeValue(els.bandGain, band.gain_db);
   setRangeFill(els.bandGain, ((band.gain_db + 24) / 48) * 100);
@@ -1394,6 +1405,27 @@ async function commitBand() {
   }
 }
 
+async function commitBandConfig() {
+  const band = selectedBand();
+  if (!band) return;
+  if (!invoke) {
+    renderAll();
+    return;
+  }
+  try {
+    snapshot = await invoke('set_band_config', {
+      bandId: band.id,
+      enabled: band.enabled !== false,
+      filterType: band.filter_type || 'PK',
+      ear: Number(band.ear) || 0,
+    });
+    clearMessage();
+  } catch (error) {
+    showMessage(`Could not save the band shape: ${error}`);
+  }
+  renderAll();
+}
+
 async function commitPreamp() {
   if (!invoke) return renderAll();
   try {
@@ -1735,6 +1767,33 @@ els.bandQuality.addEventListener('input', () => {
   scheduleDraw();
 });
 els.bandQuality.addEventListener('change', commitBand);
+
+els.bandFilter.addEventListener('change', () => {
+  const band = selectedBand();
+  if (!band) return;
+  band.filter_type = els.bandFilter.value;
+  els.bandType.textContent = band.filter_type;
+  scheduleDraw();
+  commitBandConfig();
+});
+
+els.bandEar.addEventListener('change', () => {
+  const band = selectedBand();
+  if (!band) return;
+  band.ear = Number(els.bandEar.value) || 0;
+  scheduleDraw();
+  commitBandConfig();
+});
+
+els.bandEnable.addEventListener('click', () => {
+  const band = selectedBand();
+  if (!band) return;
+  band.enabled = band.enabled === false;
+  renderBands();
+  renderInspector();
+  scheduleDraw();
+  commitBandConfig();
+});
 
 els.resetBand.addEventListener('click', () => {
   const band = selectedBand();

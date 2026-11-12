@@ -377,6 +377,22 @@ fn set_band_gain(
 }
 
 #[tauri::command]
+fn set_band_config(
+    state: State<'_, ShellState>,
+    band_id: u32,
+    enabled: bool,
+    filter_type: String,
+    ear: u8,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.update_band_config(band_id, enabled, &filter_type, ear)?;
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn list_presets(state: State<'_, ShellState>) -> Result<Vec<String>, String> {
     Ok(fluideq_state::presets::list(&presets_dir(&state)))
 }
@@ -1123,6 +1139,7 @@ fn main() {
             set_normalizer_mode,
             set_master_target,
             set_band_gain,
+            set_band_config,
             list_presets,
             apply_preset,
             save_preset,

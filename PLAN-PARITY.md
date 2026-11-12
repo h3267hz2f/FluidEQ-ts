@@ -79,7 +79,7 @@
 | 3 | **Room 独立页（启用导航）** | [x] 已完成：解锁导航栏 Room 按钮，新增 Room 独立视图，支持 5 种声学空间预设（Studio / Stage / Cinema / Arena / Club）、3 档 KEMAR 头型脉冲切换（Small / Medium / Large）、空间几何尺寸与混响衰减微调、低音管理与声道电平控制 | `room_heads.rs`、`load_room_head_from_text`、`FeqChainRoomSettings` |
 | 4 | **频谱与多级电表接入** | [x] 已完成：`spectrum_bridge.rs` 在独立线程按帧率自适应向窗口推送 `spectrum` 事件，EQ 曲线底部绘制实时频谱，检查器显示 Integrated / Short-term LUFS 与 True Peak 电表；`MinimizedWarm` 与音频静默时停止推送 | `spectrum_bridge.rs`、`residency.rs` |
 | 5 | **DSP 机架进阶控制** | [x] 已完成：支持 isolate（只听差值）开关的阶段补齐切换，Normalizer 模式三档（Off / Guard / Leveler），Master 交付目标预设（Streaming / Podcast / Reference / Cinema），`isolate` 启动自动清零 | `FeqChainSettings`、`persistence.rs`（启动自动清零 `isolate`） |
-| 6 | **更多滤波器类型与频段开关** | 单频段启用/旁路开关、滤波器类型切换（PK / LSC / HSC / LP / HP / BP / Notch）、左右耳（Both / Left / Right）选择 | `biquad.rs` (`BandFilterKind`, `ear`) |
+| 6 | **更多滤波器类型与频段开关** | [x] 已完成：单频段 On/Bypass 开关、7 种滤波器类型（PK / LSC / HSC / LP / HP / BP / Notch）切换、左右耳（Both / Left / Right）路由选择，画布实时响应 | `biquad.rs` (`BandFilterKind`, `ear`) |
 | 7 | **Squiglink / Equalizer APO 文本导入导出** | 支持导入/导出标准 Equalizer APO `Filter:` / `Preamp:` 文本，直接生成或覆盖频段 | `apo.rs` |
 
 ### P3 — 发布加固、冷驻留与预览桥退役

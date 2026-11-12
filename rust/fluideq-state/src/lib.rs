@@ -378,6 +378,28 @@ impl AppStateStore {
         }
     }
 
+    /// Sets a band's on/bypass state, filter shape and stereo routing.
+    pub fn update_band_config(
+        &mut self,
+        band_id: u32,
+        enabled: bool,
+        filter_type: &str,
+        ear: u8,
+    ) -> Result<AppStateSnapshot, String> {
+        let kind = crate::biquad::BandFilterKind::from_name(filter_type)
+            .ok_or_else(|| format!("there is no filter type named \"{filter_type}\""))?;
+        let Some(band) = self.bands.iter_mut().find(|b| b.id == band_id) else {
+            return Err(format!("there is no band numbered {band_id}"));
+        };
+        band.enabled = enabled;
+        band.filter_type = kind;
+        band.ear = ear.min(2);
+        self.revision += 1;
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+        Ok(self.snapshot())
+    }
+
     /// Synchronizes full EQ bands, character model, analog-matched treble mode, power, preamp,
     /// and Tone settings from the UI into the native Rust + C++20 state store.
     #[allow(clippy::too_many_arguments)]
@@ -1309,5 +1331,26 @@ mod tests {
 
         let bass_snap = store.set_room_bass_management(true);
         assert_eq!(bass_snap.chain_settings.room.bass_management, 1);
+    }
+
+    #[test]
+    fn band_shape_routing_and_bypass_round_trip() {
+        let mut store = AppStateStore::new(48_000.0);
+        let band_id = store.snapshot().bands[1].id;
+
+        let shaped = store
+            .update_band_config(band_id, false, "HSC", 2)
+            .expect("shape");
+        let band = shaped.bands.iter().find(|b| b.id == band_id).unwrap();
+        assert!(!band.enabled);
+        assert_eq!(band.filter_type, crate::biquad::BandFilterKind::HSC);
+        assert_eq!(band.ear, 2);
+
+        // The engine's own copy of the chain must agree with the snapshot.
+        let engine_band = &shaped.chain_settings.eq.bands[(band_id as usize) - 1];
+        assert_eq!(engine_band.enabled, 0);
+        assert_eq!(engine_band.ear, 2);
+
+        assert!(store.update_band_config(band_id, true, "nope", 0).is_err());
     }
 }
