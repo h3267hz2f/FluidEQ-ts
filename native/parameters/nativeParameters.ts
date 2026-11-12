@@ -4,6 +4,11 @@ Copyright (C) <2026>  <Ivan Carmenates Garcia>
 SPDX-License-Identifier: GPL-3.0-or-later
 */
 
+// The single native parameter table. `rust/fluideq-dsp-sys/build.rs` and
+// `native/tools/generate-parameters.mjs` read it as text and never import it,
+// so the TypeScript imports below are inherited from the retired preview and
+// are not resolved by either consumer.
+
 import {
   CROSSFADE_CURVES,
   DENOISE_HUM_MODES,

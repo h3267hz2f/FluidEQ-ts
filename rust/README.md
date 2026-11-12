@@ -39,7 +39,7 @@ The installer is written to
 
 ## One parameter table
 
-`src/common/dsp/nativeParameters.ts` is the single list of native parameter
+`native/parameters/nativeParameters.ts` is the single list of native parameter
 ids. `rust/fluideq-dsp-sys/build.rs` generates both the C++ `parameters.h` and
 the Rust constants from it on every build; there is no second copy to drift.
 

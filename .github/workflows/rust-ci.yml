@@ -31,7 +31,7 @@ jobs:
           node-version: 22
 
       # The C++ core includes a header that is generated from the one
-      # parameter table in src/common/dsp/nativeParameters.ts and stays
+      # parameter table in native/parameters/nativeParameters.ts and stays
       # gitignored, so it has to exist before the first translation unit is
       # compiled.
       - name: Generate the native parameter header

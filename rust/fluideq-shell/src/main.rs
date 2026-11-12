@@ -19,7 +19,6 @@ pub mod engine_setup;
 pub mod game_presets;
 pub mod host_runtime;
 pub mod hotkeys;
-pub mod ipc;
 pub mod output_watch;
 pub mod spectrum_bridge;
 pub mod startup;
@@ -27,9 +26,7 @@ pub mod system_daemons;
 
 use fluideq_state::residency::WindowResidencyMode;
 use fluideq_state::{AppStateSnapshot, AppStateStore};
-use ipc::{dispatch_ipc_command, ShellIpcCommand, ShellIpcResponse};
 use serde_json::Value;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use tauri::menu::MenuBuilder;
@@ -764,37 +761,6 @@ fn set_startup_enabled(enabled: bool) -> Result<bool, String> {
     startup::enabled()
 }
 
-/// The JSON-lines bridge the TypeScript preview server spawns with
-/// `--ipc-stdio`: one command per line in, one reply per line out.
-///
-/// It runs no window and no host — the preview only needs the state centre,
-/// and it spawns a debug build, which still owns the console the server reads.
-fn run_stdio_ipc_loop() {
-    let mut store = AppStateStore::new(48_000.0);
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(raw) = line else { break };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<ShellIpcCommand>(trimmed) {
-            Ok(command) => dispatch_ipc_command(&mut store, command),
-            Err(error) => ShellIpcResponse::Error {
-                message: format!("IPC decode error: {error}"),
-            },
-        };
-        let encoded = match serde_json::to_string(&response) {
-            Ok(encoded) => encoded,
-            Err(_) => continue,
-        };
-        let mut out = stdout.lock();
-        let _ = writeln!(out, "{encoded}");
-        let _ = out.flush();
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct WindowPlacement {
     x: i32,
@@ -1086,10 +1052,6 @@ fn another_instance_is_running() -> bool {
 fn focus_existing_window() {}
 
 fn main() {
-    if std::env::args().any(|arg| arg == "--ipc-stdio") {
-        run_stdio_ipc_loop();
-        return;
-    }
     if another_instance_is_running() {
         focus_existing_window();
         return;

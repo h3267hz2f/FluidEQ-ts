@@ -9,7 +9,7 @@ on:
     paths:
       - "native/**"
       - "rust/**"
-      - "src/common/dsp/nativeParameters.ts"
+      - "native/parameters/nativeParameters.ts"
       - ".github/workflows/native-engine.yml"
 
 permissions:

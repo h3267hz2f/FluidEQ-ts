@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! Build bridge for the FluidEQ C++ DSP core.
 //!
 //! Two generated artefacts come from the one parameter table in
-//! `src/common/dsp/nativeParameters.ts`:
+//! `native/parameters/nativeParameters.ts`:
 //!
 //! * `fluideq/parameters.h` in `OUT_DIR`, which the C++ core includes, and
 //! * `parameters.rs` in `OUT_DIR`, which `fluideq-dsp-sys` includes.
@@ -152,7 +152,7 @@ fn write_cpp_header(out: &Path, parameters: &[NativeParameter], schema_version: 
         "/*".to_string(),
         " * GENERATED FILE. Do not edit.".to_string(),
         " *".to_string(),
-        " * Source: src/common/dsp/nativeParameters.ts".to_string(),
+        " * Source: native/parameters/nativeParameters.ts".to_string(),
         " * Writer: rust/fluideq-dsp-sys/build.rs".to_string(),
         " */".to_string(),
         "#ifndef FLUIDEQ_PARAMETERS_H".to_string(),
@@ -264,9 +264,8 @@ fn main() {
         .join("src")
         .join("vendor");
     let parameter_source = repo_root
-        .join("src")
-        .join("common")
-        .join("dsp")
+        .join("native")
+        .join("parameters")
         .join("nativeParameters.ts");
 
     println!("cargo:rerun-if-changed={}", include_dir.display());

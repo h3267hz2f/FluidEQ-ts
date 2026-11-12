@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 /**
  * Emit `native/dsp-core/include/fluideq/parameters.h` from the one parameter
- * table in `src/common/dsp/nativeParameters.ts`.
+ * table in `native/parameters/nativeParameters.ts`.
  *
  * This mirrors `rust/fluideq-dsp-sys/build.rs`. The native engine build runs
  * CMake directly, outside Cargo, so it needs the same generated header before
@@ -23,9 +23,8 @@ const nativeDir = path.resolve(here, '..');
 const repoRoot = path.resolve(nativeDir, '..');
 const source = path.join(
   repoRoot,
-  'src',
-  'common',
-  'dsp',
+  'native',
+  'parameters',
   'nativeParameters.ts',
 );
 const output = path.join(
@@ -143,7 +142,7 @@ function buildHeader(parameters, schemaVersion) {
     '/*',
     ' * GENERATED FILE. Do not edit.',
     ' *',
-    ' * Source: src/common/dsp/nativeParameters.ts',
+    ' * Source: native/parameters/nativeParameters.ts',
     ' * Writer: native/tools/generate-parameters.mjs',
     ' */',
     '#ifndef FLUIDEQ_PARAMETERS_H',
