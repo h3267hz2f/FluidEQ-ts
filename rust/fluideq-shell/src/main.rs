@@ -125,7 +125,9 @@ fn engage_game(app: &tauri::AppHandle, preset_name: &str) -> bool {
     if let Ok(mut slot) = state.game_restore.lock() {
         slot.get_or_insert(store.snapshot());
     }
-    let snapshot = store.apply_preset(&preset);
+    store.apply_preset(&preset);
+    store.ensure_room_head_loaded(&room_heads_dir(app));
+    let snapshot = store.snapshot();
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
     let _ = apo_bridge::publish(&snapshot);
@@ -149,7 +151,9 @@ fn release_game(app: &tauri::AppHandle) {
     let Ok(mut store) = store_of(&state) else {
         return;
     };
-    let snapshot = store.restore_curve(&saved);
+    store.restore_curve(&saved);
+    store.ensure_room_head_loaded(&room_heads_dir(app));
+    let snapshot = store.snapshot();
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
     let _ = apo_bridge::publish(&snapshot);
@@ -368,7 +372,7 @@ fn set_band_gain(
     quality: f64,
 ) -> Result<AppStateSnapshot, String> {
     let mut store = store_of(&state)?;
-    store.update_band_gain(band_id, frequency, gain_db, quality);
+    store.update_band_gain(band_id, frequency, gain_db, quality)?;
     let snapshot = store.snapshot();
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
@@ -427,10 +431,18 @@ fn list_presets(state: State<'_, ShellState>) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn apply_preset(state: State<'_, ShellState>, name: String) -> Result<AppStateSnapshot, String> {
+fn apply_preset(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    name: String,
+) -> Result<AppStateSnapshot, String> {
     let preset = fluideq_state::presets::load(&presets_dir(&state), &name)?;
     let mut store = store_of(&state)?;
-    let snapshot = store.apply_preset(&preset);
+    store.apply_preset(&preset);
+    // The preset carries the Room head index but not the HRTF taps, so the
+    // kernel has to be staged again or the chain keeps the previous head.
+    store.ensure_room_head_loaded(&room_heads_dir(&app));
+    let snapshot = store.snapshot();
     save(&store, &state);
     push_chain(&store, &state, snapshot.revision);
     let _ = apo_bridge::publish(&snapshot);
@@ -505,9 +517,14 @@ fn load_ir(state: State<'_, ShellState>, bytes: Vec<u8>) -> Result<AppStateSnaps
     if folder.as_os_str().is_empty() {
         return Err("the engine root could not be resolved".to_string());
     }
+    // The window accepts AIFF as well as WAV, but the engine's own
+    // Convolution reader is RIFF/WAVE-only. Hand both halves the same
+    // canonical float WAV so an AIFF cannot load in the chain and do nothing
+    // system-wide.
+    let canonical = fluideq_state::wav_ir::canonical_engine_wav(&bytes)?;
     let mut store = store_of(&state)?;
-    store.load_wav_impulse_response(&bytes)?;
-    if let Err(error) = apo_bridge::write_convolution(&folder, &bytes) {
+    store.load_wav_impulse_response(&canonical)?;
+    if let Err(error) = apo_bridge::write_convolution(&folder, &canonical) {
         store.clear_impulse_response();
         return Err(format!(
             "could not write {}: {error}",

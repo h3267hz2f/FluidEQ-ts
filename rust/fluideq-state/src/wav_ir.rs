@@ -156,9 +156,16 @@ pub fn decode_wav_impulse_response(bytes: &[u8]) -> Result<DecodedImpulseRespons
             bytes[cursor + 7],
         ]) as usize;
         let chunk_start = cursor + 8;
-        let chunk_end = chunk_start.saturating_add(chunk_size).min(bytes.len());
+        // A declared size past the end is a truncated file, not a chunk to be
+        // clamped: reading its declared fields would index out of bounds.
+        let chunk_end = chunk_start
+            .checked_add(chunk_size)
+            .ok_or_else(|| "WAVE chunk size overflows the file".to_string())?;
+        if chunk_end > bytes.len() {
+            return Err("WAVE chunk runs past the end of the file".to_string());
+        }
 
-        if chunk_id == b"fmt " && chunk_size >= 16 && chunk_end <= bytes.len() {
+        if chunk_id == b"fmt " && chunk_size >= 16 {
             let fmt = &bytes[chunk_start..chunk_end];
             format_tag = u16::from_le_bytes([fmt[0], fmt[1]]);
             channels = u16::from_le_bytes([fmt[2], fmt[3]]);
@@ -171,7 +178,7 @@ pub fn decode_wav_impulse_response(bytes: &[u8]) -> Result<DecodedImpulseRespons
             if data_slice.is_some() {
                 break;
             }
-        } else if chunk_id == b"data" && chunk_end <= bytes.len() {
+        } else if chunk_id == b"data" {
             data_slice = Some(&bytes[chunk_start..chunk_end]);
             if have_format {
                 break;
@@ -249,9 +256,14 @@ pub fn decode_aiff_impulse_response(bytes: &[u8]) -> Result<DecodedImpulseRespon
             bytes[cursor + 7],
         ]) as usize;
         let chunk_start = cursor + 8;
-        let chunk_end = chunk_start.saturating_add(chunk_size).min(bytes.len());
+        let chunk_end = chunk_start
+            .checked_add(chunk_size)
+            .ok_or_else(|| "AIFF chunk size overflows the file".to_string())?;
+        if chunk_end > bytes.len() {
+            return Err("AIFF chunk runs past the end of the file".to_string());
+        }
 
-        if chunk_id == b"COMM" && chunk_size >= 18 && chunk_end <= bytes.len() {
+        if chunk_id == b"COMM" && chunk_size >= 18 {
             let comm = &bytes[chunk_start..chunk_end];
             channels = u16::from_be_bytes([comm[0], comm[1]]);
             total_frames = u32::from_be_bytes([comm[2], comm[3], comm[4], comm[5]]) as usize;
@@ -280,7 +292,7 @@ pub fn decode_aiff_impulse_response(bytes: &[u8]) -> Result<DecodedImpulseRespon
             if ssnd_slice.is_some() {
                 break;
             }
-        } else if chunk_id == b"SSND" && chunk_size >= 8 && chunk_end <= bytes.len() {
+        } else if chunk_id == b"SSND" && chunk_size >= 8 {
             let ssnd = &bytes[chunk_start..chunk_end];
             let offset = u32::from_be_bytes([ssnd[0], ssnd[1], ssnd[2], ssnd[3]]) as usize;
             let data_start = 8usize.saturating_add(offset);
@@ -442,6 +454,20 @@ pub fn encode_float32_wav(interleaved: &[f32], sample_rate: u32, channels: u16) 
         out.extend_from_slice(&sample.to_le_bytes());
     }
     out
+}
+
+/// Re-encodes any impulse response the window accepts (RIFF/WAVE or
+/// FORM/AIFF) as a 32-bit float RIFF/WAVE. The system engine's Convolution
+/// reader is RIFF/WAVE-only, so handing it the user's original AIFF would load
+/// in the Rust chain and silently do nothing system-wide.
+pub fn canonical_engine_wav(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let decoded = decode_pcm_impulse_response(bytes)?;
+    let mut interleaved = Vec::with_capacity(decoded.left.len() + decoded.right.len());
+    for (left, right) in decoded.left.iter().zip(&decoded.right) {
+        interleaved.push(*left);
+        interleaved.push(*right);
+    }
+    Ok(encode_float32_wav(&interleaved, decoded.sample_rate, 2))
 }
 
 // ============================================================================
@@ -971,6 +997,9 @@ mod tests {
 
         // Truncating 1 byte off the end makes the declared `data` chunk run past the buffer -> refused
         assert!(parse_apo_wav(&wav[..wav.len() - 1]).is_none());
+
+        // A WAV the engine already reads survives the canonicalisation.
+        assert!(parse_apo_wav(&canonical_engine_wav(&wav).unwrap()).is_some());
     }
 
     #[test]
@@ -1008,6 +1037,18 @@ mod tests {
         assert!((ir.left[1] + 0.5).abs() < 1e-6);
         // Mono duplicated into right channel
         assert_eq!(ir.left, ir.right);
+
+        // The engine's reader only takes RIFF/WAVE, so the page's AIFF has to
+        // be canonicalised before it is written beside the engine.
+        let canonical = canonical_engine_wav(&aiff).expect("canonicalise aiff");
+        assert!(
+            parse_apo_wav(&canonical).is_some(),
+            "the engine reads the canonical float WAV"
+        );
+        let canonical_ir =
+            decode_wav_impulse_response(&canonical).expect("canonical wav decodes");
+        assert_eq!(canonical_ir.sample_rate, 48_000);
+        assert_eq!(canonical_ir.frames, 2);
     }
 
     #[test]
@@ -1048,6 +1089,33 @@ mod tests {
         let target_100ns = mf.reset_on_seek(48_000).unwrap();
         assert_eq!(target_100ns, 10_000_000);
         assert_eq!(mf.available_pending_frames(), 0);
+    }
+
+    #[test]
+    fn a_wave_chunk_that_runs_past_the_end_is_refused_instead_of_panicking() {
+        // A JUNK chunk pushes the fmt header to the last four bytes, where
+        // the old clamp handed the parser an empty slice and indexed it.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"JUNK");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 16]);
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        assert!(decode_wav_impulse_response(&wav).is_err());
+    }
+
+    #[test]
+    fn an_aiff_chunk_that_runs_past_the_end_is_refused_instead_of_panicking() {
+        let mut aiff = Vec::new();
+        aiff.extend_from_slice(b"FORM");
+        aiff.extend_from_slice(&0u32.to_be_bytes());
+        aiff.extend_from_slice(b"AIFF");
+        aiff.extend_from_slice(b"COMM");
+        aiff.extend_from_slice(&18u32.to_be_bytes());
+        assert!(decode_aiff_impulse_response(&aiff).is_err());
     }
 }
 

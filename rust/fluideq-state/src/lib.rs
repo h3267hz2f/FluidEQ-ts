@@ -367,15 +367,23 @@ impl AppStateStore {
         let _ = self.native_chain.configure(&self.chain_settings);
     }
 
-    pub fn update_band_gain(&mut self, band_id: u32, frequency: f64, gain_db: f64, quality: f64) {
-        if let Some(band) = self.bands.iter_mut().find(|b| b.id == band_id) {
-            band.frequency = frequency.clamp(20.0, 20000.0);
-            band.gain_db = gain_db.clamp(-24.0, 24.0);
-            band.quality = quality.clamp(0.1, 18.0);
-            self.revision += 1;
-            self.sync_eq_and_tone_into_chain_settings();
-            self.commit_chain_and_linear_phase_kernel();
-        }
+    pub fn update_band_gain(
+        &mut self,
+        band_id: u32,
+        frequency: f64,
+        gain_db: f64,
+        quality: f64,
+    ) -> Result<(), String> {
+        let Some(band) = self.bands.iter_mut().find(|b| b.id == band_id) else {
+            return Err(format!("there is no band numbered {band_id}"));
+        };
+        band.frequency = frequency.clamp(10.0, 20000.0);
+        band.gain_db = gain_db.clamp(-24.0, 24.0);
+        band.quality = quality.clamp(0.1, 18.0);
+        self.revision += 1;
+        self.sync_eq_and_tone_into_chain_settings();
+        self.commit_chain_and_linear_phase_kernel();
+        Ok(())
     }
 
     /// Sets a band's on/bypass state, filter shape and stereo routing.
@@ -567,6 +575,7 @@ impl AppStateStore {
             matched_treble: self.matched_treble,
             tone: self.tone.clone(),
             bands: self.bands.clone(),
+            chain_settings: Some(self.chain_settings),
         }
     }
 
@@ -587,6 +596,14 @@ impl AppStateStore {
         // session that had it at another value must put it back.
         self.eq_model_amount = preset.eq_model_amount.clamp(0.0, 1.0);
         self.active_preset_name = preset.name.clone();
+        // A preset saved by this build carries the rack and Room as well, so
+        // applying it restores the whole chain and not only the curve. The
+        // master switch stays where the user left it: a preset is a sound, not
+        // a power state.
+        if let Some(mut chain) = preset.chain_settings {
+            chain.enabled = if master_power { 1 } else { 0 };
+            self.update_chain_settings(chain);
+        }
         self.revision += 1;
         self.sync_eq_and_tone_into_chain_settings();
         self.commit_chain_and_linear_phase_kernel();
@@ -617,6 +634,11 @@ impl AppStateStore {
             curve.tone.clone(),
         );
         self.active_preset_name = curve.active_preset_name.trim().to_string();
+        // The curve a game interrupted included its rack and Room, so putting
+        // the sound back means putting the whole chain back.
+        let mut chain = curve.chain_settings;
+        chain.enabled = if curve.master_power { 1 } else { 0 };
+        self.update_chain_settings(chain);
         self.revision += 1;
         self.snapshot()
     }
@@ -1130,9 +1152,9 @@ mod tests {
     #[test]
     fn endpoint_profiles_survive_a_reload_and_old_files_keep_the_active_name() {
         let mut store = AppStateStore::new(48_000.0);
-        store.update_band_gain(2, 250.0, 4.0, 1.0);
+        store.update_band_gain(2, 250.0, 4.0, 1.0).unwrap();
         store.switch_active_output_device("{device-a}", "Device A");
-        store.update_band_gain(2, 250.0, -3.0, 1.0);
+        store.update_band_gain(2, 250.0, -3.0, 1.0).unwrap();
         store.switch_active_output_device("{device-b}", "Device B");
 
         let saved = store
@@ -1221,7 +1243,7 @@ mod tests {
         });
 
         // A band edit runs the EQ's own kernel refresh; the IR must survive it.
-        store.update_band_gain(1, 40.0, 4.0, 1.0);
+        store.update_band_gain(1, 40.0, 4.0, 1.0).unwrap();
         assert_eq!(store.native_chain.eq_kernel_len(), 2);
         let live = serde_json::to_value(store.snapshot()).unwrap();
         assert_eq!(live["impulse_response"]["frames"], 2);
@@ -1244,7 +1266,7 @@ mod tests {
     #[test]
     fn cold_standby_preserves_eq_state_and_disables_meters() {
         let mut store = AppStateStore::new(48_000.0);
-        store.update_band_gain(1, 32.0, 6.5, 0.85);
+        store.update_band_gain(1, 32.0, 6.5, 0.85).unwrap();
 
         let cold_mem = store.enter_cold_standby();
         assert_eq!(cold_mem.residency_mode, WindowResidencyMode::ColdStandby);
@@ -1271,7 +1293,7 @@ mod tests {
     #[test]
     fn a_restored_curve_keeps_its_name_and_character() {
         let mut store = AppStateStore::new(48_000.0);
-        store.update_band_gain(3, 75.0, -4.2, 1.8);
+        store.update_band_gain(3, 75.0, -4.2, 1.8).unwrap();
         store.set_active_preset_name("Saved curve");
         let saved = store.snapshot();
 
@@ -1288,7 +1310,7 @@ mod tests {
     #[test]
     fn wire_export_and_import_preserves_store_chain_settings() {
         let mut store = AppStateStore::new(48_000.0);
-        store.update_band_gain(3, 75.0, -4.2, 1.8);
+        store.update_band_gain(3, 75.0, -4.2, 1.8).unwrap();
         let wire = store.export_wire_parameters();
 
         let mut target_store = AppStateStore::new(48_000.0);
@@ -1415,5 +1437,54 @@ mod tests {
         let again = store.import_apo_text(&exported).expect("re-import");
         assert_eq!(again.bands.len(), 2);
         assert!(store.import_apo_text("no filters here").is_err());
+    }
+
+    #[test]
+    fn a_preset_carries_the_rack_and_room_it_was_saved_with() {
+        let mut store = AppStateStore::new(48_000.0);
+        let mut chain = store.snapshot().chain_settings;
+        chain.room.enabled = 1;
+        chain.room.size_m = 12.0;
+        chain.exciter.enabled = 0;
+        store.update_chain_settings(chain);
+
+        let preset = store.current_preset("Room and rack");
+        let mut target = AppStateStore::new(48_000.0);
+        target.apply_preset(&preset);
+        let restored = target.snapshot();
+        assert_eq!(restored.chain_settings.room.enabled, 1);
+        assert_eq!(restored.chain_settings.room.size_m, 12.0);
+        assert_eq!(restored.chain_settings.exciter.enabled, 0);
+        assert_eq!(restored.active_preset_name, "Room and rack");
+    }
+
+    #[test]
+    fn an_old_preset_without_a_chain_leaves_the_rack_alone() {
+        let mut store = AppStateStore::new(48_000.0);
+        let mut chain = store.snapshot().chain_settings;
+        chain.room.size_m = 5.5;
+        chain.exciter.enabled = 1;
+        store.update_chain_settings(chain);
+
+        let old: presets::EqPreset =
+            serde_json::from_str(r#"{"name":"Old","bands":[]}"#).expect("old file");
+        assert!(old.chain_settings.is_none(), "a file written before the chain has no chain");
+
+        let mut preset = presets::EqPreset::modern_country();
+        preset.chain_settings = None;
+        store.apply_preset(&preset);
+        let applied = store.snapshot();
+        assert_eq!(applied.chain_settings.room.size_m, 5.5);
+        assert_eq!(applied.chain_settings.exciter.enabled, 1);
+    }
+
+    #[test]
+    fn a_band_edit_refuses_an_unknown_id_and_keeps_a_sub_20hz_frequency() {
+        let mut store = AppStateStore::new(48_000.0);
+        assert!(store.update_band_gain(999, 1_000.0, 3.0, 1.0).is_err());
+        store
+            .update_band_gain(1, 12.0, 0.0, 1.0)
+            .expect("band 1 exists");
+        assert_eq!(store.snapshot().bands[0].frequency, 12.0);
     }
 }

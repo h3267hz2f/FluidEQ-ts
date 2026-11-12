@@ -15,6 +15,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 use crate::biquad::{BandFilterKind, EqBandSpec};
 use crate::ToneSettings;
+use fluideq_dsp_sys::FeqChainSettings;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,11 @@ pub struct EqPreset {
     #[serde(default)]
     pub tone: ToneSettings,
     pub bands: Vec<EqBandSpec>,
+    /// The rack, Room and chain switches as they were when the preset was
+    /// saved. Absent from files written before presets carried the chain, so
+    /// an old preset still applies its curve without resetting the machine.
+    #[serde(default)]
+    pub chain_settings: Option<FeqChainSettings>,
 }
 
 fn default_auto_headroom() -> bool {
@@ -112,6 +118,7 @@ impl EqPreset {
             matched_treble: default_matched_treble(),
             tone: ToneSettings::default(),
             bands,
+            chain_settings: None,
         }
     }
 }

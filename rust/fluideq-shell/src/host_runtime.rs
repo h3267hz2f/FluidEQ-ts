@@ -1725,7 +1725,7 @@ mod tests {
     #[test]
     fn supervised_pipe_loop_applies_chain_and_stops_on_shutdown() {
         let mut store = fluideq_state::AppStateStore::new(48_000.0);
-        store.update_band_gain(1, 45.0, 5.25, 1.2);
+        store.update_band_gain(1, 45.0, 5.25, 1.2).unwrap();
         let wire_params = store.export_wire_parameters();
 
         let mut input_pipe = Vec::new();

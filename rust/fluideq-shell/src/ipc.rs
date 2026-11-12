@@ -162,10 +162,10 @@ pub fn dispatch_ipc_command(
             frequency,
             gain_db,
             quality,
-        } => {
-            store.update_band_gain(band_id, frequency, gain_db, quality);
-            ShellIpcResponse::Snapshot(store.snapshot())
-        }
+        } => match store.update_band_gain(band_id, frequency, gain_db, quality) {
+            Ok(()) => ShellIpcResponse::Snapshot(store.snapshot()),
+            Err(message) => ShellIpcResponse::Error { message },
+        },
         ShellIpcCommand::SetEqBandsAndConfig {
             bands,
             eq_model,

@@ -481,7 +481,7 @@ mod tests {
             .unwrap()
             .contains("1000.0 Hz"));
 
-        store.update_band_gain(1, 2_000.0, 6.0, 1.0);
+        store.update_band_gain(1, 2_000.0, 6.0, 1.0).unwrap();
         write_to(&folder, &store.snapshot()).unwrap();
         let updated = std::fs::read_to_string(folder.join("config.txt")).unwrap();
         assert!(updated.contains("2000.0 Hz"));
