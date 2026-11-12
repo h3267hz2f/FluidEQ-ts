@@ -1111,6 +1111,12 @@ kbd {
   gap: 14px;
 }
 
+.rack-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .bands {
   display: flex;
   gap: 8px;

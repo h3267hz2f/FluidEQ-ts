@@ -18,6 +18,11 @@ import {
   rackStages,
   stageIsOn,
   stageSummary,
+  stageSupportsIsolate,
+  stageIsolate,
+  NORMALIZER_MODES,
+  normalizerModeKey,
+  MASTER_TARGETS,
 } from './views/rack/index.js';
 import { settings } from './views/settings/index.js';
 import { room, ROOM_PRESETS, KEMAR_HEADS } from './views/room/index.js';
@@ -1033,9 +1038,125 @@ function renderRackEditor(settings) {
 
       control.append(head, input);
       return control;
-    })
+    }),
+    ...rackEditorExtras(stage, settings)
   );
   els.rackEditor.hidden = false;
+}
+
+function currentMasterTarget(settings) {
+  const target = Number(settings?.master?.loudness_target_lufs);
+  if (Number.isFinite(target)) {
+    if (target <= -22) return 'cinema';
+    if (target <= -17) return 'reference';
+    if (target <= -15) return 'podcast';
+  }
+  return 'streaming';
+}
+
+function buildChipGroup(title, options, selectedId, onSelect) {
+  const group = document.createElement('div');
+  group.className = 'rack-extra';
+
+  const heading = document.createElement('p');
+  heading.className = 'eyebrow';
+  heading.textContent = title;
+
+  const row = document.createElement('div');
+  row.className = 'room-chips';
+  row.append(
+    ...options.map((option) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `room-chip${option.id === selectedId ? ' selected' : ''}`;
+      chip.setAttribute('aria-pressed', String(option.id === selectedId));
+      const label = document.createElement('span');
+      label.className = 'chip-label';
+      label.textContent = option.label;
+      const detail = document.createElement('span');
+      detail.className = 'chip-detail';
+      detail.textContent = option.detail;
+      chip.append(label, detail);
+      chip.addEventListener('click', () => onSelect(option.id));
+      return chip;
+    })
+  );
+
+  group.append(heading, row);
+  return group;
+}
+
+function rackEditorExtras(stage, settings) {
+  const extras = [];
+  if (stageSupportsIsolate(stage.id)) {
+    const row = document.createElement('div');
+    row.className = 'stat-row';
+    const label = document.createElement('span');
+    label.textContent = 'Difference monitor';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'stat-toggle';
+    const on = stageIsolate(settings, stage.id);
+    toggle.textContent = on ? 'Solo' : 'Off';
+    toggle.setAttribute('aria-pressed', String(on));
+    toggle.addEventListener('click', () => setRackIsolate(stage.id, !on));
+    row.append(label, toggle);
+    extras.push(row);
+  }
+  if (stage.id === 'normalizer') {
+    extras.push(
+      buildChipGroup(
+        'Normalizer mode',
+        NORMALIZER_MODES,
+        normalizerModeKey(settings),
+        setNormalizerMode
+      )
+    );
+  }
+  if (stage.id === 'master') {
+    extras.push(
+      buildChipGroup(
+        'Delivery target',
+        MASTER_TARGETS,
+        currentMasterTarget(settings),
+        setMasterTarget
+      )
+    );
+  }
+  return extras;
+}
+
+async function setRackIsolate(stage, enabled) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_stage_isolate', { stage, enabled });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not change the ${stage} monitor: ${error}`);
+  }
+}
+
+async function setNormalizerMode(mode) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_normalizer_mode', { mode });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not change the normalizer mode: ${error}`);
+  }
+}
+
+async function setMasterTarget(target) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_master_target', { target });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not apply the delivery target: ${error}`);
+  }
 }
 
 async function setRackParameter(stage, parameter, value) {

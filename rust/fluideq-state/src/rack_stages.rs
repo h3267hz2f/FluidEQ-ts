@@ -68,6 +68,84 @@ pub fn set_stage_enabled(
     Ok(())
 }
 
+/// The stages that can pass only their difference to the output, for tuning.
+pub fn stage_supports_isolate(stage: &str) -> bool {
+    matches!(
+        stage,
+        "denoise" | "deesser" | "exciter" | "equaliser" | "bass-forge" | "bass-punch"
+    )
+}
+
+/// Turns the solo/difference monitor of a stage on or off. These flags are
+/// transient: they are cleared on load so a saved file never leaves a stage
+/// soloed.
+pub fn set_stage_isolate(
+    settings: &mut FeqChainSettings,
+    stage: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let value = flag(enabled);
+    match stage {
+        "denoise" => settings.denoise.isolate = value,
+        "deesser" => settings.deesser.isolate = value,
+        "exciter" => settings.exciter.isolate = value,
+        "equaliser" => settings.eq.isolate = value,
+        "bass-forge" => settings.bass_forge.isolate = value,
+        "bass-punch" => settings.bass_punch.isolate = value,
+        _ => return Err(format!("the {stage} stage has no difference monitor")),
+    }
+    Ok(())
+}
+
+pub fn stage_isolate(settings: &FeqChainSettings, stage: &str) -> Option<bool> {
+    match stage {
+        "denoise" => Some(settings.denoise.isolate != 0),
+        "deesser" => Some(settings.deesser.isolate != 0),
+        "exciter" => Some(settings.exciter.isolate != 0),
+        "equaliser" => Some(settings.eq.isolate != 0),
+        "bass-forge" => Some(settings.bass_forge.isolate != 0),
+        "bass-punch" => Some(settings.bass_punch.isolate != 0),
+        _ => None,
+    }
+}
+
+/// The normalizer's mode *is* its power switch, so the window names a mode
+/// rather than flipping a boolean that does not exist in the settings.
+pub fn set_normalizer_mode(settings: &mut FeqChainSettings, mode: &str) -> Result<(), String> {
+    let id = match mode.trim().to_ascii_lowercase().as_str() {
+        "off" => FeqNormalizerMode::FEQ_NORMALIZER_OFF,
+        "guard" => FeqNormalizerMode::FEQ_NORMALIZER_GUARD,
+        "leveler" | "level" => FeqNormalizerMode::FEQ_NORMALIZER_LEVELER,
+        _ => return Err(format!("there is no normalizer mode named \"{mode}\"")),
+    };
+    settings.normalizer.mode = id as c_int;
+    Ok(())
+}
+
+pub fn normalizer_mode_name(settings: &FeqChainSettings) -> &'static str {
+    match settings.normalizer.mode {
+        mode if mode == FeqNormalizerMode::FEQ_NORMALIZER_LEVELER as c_int => "leveler",
+        mode if mode == FeqNormalizerMode::FEQ_NORMALIZER_GUARD as c_int => "guard",
+        _ => "off",
+    }
+}
+
+/// Delivery-target presets for the master stage: the target loudness and the
+/// true-peak ceiling move together, so one choice is a whole mastering stance.
+pub fn set_master_target(settings: &mut FeqChainSettings, target: &str) -> Result<(), String> {
+    let (target_lufs, ceiling_db) = match target.trim().to_ascii_lowercase().as_str() {
+        "streaming" => (-14.0, -1.0),
+        "podcast" => (-16.0, -1.0),
+        "reference" => (-18.0, -1.0),
+        "cinema" => (-24.0, -2.0),
+        _ => return Err(format!("there is no delivery target named \"{target}\"")),
+    };
+    settings.master.loudness_target_lufs = target_lufs;
+    settings.master.ceiling_db = ceiling_db;
+    settings.master.loudness_maximize = 1;
+    Ok(())
+}
+
 /// The parameters the rack page may write, with the range each one accepts.
 /// The window draws the same ranges; the clamp here is what the engine gets.
 const PARAMETER_RANGES: [(&str, &str, f64, f64); 29] = [
@@ -277,5 +355,53 @@ mod tests {
         let mut settings = FeqChainSettings::default();
         assert!(set_stage_enabled(&mut settings, "crossfade", true).is_err());
         assert_eq!(stage_enabled(&settings, "crossfade"), None);
+    }
+
+    #[test]
+    fn difference_monitors_round_trip_only_where_they_exist() {
+        let mut settings = FeqChainSettings::default();
+        for stage in [
+            "denoise",
+            "deesser",
+            "exciter",
+            "equaliser",
+            "bass-forge",
+            "bass-punch",
+        ] {
+            assert!(stage_supports_isolate(stage), "{stage}");
+            set_stage_isolate(&mut settings, stage, true).expect("solo");
+            assert_eq!(stage_isolate(&settings, stage), Some(true), "{stage}");
+            set_stage_isolate(&mut settings, stage, false).expect("off");
+            assert_eq!(stage_isolate(&settings, stage), Some(false), "{stage}");
+        }
+        assert!(!stage_supports_isolate("room"));
+        assert!(set_stage_isolate(&mut settings, "room", true).is_err());
+        assert_eq!(stage_isolate(&settings, "room"), None);
+    }
+
+    #[test]
+    fn normalizer_modes_name_the_same_values_the_switch_uses() {
+        let mut settings = FeqChainSettings::default();
+        set_normalizer_mode(&mut settings, "leveler").expect("leveler");
+        assert_eq!(normalizer_mode_name(&settings), "leveler");
+        assert_eq!(stage_enabled(&settings, "normalizer"), Some(true));
+        set_normalizer_mode(&mut settings, "guard").expect("guard");
+        assert_eq!(normalizer_mode_name(&settings), "guard");
+        set_normalizer_mode(&mut settings, "off").expect("off");
+        assert_eq!(normalizer_mode_name(&settings), "off");
+        assert_eq!(stage_enabled(&settings, "normalizer"), Some(false));
+        assert!(set_normalizer_mode(&mut settings, "loud").is_err());
+    }
+
+    #[test]
+    fn delivery_targets_move_loudness_and_ceiling_together() {
+        let mut settings = FeqChainSettings::default();
+        set_master_target(&mut settings, "streaming").expect("streaming");
+        assert_eq!(settings.master.loudness_target_lufs, -14.0);
+        assert_eq!(settings.master.ceiling_db, -1.0);
+        set_master_target(&mut settings, "cinema").expect("cinema");
+        assert_eq!(settings.master.loudness_target_lufs, -24.0);
+        assert_eq!(settings.master.ceiling_db, -2.0);
+        assert!(set_master_target(&mut settings, "vinyl").is_err());
     }
 }

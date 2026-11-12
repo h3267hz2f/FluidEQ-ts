@@ -364,6 +364,43 @@ export const rackStages = [
 const settingFor = (settings, id) =>
   id === 'equaliser' ? settings?.eq : settings?.[id.replace('-', '_')];
 
+export const ISOLATE_STAGES = [
+  'denoise',
+  'deesser',
+  'exciter',
+  'equaliser',
+  'bass-forge',
+  'bass-punch',
+];
+
+export function stageSupportsIsolate(id) {
+  return ISOLATE_STAGES.includes(id);
+}
+
+export function stageIsolate(settings, id) {
+  return Number(settingFor(settings, id)?.isolate) > 0;
+}
+
+export const NORMALIZER_MODES = [
+  { id: 'off', label: 'Off', detail: 'Pass-through' },
+  { id: 'guard', label: 'Guard', detail: 'Peak protection only' },
+  { id: 'leveler', label: 'Leveler', detail: 'Per-song loudness memory' },
+];
+
+export function normalizerModeKey(settings) {
+  const mode = Number(settings?.normalizer?.mode) || 0;
+  if (mode === 2) return 'leveler';
+  if (mode === 1) return 'guard';
+  return 'off';
+}
+
+export const MASTER_TARGETS = [
+  { id: 'streaming', label: 'Streaming', detail: '-14 LUFS · -1 dBTP' },
+  { id: 'podcast', label: 'Podcast', detail: '-16 LUFS · -1 dBTP' },
+  { id: 'reference', label: 'Reference', detail: '-18 LUFS · -1 dBTP' },
+  { id: 'cinema', label: 'Cinema', detail: '-24 LUFS · -2 dBTP' },
+];
+
 export function stageIsOn(settings, id) {
   if (id === 'normalizer') return Number(settings?.normalizer?.mode) > 0;
   return Number(settingFor(settings, id)?.enabled) > 0;

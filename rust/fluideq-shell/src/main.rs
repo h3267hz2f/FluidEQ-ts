@@ -311,6 +311,55 @@ fn set_stage_parameter(
 }
 
 #[tauri::command]
+fn set_stage_isolate(
+    state: State<'_, ShellState>,
+    stage: String,
+    enabled: bool,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let mut settings = store.snapshot().chain_settings;
+    fluideq_state::rack_stages::set_stage_isolate(&mut settings, &stage, enabled)?;
+    store.update_chain_settings(settings);
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_normalizer_mode(
+    state: State<'_, ShellState>,
+    mode: String,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let mut settings = store.snapshot().chain_settings;
+    fluideq_state::rack_stages::set_normalizer_mode(&mut settings, &mode)?;
+    store.update_chain_settings(settings);
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_master_target(
+    state: State<'_, ShellState>,
+    target: String,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let mut settings = store.snapshot().chain_settings;
+    fluideq_state::rack_stages::set_master_target(&mut settings, &target)?;
+    store.update_chain_settings(settings);
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_band_gain(
     state: State<'_, ShellState>,
     band_id: u32,
@@ -1070,6 +1119,9 @@ fn main() {
             set_tone_and_voicing,
             set_stage_enabled,
             set_stage_parameter,
+            set_stage_isolate,
+            set_normalizer_mode,
+            set_master_target,
             set_band_gain,
             list_presets,
             apply_preset,
