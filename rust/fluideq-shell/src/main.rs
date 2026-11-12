@@ -44,6 +44,8 @@ struct ShellState {
     game_watch: Mutex<Option<game_presets::Watch>>,
     /// The curve a game interrupted, put back when its process ends.
     game_restore: Mutex<Option<AppStateSnapshot>>,
+    /// Adaptive spectrum and multi-stage telemetry, polled by the event loop.
+    spectrum: Mutex<spectrum_bridge::SpectrumBridge>,
 }
 
 fn presets_dir(state: &ShellState) -> PathBuf {
@@ -797,6 +799,54 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Pushes spectrum bins and multi-stage telemetry to the window on a timer.
+///
+/// The bridge owns the cadence: sixty frames a second while audio is playing,
+/// fifteen while a silent tail decays, and no frames at all once it settles or
+/// the window enters `MinimizedWarm` / `ColdStandby`. That is what keeps the
+/// canvas animation frame count tied to actual sound rather than to a clock.
+fn spawn_spectrum_loop(app: tauri::AppHandle) {
+    std::thread::spawn(move || loop {
+        let Some(state) = app.try_state::<ShellState>() else {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            continue;
+        };
+        let packet = {
+            let Ok(mut bridge) = state.spectrum.lock() else {
+                break;
+            };
+            let Ok(mut store) = state.store.lock() else {
+                break;
+            };
+            let (momentary_lufs, true_peak_db) = {
+                let meters = store.native_meters_mut();
+                let loudness = meters.read_loudness();
+                let telemetry = meters.read_master_telemetry();
+                (loudness[0], telemetry.auto_headroom_true_peak_db as f32)
+            };
+            // `FeqMasterTelemetry::default()` is 0 dBTP at -14.2 LUFS; that
+            // pair means the engine has published nothing yet, so an unlinked
+            // dev build settles into sleep instead of animating a flat floor.
+            let meter_has_data = true_peak_db != 0.0 || (momentary_lufs + 14.2).abs() > 0.05;
+            let peak_db = if true_peak_db.is_finite() {
+                true_peak_db
+            } else {
+                spectrum_bridge::SPECTRUM_SILENCE_FLOOR_DB
+            };
+            let audio_playing =
+                meter_has_data && peak_db > spectrum_bridge::SPECTRUM_SILENCE_FLOOR_DB;
+            bridge.poll_from_store(&mut store, audio_playing, peak_db)
+        };
+        let _ = app.emit("spectrum", &packet);
+        let sleep_ms = if packet.sleeping {
+            200
+        } else {
+            (1_000 / packet.target_fps.max(1)).clamp(8, 1_000)
+        };
+        std::thread::sleep(std::time::Duration::from_millis(sleep_ms as u64));
+    });
+}
+
 /// The tray's bypass entry flips the same master switch as the power button,
 /// so the chain, the config file and the window cannot disagree.
 fn toggle_bypass(app: &tauri::AppHandle) -> Option<AppStateSnapshot> {
@@ -970,10 +1020,12 @@ fn main() {
                 host,
                 game_watch: Mutex::new(None),
                 game_restore: Mutex::new(None),
+                spectrum: Mutex::new(spectrum_bridge::SpectrumBridge::new(96)),
             });
             setup_tray(app)?;
             hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
             output_watch::spawn(app.handle().clone(), follow_default_output_now);
+            spawn_spectrum_loop(app.handle().clone());
             restart_game_watch(app.handle());
             // Closing the window puts FluidEQ in the tray: the engine keeps
             // processing and the curve is one click away, and quit is an

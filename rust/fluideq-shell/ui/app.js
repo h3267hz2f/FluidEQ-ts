@@ -148,6 +148,10 @@ const els = {
   opraStatus: document.getElementById('opra-status'),
   opraClear: document.getElementById('opra-clear'),
   bandCount: document.getElementById('band-count'),
+  meterLufs: document.getElementById('meter-lufs'),
+  meterShort: document.getElementById('meter-short'),
+  meterPeak: document.getElementById('meter-peak'),
+  meterSpectrum: document.getElementById('meter-spectrum'),
   chainState: document.getElementById('chain-state'),
   connection: document.getElementById('connection'),
   message: document.getElementById('message'),
@@ -214,6 +218,7 @@ let snapshot = demoSnapshot();
 let selectedId = 4;
 let drag = null;
 let drawFrame = 0;
+let spectrumBins = null;
 let pendingVolume = null;
 let volumeFrame = 0;
 let volumeAvailable = false;
@@ -301,6 +306,27 @@ function scheduleDraw() {
   });
 }
 
+function updateMeters(packet) {
+  const stage = packet.stage_meters ?? {};
+  const loudness = stage.loudness ?? {};
+  const integrated = Number(loudness.integrated_lufs);
+  const shortTerm = Number(loudness.short_term_lufs);
+  const truePeak = Number(stage.master_telemetry?.auto_headroom_true_peak_db);
+
+  els.meterLufs.textContent = Number.isFinite(integrated)
+    ? `${integrated.toFixed(1)} LUFS`
+    : '—';
+  els.meterShort.textContent = Number.isFinite(shortTerm)
+    ? `${shortTerm.toFixed(1)} LUFS`
+    : '—';
+  els.meterPeak.textContent = Number.isFinite(truePeak)
+    ? `${formatDb(truePeak)} dBTP`
+    : '—';
+  els.meterSpectrum.textContent = packet.sleeping
+    ? 'Idle'
+    : `${packet.target_fps || 0} fps`;
+}
+
 function drawGraph() {
   graph.draw({
     bands: snapshot.bands ?? [],
@@ -310,6 +336,7 @@ function drawGraph() {
     tone: snapshot.tone,
     eqModel: snapshot.eq_model,
     eqModelAmount: snapshot.eq_model_amount,
+    spectrum: spectrumBins,
   });
 }
 
@@ -2092,6 +2119,20 @@ async function boot() {
 TAURI?.event?.listen?.('snapshot', (event) => {
   snapshot = event.payload;
   renderAll();
+});
+
+// Live spectrum and multi-stage telemetry. The Rust bridge only emits while
+// the window is focused and sound is actually playing, so this listener never
+// keeps the canvas animating over silence or in the tray.
+TAURI?.event?.listen?.('spectrum', (event) => {
+  const packet = event.payload ?? {};
+  const bins = Array.isArray(packet.bins_db) ? packet.bins_db : [];
+  const wasActive = spectrumBins !== null;
+  spectrumBins = !packet.sleeping && bins.length > 0 ? bins : null;
+  updateMeters(packet);
+  if (activeView === 'equalizer' && (spectrumBins !== null || wasActive)) {
+    scheduleDraw();
+  }
 });
 
 // The volume hotkeys change Windows directly; the slider follows the same

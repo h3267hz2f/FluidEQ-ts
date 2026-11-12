@@ -270,6 +270,50 @@ export function dbOf(y, height) {
 }
 
 export function createGraph(canvas) {
+  function drawSpectrum(ctx, width, height, bins, sampleRate) {
+    if (!bins || bins.length === 0) return;
+    const left = PAD.left;
+    const right = width - PAD.right;
+    const bottom = height - PAD.bottom;
+    const top = PAD.top;
+    const nyquist = sampleRate / 2;
+    const floorDb = -96;
+    const ceilingDb = -6;
+    const areaHeight = (bottom - top) * 0.42;
+    const steps = Math.max(120, Math.round(right - left));
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(left, bottom);
+    for (let index = 0; index <= steps; index += 1) {
+      const ratio = index / steps;
+      const frequency = F_MIN * (F_MAX / F_MIN) ** ratio;
+      const binIndex = clamp(
+        Math.round((frequency / nyquist) * (bins.length - 1)),
+        0,
+        bins.length - 1,
+      );
+      const db = Number(bins[binIndex]);
+      const level = clamp(
+        ((Number.isFinite(db) ? db : floorDb) - floorDb) / (ceilingDb - floorDb),
+        0,
+        1,
+      );
+      const x = left + ratio * (right - left);
+      const y = bottom - level * areaHeight;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(right, bottom);
+    ctx.closePath();
+    const gradient = ctx.createLinearGradient(0, top, 0, bottom);
+    gradient.addColorStop(0, 'rgba(124,160,255,0.30)');
+    gradient.addColorStop(0.5, 'rgba(124,160,255,0.12)');
+    gradient.addColorStop(1, 'rgba(124,160,255,0.03)');
+    ctx.fillStyle = gradient;
+    ctx.fill();
+    ctx.restore();
+  }
+
   function prepareCanvas() {
     const rect = canvas.getBoundingClientRect();
     if (rect.width < 4 || rect.height < 4) return null;
@@ -336,6 +380,7 @@ export function createGraph(canvas) {
     tone = null,
     eqModel = 'clean',
     eqModelAmount = 1,
+    spectrum = null,
   }) {
     const prepared = prepareCanvas();
     if (!prepared) return;
@@ -343,6 +388,8 @@ export function createGraph(canvas) {
 
     ctx.clearRect(0, 0, width, height);
     drawGrid(ctx, width, height);
+
+    if (spectrum) drawSpectrum(ctx, width, height, spectrum, sampleRate);
 
     const left = PAD.left;
     const right = width - PAD.right;

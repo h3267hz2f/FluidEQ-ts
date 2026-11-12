@@ -107,7 +107,9 @@ impl SpectrumBridge {
         audio_playing: bool,
         peak_db: f32,
     ) -> SpectrumFramePacket {
-        let residency = store.snapshot().residency.residency_mode;
+        // The residency mode is a cheap field read; building a whole snapshot
+        // here would re-design the 160-point EQ curve sixty times a second.
+        let residency = store.residency_mode();
         if residency == WindowResidencyMode::Active && audio_playing && peak_db > SPECTRUM_SILENCE_FLOOR_DB {
             let meters = store.native_meters_mut();
             if meters.read_spectrum(FeqMeterStage::FEQ_METER_STAGE_EQ, &mut self.raw_meter_scratch) {
@@ -175,5 +177,50 @@ impl SpectrumBridge {
             bins_db: self.last_bins_db.clone(),
             stage_meters: self.last_stage_meters.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_inactive_window_sleeps_without_emitting_bins() {
+        let mut bridge = SpectrumBridge::new(32);
+        let frame = bridge.poll_frame(WindowResidencyMode::MinimizedWarm, true, -12.0);
+        assert!(frame.sleeping);
+        assert_eq!(frame.target_fps, 0);
+        assert!(frame.bins_db.is_empty());
+    }
+
+    #[test]
+    fn silence_decays_and_then_sleeps() {
+        let mut bridge = SpectrumBridge::new(32);
+        // A few silent frames still push the decaying tail at 15 fps.
+        let warm = bridge.poll_frame(WindowResidencyMode::Active, false, SPECTRUM_SILENCE_FLOOR_DB);
+        assert!(!warm.sleeping);
+        assert_eq!(warm.target_fps, 15);
+
+        // Past the hold window the canvas drops to zero frames.
+        let mut settled = warm;
+        for _ in 0..SILENCE_SLEEP_HOLD_FRAMES {
+            settled = bridge.poll_frame(
+                WindowResidencyMode::Active,
+                false,
+                SPECTRUM_SILENCE_FLOOR_DB,
+            );
+        }
+        assert!(settled.sleeping);
+        assert_eq!(settled.target_fps, 0);
+        assert!(settled.bins_db.is_empty());
+    }
+
+    #[test]
+    fn playing_audio_asks_for_sixty_frames_a_second() {
+        let mut bridge = SpectrumBridge::new(32);
+        let frame = bridge.poll_frame(WindowResidencyMode::Active, true, -6.0);
+        assert!(!frame.sleeping);
+        assert_eq!(frame.target_fps, 60);
+        assert_eq!(frame.bins_db.len(), 32);
     }
 }
