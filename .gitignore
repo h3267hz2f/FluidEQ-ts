@@ -67,6 +67,9 @@ presets/**
 # `@tauri-apps/cli build`, never committed.
 rust/fluideq-shell/engine-bin/
 rust/fluideq-shell/tauri.bundle.conf.json
+# Catalog and head copies staged beside the shell config for the bundle.
+rust/fluideq-shell/opra/
+rust/fluideq-shell/assets/
 /*.m4a
 
 # The karaoke files exported beside them, for the same reason and one more: a

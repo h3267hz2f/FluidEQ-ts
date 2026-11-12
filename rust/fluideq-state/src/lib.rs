@@ -711,6 +711,9 @@ impl AppStateStore {
         self.chain_settings.room.walls = walls;
         self.chain_settings.room.ambience_mix = ambience_mix;
         self.chain_settings.room.ambience_decay_s = ambience_decay_s;
+        // Choosing a room means auditioning it; leaving the stage off made
+        // the preset chips look like they did nothing.
+        self.chain_settings.room.enabled = 1;
         self.revision += 1;
         self.commit_chain_and_linear_phase_kernel();
         self.snapshot()
@@ -721,22 +724,28 @@ impl AppStateStore {
         head: i32,
         heads_dir: &Path,
     ) -> Result<AppStateSnapshot, String> {
-        let head_choice = head.clamp(0, 2);
-        self.chain_settings.room.head = head_choice;
-        let head_name = match head_choice {
+        self.chain_settings.room.head = head.clamp(0, 2);
+        self.chain_settings.room.enabled = 1;
+        self.ensure_room_head_loaded(heads_dir);
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        Ok(self.snapshot())
+    }
+
+    /// Loads the head named by the stored choice into the native convolution
+    /// stage. The preset path only carries numbers, so the HRTF has to be
+    /// restored after a reload instead of relying on the last session's memory.
+    pub fn ensure_room_head_loaded(&mut self, heads_dir: &Path) -> bool {
+        let head_name = match self.chain_settings.room.head.clamp(0, 2) {
             0 => "small",
             2 => "large",
             _ => "medium",
         };
-        let file_path = heads_dir.join(format!("{}.txt", head_name));
-        if file_path.exists() {
-            if let Ok(text) = std::fs::read_to_string(&file_path) {
-                let _ = self.load_room_head_from_text(&text);
-            }
-        }
-        self.revision += 1;
-        self.commit_chain_and_linear_phase_kernel();
-        Ok(self.snapshot())
+        let file_path = heads_dir.join(format!("{head_name}.txt"));
+        let Ok(text) = std::fs::read_to_string(&file_path) else {
+            return false;
+        };
+        self.load_room_head_from_text(&text).is_ok()
     }
 
     pub fn set_room_bass_management(&mut self, enabled: bool) -> AppStateSnapshot {
@@ -1349,10 +1358,16 @@ mod tests {
         assert_eq!(snap.chain_settings.room.preset, 2);
         assert_eq!(snap.chain_settings.room.size_m, 12.0);
         assert_eq!(snap.chain_settings.room.distance_m, 4.0);
+        // Picking a room turns the stage on so the preset is audible.
+        assert_eq!(snap.chain_settings.room.enabled, 1);
 
-        let heads_dir = std::path::Path::new("assets/room/heads");
+        let heads_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/room/heads");
+        let heads_dir = heads_dir.as_path();
         let head_snap = store.set_room_head_choice(0, heads_dir).unwrap(); // Small
         assert_eq!(head_snap.chain_settings.room.head, 0);
+        assert_eq!(head_snap.chain_settings.room.enabled, 1);
+        assert!(store.ensure_room_head_loaded(heads_dir));
 
         let bass_snap = store.set_room_bass_management(true);
         assert_eq!(bass_snap.chain_settings.room.bass_management, 1);

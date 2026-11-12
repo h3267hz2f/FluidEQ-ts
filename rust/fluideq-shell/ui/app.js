@@ -606,6 +606,14 @@ function formatBrandName(slug) {
     .join(' ');
 }
 
+// Zero is a real value for several room fields (Small head, no wall
+// absorption, no ambience), so a `|| fallback` would silently show the
+// default and make the control look unresponsive.
+function numberOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
 function renderOpraVendors() {
   const fragment = document.createDocumentFragment();
   const placeholder = document.createElement('option');
@@ -1241,7 +1249,7 @@ function renderRoom() {
   els.roomPower.textContent = enabled ? 'On' : 'Off';
   els.roomPower.setAttribute('aria-pressed', String(enabled));
 
-  const currentPreset = Number(settings.preset) || 0;
+  const currentPreset = numberOr(settings.preset, 0);
   els.roomPresetChips.replaceChildren(
     ...ROOM_PRESETS.map((p) => {
       const chip = document.createElement('button');
@@ -1260,7 +1268,7 @@ function renderRoom() {
     })
   );
 
-  const currentHead = Number(settings.head) || 1;
+  const currentHead = numberOr(settings.head, 1);
   els.roomHeadChips.replaceChildren(
     ...KEMAR_HEADS.map((h) => {
       const chip = document.createElement('button');
@@ -1279,27 +1287,27 @@ function renderRoom() {
     })
   );
 
-  const size = Number(settings.size_m) || 6;
+  const size = numberOr(settings.size_m, 6);
   setRangeValue(els.roomSize, size);
   setRangeFill(els.roomSize, ((size - 2) / 18) * 100);
   els.roomSizeVal.textContent = `${size.toFixed(1)} m`;
 
-  const dist = Number(settings.distance_m) || 1;
+  const dist = numberOr(settings.distance_m, 1);
   setRangeValue(els.roomDist, dist);
   setRangeFill(els.roomDist, ((dist - 0.3) / 9.7) * 100);
   els.roomDistVal.textContent = `${dist.toFixed(1)} m`;
 
-  const walls = Number(settings.walls) || 0.45;
+  const walls = numberOr(settings.walls, 0.45);
   setRangeValue(els.roomWalls, walls);
   setRangeFill(els.roomWalls, walls * 100);
   els.roomWallsVal.textContent = `${Math.round(walls * 100)}%`;
 
-  const ambience = Number(settings.ambience_mix) || 0.2;
+  const ambience = numberOr(settings.ambience_mix, 0.2);
   setRangeValue(els.roomAmbience, ambience);
   setRangeFill(els.roomAmbience, ambience * 100);
   els.roomAmbienceVal.textContent = `${Math.round(ambience * 100)}%`;
 
-  const decay = Number(settings.ambience_decay_s) || 0.8;
+  const decay = numberOr(settings.ambience_decay_s, 0.8);
   setRangeValue(els.roomDecay, decay);
   setRangeFill(els.roomDecay, ((decay - 0.1) / 4.9) * 100);
   els.roomDecayVal.textContent = `${decay.toFixed(2)} s`;
@@ -1308,17 +1316,17 @@ function renderRoom() {
   els.roomBassMgmt.textContent = bassMgmt ? 'On' : 'Off';
   els.roomBassMgmt.setAttribute('aria-pressed', String(bassMgmt));
 
-  const crossover = Number(settings.crossover_hz) || 80;
+  const crossover = numberOr(settings.crossover_hz, 80);
   setRangeValue(els.roomCrossover, crossover);
   setRangeFill(els.roomCrossover, ((crossover - 40) / 120) * 100);
   els.roomCrossoverVal.textContent = `${Math.round(crossover)} Hz`;
 
-  const centre = Number(settings.centre_db) || 0;
+  const centre = numberOr(settings.centre_db, 0);
   setRangeValue(els.roomCentre, centre);
   setRangeFill(els.roomCentre, ((centre + 12) / 18) * 100);
   els.roomCentreVal.textContent = `${formatDb(centre)} dB`;
 
-  const sub = Number(settings.sub_db) || 0;
+  const sub = numberOr(settings.sub_db, 0);
   setRangeValue(els.roomSub, sub);
   setRangeFill(els.roomSub, ((sub + 12) / 18) * 100);
   els.roomSubVal.textContent = `${formatDb(sub)} dB`;

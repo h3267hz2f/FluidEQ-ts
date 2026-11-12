@@ -1088,6 +1088,11 @@ fn main() {
                 // successful save replaces it.
                 let _ = store.load_from_file(&state_path);
             }
+            // The KEMAR head is a convolution kernel, not a number in the
+            // state file, so it has to be staged into the native chain again
+            // on every launch or Room would render with no HRTF.
+            let heads_dir = room_heads_dir(app.handle());
+            store.ensure_room_head_loaded(&heads_dir);
             let host_exe = app
                 .path()
                 .resolve(

@@ -16,6 +16,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
  */
 import {
   copyFileSync,
+  cpSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -37,6 +38,13 @@ const nativeBuild = path.join(nativeDir, '.build', 'engine');
 const nativeBin = path.join(nativeBuild, 'bin');
 const engineDir = path.join(shellDir, 'engine-bin');
 const overridePath = path.join(shellDir, 'tauri.bundle.conf.json');
+// Offline catalogs the installed app reads from its resource directory:
+// headphone correction curves and the three KEMAR room heads. They live at
+// the repo root, so stage copies next to the shell config for the bundler.
+const assetDirs = [
+  { source: path.join(repoRoot, 'opra', 'curves'), target: path.join(shellDir, 'opra', 'curves'), resource: 'opra/curves' },
+  { source: path.join(repoRoot, 'assets', 'room', 'heads'), target: path.join(shellDir, 'assets', 'room', 'heads'), resource: 'assets/room/heads' },
+];
 
 const version = '2.1.0';
 const revision = process.env.GITHUB_SHA || 'unknown';
@@ -179,9 +187,19 @@ for (const file of files) {
 const baseConfig = JSON.parse(
   readFileSync(path.join(shellDir, 'tauri.conf.json'), 'utf8'),
 );
+for (const dir of assetDirs) {
+  if (!statSync(dir.source, { throwIfNoEntry: false })?.isDirectory()) {
+    fail(`missing asset directory ${dir.source}`);
+  }
+  mkdirSync(path.dirname(dir.target), { recursive: true });
+  cpSync(dir.source, dir.target, { recursive: true });
+}
 baseConfig.bundle = {
   ...(baseConfig.bundle || {}),
-  resources: files.map((file) => `engine-bin/${file}`),
+  resources: [
+    ...files.map((file) => `engine-bin/${file}`),
+    ...assetDirs.map((dir) => dir.resource),
+  ],
 };
 writeFileSync(overridePath, `${JSON.stringify(baseConfig, null, 2)}\n`);
 console.log(
