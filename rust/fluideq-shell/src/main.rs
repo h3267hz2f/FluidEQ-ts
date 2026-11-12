@@ -393,6 +393,35 @@ fn set_band_config(
 }
 
 #[tauri::command]
+fn import_apo_curve(
+    state: State<'_, ShellState>,
+    text: String,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.import_apo_text(&text)?;
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+/// Writes the current curve as Equalizer APO text into the app data folder and
+/// returns the path. The window has no file picker, so the export has a
+/// predictable home the user can open.
+#[tauri::command]
+fn export_apo_curve(state: State<'_, ShellState>) -> Result<String, String> {
+    let store = store_of(&state)?;
+    let text = store.export_apo_text();
+    let folder = state.data_dir.join("exports");
+    std::fs::create_dir_all(&folder)
+        .map_err(|error| format!("could not create {}: {error}", folder.display()))?;
+    let path = folder.join("fluideq-apo.txt");
+    std::fs::write(&path, text.as_bytes())
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 fn list_presets(state: State<'_, ShellState>) -> Result<Vec<String>, String> {
     Ok(fluideq_state::presets::list(&presets_dir(&state)))
 }
@@ -1140,6 +1169,8 @@ fn main() {
             set_master_target,
             set_band_gain,
             set_band_config,
+            import_apo_curve,
+            export_apo_curve,
             list_presets,
             apply_preset,
             save_preset,

@@ -80,7 +80,7 @@
 | 4 | **频谱与多级电表接入** | [x] 已完成：`spectrum_bridge.rs` 在独立线程按帧率自适应向窗口推送 `spectrum` 事件，EQ 曲线底部绘制实时频谱，检查器显示 Integrated / Short-term LUFS 与 True Peak 电表；`MinimizedWarm` 与音频静默时停止推送 | `spectrum_bridge.rs`、`residency.rs` |
 | 5 | **DSP 机架进阶控制** | [x] 已完成：支持 isolate（只听差值）开关的阶段补齐切换，Normalizer 模式三档（Off / Guard / Leveler），Master 交付目标预设（Streaming / Podcast / Reference / Cinema），`isolate` 启动自动清零 | `FeqChainSettings`、`persistence.rs`（启动自动清零 `isolate`） |
 | 6 | **更多滤波器类型与频段开关** | [x] 已完成：单频段 On/Bypass 开关、7 种滤波器类型（PK / LSC / HSC / LP / HP / BP / Notch）切换、左右耳（Both / Left / Right）路由选择，画布实时响应 | `biquad.rs` (`BandFilterKind`, `ear`) |
-| 7 | **Squiglink / Equalizer APO 文本导入导出** | 支持导入/导出标准 Equalizer APO `Filter:` / `Preamp:` 文本，直接生成或覆盖频段 | `apo.rs` |
+| 7 | **Squiglink / Equalizer APO 文本导入导出** | [x] 已完成：导入标准 Equalizer APO / Squiglink `Filter:` / `Preamp:` 文本覆盖频段与增益，导出当前曲线到应用数据目录，支持 ON/OFF 频段往返 | `apo.rs` |
 
 ### P3 — 发布加固、冷驻留与预览桥退役
 

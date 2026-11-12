@@ -352,6 +352,45 @@ pub fn parse_apo_filter_line(body: &str, id: u32, ear: u8) -> Option<EqBandSpec>
     })
 }
 
+/// Parses an Equalizer APO / Squiglink text into its preamp and bands.
+///
+/// Every well-formed `Filter:` line becomes a band; `Preamp:` sets the trim.
+/// Anything else is skipped, which is how the system engine treats a line it
+/// does not recognise.
+pub fn parse_apo_curve(text: &str) -> (Option<f64>, Vec<EqBandSpec>) {
+    let mut preamp_db: Option<f64> = None;
+    let mut bands: Vec<EqBandSpec> = Vec::new();
+    for line in tokenize_apo_config(text) {
+        if line.command.eq_ignore_ascii_case("Preamp") {
+            let value = line
+                .body
+                .split([' ', '\t'])
+                .find_map(|token| token.trim().parse::<f64>().ok());
+            if let Some(db) = value {
+                if db.is_finite() {
+                    preamp_db = Some(db.clamp(-24.0, 24.0));
+                }
+            }
+        } else if line.command.eq_ignore_ascii_case("Filter") {
+            let id = (bands.len() + 1) as u32;
+            let trimmed = line.body.trim_start();
+            let (body, enabled) = if trimmed
+                .get(..3)
+                .is_some_and(|head| head.eq_ignore_ascii_case("OFF"))
+            {
+                (format!("ON{}", &trimmed[3..]), false)
+            } else {
+                (line.body.clone(), true)
+            };
+            if let Some(mut band) = parse_apo_filter_line(&body, id, 0) {
+                band.enabled = enabled;
+                bands.push(band);
+            }
+        }
+    }
+    (preamp_db, bands)
+}
+
 /// Parses an Equalizer APO `GraphicEQ:` body (`<freq> <gain>; <freq> <gain>; ...`) all-or-nothing,
 /// capped at `APO_MAX_GRAPHIC_POINTS` (`16384`) points.
 ///

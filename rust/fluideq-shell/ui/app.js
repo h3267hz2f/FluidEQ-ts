@@ -155,6 +155,10 @@ const els = {
   opraModel: document.getElementById('opra-model'),
   opraStatus: document.getElementById('opra-status'),
   opraClear: document.getElementById('opra-clear'),
+  apoImport: document.getElementById('apo-import'),
+  apoFile: document.getElementById('apo-file'),
+  apoExport: document.getElementById('apo-export'),
+  apoExportStatus: document.getElementById('apo-export-status'),
   bandCount: document.getElementById('band-count'),
   meterLufs: document.getElementById('meter-lufs'),
   meterShort: document.getElementById('meter-short'),
@@ -701,6 +705,40 @@ function clearOpraSelection() {
   els.opraStatus.hidden = true;
   els.opraStatus.textContent = '';
   els.opraClear.hidden = true;
+}
+
+async function importApoFile() {
+  const file = els.apoFile.files?.[0];
+  if (!file || !invoke) {
+    els.apoFile.value = '';
+    return;
+  }
+  try {
+    const text = await file.text();
+    snapshot = await invoke('import_apo_curve', { text });
+    clearMessage();
+    showMessage(
+      `Imported ${snapshot.bands.length} bands from ${file.name}`,
+      'ok'
+    );
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not import ${file.name}: ${error}`);
+  } finally {
+    els.apoFile.value = '';
+  }
+}
+
+async function exportApoFile() {
+  if (!invoke) return;
+  try {
+    const path = await invoke('export_apo_curve');
+    els.apoExportStatus.hidden = false;
+    els.apoExportStatus.textContent = `Saved to ${path}`;
+    clearMessage();
+  } catch (error) {
+    showMessage(`Could not export the curve: ${error}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1894,6 +1932,10 @@ els.resetTone.addEventListener('click', () => {
 els.opraVendor.addEventListener('change', () => selectOpraVendor(els.opraVendor.value));
 els.opraModel.addEventListener('change', () => applyOpraModel(els.opraModel.value));
 els.opraClear.addEventListener('click', clearOpraSelection);
+
+els.apoImport.addEventListener('click', () => els.apoFile.click());
+els.apoFile.addEventListener('change', importApoFile);
+els.apoExport.addEventListener('click', exportApoFile);
 
 els.roomPower.addEventListener('click', toggleRoomPower);
 els.roomBassMgmt.addEventListener('click', toggleRoomBassManagement);

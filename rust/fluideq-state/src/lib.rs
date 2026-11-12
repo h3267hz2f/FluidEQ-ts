@@ -481,6 +481,31 @@ impl AppStateStore {
         self.opra_cache.list_products_for_vendor(opra_curves_dir, vendor_slug)
     }
 
+    /// Imports an Equalizer APO / Squiglink text, replacing the bands that
+    /// parsed and keeping the rest of the chain as it was. A text with no
+    /// `Filter:` lines is refused rather than silently wiping the curve.
+    pub fn import_apo_text(&mut self, text: &str) -> Result<AppStateSnapshot, String> {
+        let (preamp, bands) = crate::apo::parse_apo_curve(text);
+        if bands.is_empty() {
+            return Err("no Filter lines were found in that text".to_string());
+        }
+        let current = self.snapshot();
+        Ok(self.set_eq_bands_and_config(
+            bands,
+            &current.eq_model,
+            current.matched_treble,
+            current.master_power,
+            current.auto_headroom,
+            preamp.unwrap_or(current.preamp_db),
+            current.tone,
+        ))
+    }
+
+    /// Renders the current curve as Equalizer APO text (preamp plus filters).
+    pub fn export_apo_text(&self) -> String {
+        crate::apo::format_bands_as_apo_lines(self.preamp_db, &self.bands)
+    }
+
     /// Resolves and applies an OPRA headphone curve from `/opra/curves/<vendor_slug>.json`
     /// (or the D–Z flagship fallback catalog), updating `bands`, `preamp_db`, and `active_preset_name`.
     pub fn apply_opra_headphone_curve(
@@ -1352,5 +1377,28 @@ mod tests {
         assert_eq!(engine_band.ear, 2);
 
         assert!(store.update_band_config(band_id, true, "nope", 0).is_err());
+    }
+
+    #[test]
+    fn apo_text_import_and_export_round_trip() {
+        let mut store = AppStateStore::new(48_000.0);
+        let text = "Preamp: -6.5 dB\n\
+                    Filter 1: ON PK Fc 100 Hz Gain 3.0 dB Q 1.41\n\
+                    Filter 2: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70\n";
+        let snap = store.import_apo_text(text).expect("import");
+        assert_eq!(snap.bands.len(), 2);
+        assert_eq!(snap.preamp_db, -6.5);
+        assert_eq!(snap.bands[0].filter_type, crate::biquad::BandFilterKind::PK);
+        assert_eq!(snap.bands[1].filter_type, crate::biquad::BandFilterKind::LSC);
+
+        let exported = store.export_apo_text();
+        assert!(exported.contains("Preamp: -6.5 dB"));
+        assert!(exported.contains("ON PK Fc 100.0 Hz Gain 3.0 dB"));
+        assert!(exported.contains("ON LSC Fc 105.0 Hz Gain 4.0 dB"));
+
+        // Re-importing our own export must produce the same two bands.
+        let again = store.import_apo_text(&exported).expect("re-import");
+        assert_eq!(again.bands.len(), 2);
+        assert!(store.import_apo_text("no filters here").is_err());
     }
 }
