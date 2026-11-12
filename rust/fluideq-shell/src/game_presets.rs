@@ -21,6 +21,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
@@ -31,6 +33,8 @@ use crate::system_daemons::{
 
 const RULES_FILE: &str = "games.json";
 const WATCH_RESOURCE: &str = "engine-bin/FluidEQ-Games.exe";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_RULES: usize = 64;
 const MAX_EXECUTABLE_CHARS: usize = 260;
 
@@ -193,12 +197,16 @@ pub fn spawn(
     on_release: fn(&AppHandle),
 ) -> Option<Watch> {
     let path = watcher_path(&app)?;
-    let mut child = Command::new(&path)
+    let mut command = Command::new(&path);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // The helper is a console program; without this Windows gives it a visible
+    // console window when the first game rule starts the watcher.
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().ok()?;
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let active = Arc::new(Mutex::new(None));

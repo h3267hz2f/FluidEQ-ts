@@ -11,10 +11,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! the window still reconciles on focus.
 
 use std::io::{BufRead, BufReader};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use tauri::Manager;
 
 const OUTPUT_WATCH_RESOURCE: &str = "engine-bin/FluidEQ-Outputs.exe";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Starts the watcher and calls `on_outputs` after every announced change.
 pub fn spawn(app: tauri::AppHandle, on_outputs: fn(&tauri::AppHandle)) {
@@ -30,12 +34,16 @@ pub fn spawn(app: tauri::AppHandle, on_outputs: fn(&tauri::AppHandle)) {
     let _ = std::thread::Builder::new()
         .name("fluideq-output-watch".to_string())
         .spawn(move || {
-            let Ok(mut child) = Command::new(&path)
+            let mut command = Command::new(&path);
+            command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-            else {
+                .stderr(Stdio::null());
+            // The helper is a console program; without this Windows gives it a
+            // visible console window the moment the app starts.
+            #[cfg(windows)]
+            command.creation_flags(CREATE_NO_WINDOW);
+            let Ok(mut child) = command.spawn() else {
                 return;
             };
             // Held for the life of the reader: closing it is how the helper
