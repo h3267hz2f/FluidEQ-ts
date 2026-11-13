@@ -167,11 +167,11 @@ const PARAMETER_RANGES: [(&str, &str, f64, f64); 29] = [
     ("bass-punch", "mix", 0.0, 1.0),
     ("dimension", "mid_width", 0.0, 2.0),
     ("dimension", "decorrelation", 0.0, 1.0),
-    ("room", "size_m", 2.0, 20.0),
-    ("room", "distance_m", 0.3, 10.0),
+    ("room", "size_m", 2.0, 12.0),
+    ("room", "distance_m", 0.5, 6.0),
     ("room", "ambience_mix", 0.0, 1.0),
     ("room", "walls", 0.0, 1.0),
-    ("room", "ambience_decay_s", 0.1, 5.0),
+    ("room", "ambience_decay_s", 0.1, 1.8),
     ("room", "crossover_hz", 40.0, 160.0),
     ("room", "centre_db", -12.0, 6.0),
     ("room", "sub_db", -12.0, 6.0),
@@ -233,6 +233,11 @@ pub fn set_stage_parameter(
         ("master", "output_trim_db") => settings.master.output_trim_db = value,
         ("master", "loudness_target_lufs") => settings.master.loudness_target_lufs = value,
         _ => unreachable!("the range table and the writes must name the same parameters"),
+    }
+    if stage == "room" {
+        // Every room dial is part of a preset's shape, so moving one leaves
+        // the preset it came from behind.
+        settings.room.preset = crate::room_catalog::CUSTOM_PRESET;
     }
     Ok(())
 }
@@ -340,6 +345,19 @@ mod tests {
                 "{stage}.{parameter}"
             );
         }
+    }
+
+    #[test]
+    fn moving_a_room_dial_marks_the_room_custom() {
+        let mut settings = FeqChainSettings::default();
+        settings.room.preset = 12;
+        set_stage_parameter(&mut settings, "room", "walls", 0.5).expect("walls");
+        assert_eq!(settings.room.preset, crate::room_catalog::CUSTOM_PRESET);
+
+        // A dial on another stage leaves the room's name alone.
+        settings.room.preset = 12;
+        set_stage_parameter(&mut settings, "normalizer", "target_lufs", -20.0).expect("lufs");
+        assert_eq!(settings.room.preset, 12);
     }
 
     #[test]

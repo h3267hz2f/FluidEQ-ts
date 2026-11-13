@@ -17,10 +17,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! `custom` occupy 0–11, the featured rooms follow from 12. The picker order
 //! (`catalog`) is a separate thing, grouped featured-first then classic.
 
+use fluideq_dsp_sys::FeqChainRoomSettings;
 use serde::Serialize;
 
 pub const ROOM_SPEAKERS: usize = 7;
 pub const ROOM_MUTE_SLOTS: usize = 8;
+
+/// The wire's number for a room that no longer matches any preset: what a
+/// saved room becomes once a dial, a speaker or its bass management is moved.
+pub const CUSTOM_PRESET: i32 = 11;
 
 const RING: [f64; ROOM_SPEAKERS] = [-30.0, 30.0, 0.0, -100.0, 100.0, -140.0, 140.0];
 const FLAT: [f64; ROOM_SPEAKERS] = [0.0; ROOM_SPEAKERS];
@@ -671,6 +676,51 @@ pub fn label_of(index: i32) -> Option<&'static str> {
     spec(index).map(|spec| spec.label)
 }
 
+/// Whether a room still holds every number its named preset stands for.
+/// `enabled`, the head and the two source choices are the listener's and are
+/// not compared.
+fn has_shape(room: &FeqChainRoomSettings, shape: &RoomShape) -> bool {
+    room.size_m == shape.size_m
+        && room.walls == shape.walls
+        && room.distance_m == shape.distance_m
+        && room.centre_db == shape.centre_db
+        && room.sub_db == shape.sub_db
+        && room.angle_deg == shape.angles
+        && room.level_db == shape.levels
+        // The engine reads a speaker distance of zero as the ring's own, so a
+        // room saved before per-speaker distances existed still matches.
+        && (0..ROOM_SPEAKERS).all(|speaker| {
+            let own = room.speaker_distance_m[speaker];
+            let effective = if own > 0.0 { own } else { room.distance_m };
+            effective == shape.distances[speaker]
+        })
+        && room.mute == shape.mutes
+        && (room.bass_management != 0) == shape.bass_management
+        && room.crossover_hz == shape.crossover_hz
+        && (room.music_upmix != 0) == shape.music_upmix
+        && room.upmix_amount == shape.upmix_amount
+        && room.renderer_version == shape.renderer_version
+        && room.early_reflection_db == shape.early_reflection_db
+        && room.ambience_mix == shape.ambience_mix
+        && room.ambience_decay_s == shape.ambience_decay_s
+        && room.ambience_damping_hz == shape.ambience_damping_hz
+        && (room.preserve_position != 0) == shape.preserve_position
+}
+
+/// Keeps a room's name only while the room still is that preset. A snapshot
+/// written before the catalogue was ported names its room with the old
+/// five-room numbers; those shapes no longer match, so the room becomes
+/// `custom` instead of the picker claiming a room it is not.
+pub fn normalize_preset(room: &mut FeqChainRoomSettings) {
+    if room.preset == CUSTOM_PRESET {
+        return;
+    }
+    match shape_of(room.preset) {
+        Some(shape) if has_shape(room, &shape) => {}
+        _ => room.preset = CUSTOM_PRESET,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,5 +776,32 @@ mod tests {
         assert_eq!(studio.mutes, MUTES);
         assert!(studio.bass_management);
         assert_eq!(studio.crossover_hz, 80.0);
+    }
+
+    #[test]
+    fn a_room_keeps_its_name_only_while_it_still_holds_that_shape() {
+        let mut room = FeqChainRoomSettings::default();
+        assert_eq!(room.preset, 1);
+        normalize_preset(&mut room);
+        assert_eq!(room.preset, 1, "the default living room still matches");
+
+        let mut store = crate::AppStateStore::new(48_000.0);
+        store.set_room_preset(12);
+        let mut reference = store.chain_settings.room;
+        normalize_preset(&mut reference);
+        assert_eq!(reference.preset, 12, "an applied featured room matches");
+
+        // The five-room build's Club: same number, another room.
+        let mut old_club = FeqChainRoomSettings {
+            preset: 4,
+            size_m: 6.5,
+            distance_m: 2.0,
+            walls: 0.5,
+            ambience_mix: 0.3,
+            ambience_decay_s: 0.65,
+            ..Default::default()
+        };
+        normalize_preset(&mut old_club);
+        assert_eq!(old_club.preset, CUSTOM_PRESET);
     }
 }

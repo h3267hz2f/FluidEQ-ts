@@ -1311,12 +1311,12 @@ function renderRoom() {
 
   const size = numberOr(settings.size_m, 6);
   setRangeValue(els.roomSize, size);
-  setRangeFill(els.roomSize, ((size - 2) / 18) * 100);
+  setRangeFill(els.roomSize, ((size - 2) / 10) * 100);
   els.roomSizeVal.textContent = `${size.toFixed(1)} m`;
 
   const dist = numberOr(settings.distance_m, 1);
   setRangeValue(els.roomDist, dist);
-  setRangeFill(els.roomDist, ((dist - 0.3) / 9.7) * 100);
+  setRangeFill(els.roomDist, ((dist - 0.5) / 5.5) * 100);
   els.roomDistVal.textContent = `${dist.toFixed(1)} m`;
 
   const walls = numberOr(settings.walls, 0.45);
@@ -1331,7 +1331,7 @@ function renderRoom() {
 
   const decay = numberOr(settings.ambience_decay_s, 0.8);
   setRangeValue(els.roomDecay, decay);
-  setRangeFill(els.roomDecay, ((decay - 0.1) / 4.9) * 100);
+  setRangeFill(els.roomDecay, ((decay - 0.1) / 1.7) * 100);
   els.roomDecayVal.textContent = `${decay.toFixed(2)} s`;
 
   const bassMgmt = Boolean(settings.bass_management);
@@ -2033,7 +2033,7 @@ els.roomBassMgmt.addEventListener('click', toggleRoomBassManagement);
 
 els.roomSize.addEventListener('input', () => {
   const size = Number(els.roomSize.value);
-  setRangeFill(els.roomSize, ((size - 2) / 18) * 100);
+  setRangeFill(els.roomSize, ((size - 2) / 10) * 100);
   els.roomSizeVal.textContent = `${size.toFixed(1)} m`;
 });
 els.roomSize.addEventListener('change', () =>
@@ -2042,7 +2042,7 @@ els.roomSize.addEventListener('change', () =>
 
 els.roomDist.addEventListener('input', () => {
   const dist = Number(els.roomDist.value);
-  setRangeFill(els.roomDist, ((dist - 0.3) / 9.7) * 100);
+  setRangeFill(els.roomDist, ((dist - 0.5) / 5.5) * 100);
   els.roomDistVal.textContent = `${dist.toFixed(1)} m`;
 });
 els.roomDist.addEventListener('change', () =>
@@ -2069,7 +2069,7 @@ els.roomAmbience.addEventListener('change', () =>
 
 els.roomDecay.addEventListener('input', () => {
   const decay = Number(els.roomDecay.value);
-  setRangeFill(els.roomDecay, ((decay - 0.1) / 4.9) * 100);
+  setRangeFill(els.roomDecay, ((decay - 0.1) / 1.7) * 100);
   els.roomDecayVal.textContent = `${decay.toFixed(2)} s`;
 });
 els.roomDecay.addEventListener('change', () =>

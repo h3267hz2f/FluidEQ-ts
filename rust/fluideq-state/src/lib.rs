@@ -650,6 +650,7 @@ impl AppStateStore {
     /// Replaces the 11-stage DSP rack settings (`FeqChainSettings`) and commits to `NativeChainHandle`.
     pub fn update_chain_settings(&mut self, settings: FeqChainSettings) {
         self.chain_settings = settings;
+        crate::room_catalog::normalize_preset(&mut self.chain_settings.room);
         self.master_power = self.chain_settings.enabled != 0;
         self.matched_treble = self.chain_settings.eq.matched != 0;
         self.eq_model_amount = self.chain_settings.eq.model_amount;
@@ -699,6 +700,7 @@ impl AppStateStore {
         self.tone = snap.tone.clone();
         self.bands = snap.bands.clone();
         self.chain_settings = snap.chain_settings;
+        crate::room_catalog::normalize_preset(&mut self.chain_settings.room);
         self.revision = self.revision.saturating_add(1);
         self.commit_chain_and_linear_phase_kernel();
         Ok(self.snapshot())
@@ -770,6 +772,9 @@ impl AppStateStore {
 
     pub fn set_room_bass_management(&mut self, enabled: bool) -> AppStateSnapshot {
         self.chain_settings.room.bass_management = if enabled { 1 } else { 0 };
+        // Bass management is part of a room's shape, so moving it leaves the
+        // preset it came from behind.
+        self.chain_settings.room.preset = crate::room_catalog::CUSTOM_PRESET;
         self.revision += 1;
         self.commit_chain_and_linear_phase_kernel();
         self.snapshot()
@@ -1403,6 +1408,12 @@ mod tests {
 
         let bass_snap = store.set_room_bass_management(true);
         assert_eq!(bass_snap.chain_settings.room.bass_management, 1);
+        // Bass management belongs to a room's shape, so moving it leaves the
+        // preset behind.
+        assert_eq!(
+            bass_snap.chain_settings.room.preset,
+            crate::room_catalog::CUSTOM_PRESET
+        );
     }
 
     #[test]
