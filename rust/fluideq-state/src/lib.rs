@@ -33,6 +33,7 @@ pub mod linear_phase;
 pub mod models;
 pub mod opra;
 pub mod persistence;
+pub mod preset_catalog;
 pub mod presets;
 pub mod rack_stages;
 pub mod remote_audio_runtime;
@@ -41,7 +42,7 @@ pub mod residency;
 pub mod room_heads;
 pub mod wav_ir;
 
-use biquad::{biquad_coefficients_designed, compute_auto_preamp_db, BandFilterKind, EqBandSpec};
+use biquad::{biquad_coefficients_designed, compute_auto_preamp_db, EqBandSpec};
 use chain_wire::{decode_chain_settings_wire, encode_chain_settings_wire};
 use deck_transport::{decode_noise_profile_wire, DeckLoadOutcome, DualDeckCoordinator};
 use device_profiles::{DeviceEndpointProfile, DeviceProfileRegistry};
@@ -184,40 +185,7 @@ impl Default for AppStateStore {
 
 impl AppStateStore {
     pub fn new(sample_rate: f64) -> Self {
-        let iso_freqs = [
-            25.0, 40.0, 63.0, 100.0, 160.0, 250.0, 400.0, 630.0, 1000.0, 1600.0, 2500.0, 4000.0,
-            6300.0, 10000.0, 16000.0,
-        ];
-        let default_gains = [
-            0.0, 0.0, 0.0, 0.0, 1.4, 0.0, 0.0, -1.1, 0.0, 0.0, 0.0, 1.8, 0.0, 0.0, 0.0,
-        ];
-        let bands: Vec<EqBandSpec> = iso_freqs
-            .iter()
-            .zip(default_gains.iter())
-            .enumerate()
-            .map(|(idx, (&freq, &gain))| EqBandSpec {
-                id: (idx + 1) as u32,
-                enabled: true,
-                filter_type: if idx == 0 {
-                    BandFilterKind::LSC
-                } else if idx == iso_freqs.len() - 1 {
-                    BandFilterKind::HSC
-                } else {
-                    BandFilterKind::PK
-                },
-                frequency: freq,
-                gain_db: gain,
-                quality: if idx == 0 || idx == iso_freqs.len() - 1 {
-                    0.71
-                } else {
-                    1.41
-                },
-                dynamic: false,
-                threshold_db: -18.0,
-                ear: 0,
-            })
-            .collect();
-
+        let balanced = presets::EqPreset::balanced();
         let mut store = Self {
             revision: 1,
             sample_rate,
@@ -225,12 +193,12 @@ impl AppStateStore {
             auto_headroom: true,
             close_to_tray: true,
             preamp_db: 0.0,
-            active_preset_name: "Modern Country".to_string(),
-            eq_model: FeqEqModel::FEQ_EQ_MODEL_CLEAN,
-            eq_model_amount: 1.0,
-            matched_treble: true,
-            tone: ToneSettings::default(),
-            bands,
+            active_preset_name: balanced.name.clone(),
+            eq_model: Self::parse_eq_model(&balanced.eq_model),
+            eq_model_amount: balanced.eq_model_amount,
+            matched_treble: balanced.matched_treble,
+            tone: balanced.tone.clone(),
+            bands: balanced.bands.clone(),
             chain_settings: FeqChainSettings::default(),
             device_profiles: DeviceProfileRegistry::new(),
             deck_transport: DualDeckCoordinator::new(),
@@ -243,6 +211,9 @@ impl AppStateStore {
             impulse_response: None,
             ir_kernel: None,
         };
+        store.chain_settings.eq.subsonic_hz = balanced.subsonic_hz;
+        store.chain_settings.eq.mono_below_hz = balanced.mono_below_hz;
+        store.chain_settings.eq.fuzz_amount = balanced.fuzz_amount;
         store.sync_eq_and_tone_into_chain_settings();
         store.commit_chain_and_linear_phase_kernel();
         store
@@ -568,11 +539,15 @@ impl AppStateStore {
     pub fn current_preset(&self, name: &str) -> presets::EqPreset {
         presets::EqPreset {
             name: name.trim().to_string(),
+            group: "custom".to_string(),
             preamp_db: self.preamp_db,
             auto_headroom: self.auto_headroom,
             eq_model: self.eq_model_name().to_string(),
             eq_model_amount: self.eq_model_amount,
             matched_treble: self.matched_treble,
+            subsonic_hz: self.chain_settings.eq.subsonic_hz,
+            mono_below_hz: self.chain_settings.eq.mono_below_hz,
+            fuzz_amount: self.chain_settings.eq.fuzz_amount,
             tone: self.tone.clone(),
             bands: self.bands.clone(),
             chain_settings: Some(self.chain_settings),
@@ -596,6 +571,7 @@ impl AppStateStore {
         // session that had it at another value must put it back.
         self.eq_model_amount = preset.eq_model_amount.clamp(0.0, 1.0);
         self.active_preset_name = preset.name.clone();
+        let is_factory = preset.group != "custom";
         // A preset saved by this build carries the rack and Room as well, so
         // applying it restores the whole chain and not only the curve. The
         // master switch stays where the user left it: a preset is a sound, not
@@ -603,6 +579,14 @@ impl AppStateStore {
         if let Some(mut chain) = preset.chain_settings {
             chain.enabled = if master_power { 1 } else { 0 };
             self.update_chain_settings(chain);
+        }
+        // A factory curve carries the voicing it was fitted on. A saved file
+        // carries its whole chain instead, and must not reset these from a
+        // field the user never edited.
+        if is_factory {
+            self.chain_settings.eq.subsonic_hz = preset.subsonic_hz.max(0.0);
+            self.chain_settings.eq.mono_below_hz = preset.mono_below_hz.max(0.0);
+            self.chain_settings.eq.fuzz_amount = preset.fuzz_amount.clamp(0.0, 1.0);
         }
         self.revision += 1;
         self.sync_eq_and_tone_into_chain_settings();
@@ -1456,6 +1440,29 @@ mod tests {
         assert_eq!(restored.chain_settings.room.size_m, 12.0);
         assert_eq!(restored.chain_settings.exciter.enabled, 0);
         assert_eq!(restored.active_preset_name, "Room and rack");
+    }
+
+    #[test]
+    fn a_factory_preset_stages_the_voicing_it_was_fitted_on() {
+        let mut store = AppStateStore::new(48_000.0);
+        let vinyl = presets::builtin_presets()
+            .into_iter()
+            .find(|preset| preset.name == "Vinyl")
+            .expect("Vinyl");
+        let applied = store.apply_preset(&vinyl);
+        assert_eq!(applied.eq_model, "wide");
+        assert_eq!(applied.chain_settings.eq.subsonic_hz, 30.0);
+        assert_eq!(applied.chain_settings.eq.mono_below_hz, 150.0);
+        assert_eq!(applied.chain_settings.eq.fuzz_amount, 0.15);
+
+        let default = presets::builtin_presets()
+            .into_iter()
+            .find(|preset| preset.name == "Default")
+            .expect("Default");
+        let cleared = store.apply_preset(&default);
+        assert_eq!(cleared.chain_settings.eq.subsonic_hz, 0.0);
+        assert_eq!(cleared.chain_settings.eq.mono_below_hz, 0.0);
+        assert_eq!(cleared.chain_settings.eq.fuzz_amount, 0.0);
     }
 
     #[test]

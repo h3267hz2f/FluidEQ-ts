@@ -44,26 +44,26 @@ const PREAMP_WARN_DB = -30;
 const SAMPLE_RATE = 48_000;
 let sampleRate = SAMPLE_RATE;
 const ISO_FREQUENCIES = [
-  25, 40, 63, 100, 160, 250, 400, 630, 1000, 1600, 2500, 4000, 6300, 10000,
+  32, 50, 80, 125, 200, 315, 500, 800, 1250, 2000, 3150, 5000, 8000, 12500,
   16000,
 ];
 
 const DEMO_BANDS = [
-  [25, 3.5, 'LSC', 0.71],
-  [40, 2.8, 'PK', 1.41],
-  [63, 1.6, 'PK', 1.41],
-  [100, 0.4, 'PK', 1.41],
-  [160, -0.8, 'PK', 1.41],
-  [250, -1.2, 'PK', 1.41],
-  [400, -0.5, 'PK', 1.41],
-  [630, 0.2, 'PK', 1.41],
-  [1000, 0.8, 'PK', 1.41],
-  [1600, 1.5, 'PK', 1.41],
-  [2500, 2.2, 'PK', 1.41],
-  [4000, 1.8, 'PK', 1.41],
-  [6300, 2.6, 'PK', 1.41],
-  [10000, 3.2, 'PK', 1.41],
-  [16000, 2.4, 'HSC', 0.71],
+  [32, 1.4, 'LSC', 0.71],
+  [50, 1.4, 'PK', 1.41],
+  [80, -0.9, 'PK', 1.41],
+  [125, 0.5, 'PK', 1.41],
+  [200, 0.2, 'PK', 1.41],
+  [315, -1.7, 'PK', 1.41],
+  [500, -0.7, 'PK', 1.41],
+  [800, 0.3, 'PK', 1.41],
+  [1250, 0.2, 'PK', 1.41],
+  [2000, -0.3, 'PK', 1.41],
+  [3150, -0.5, 'PK', 1.41],
+  [5000, 0.5, 'PK', 1.41],
+  [8000, 0.7, 'PK', 1.41],
+  [12500, 0.9, 'PK', 1.41],
+  [16000, 0.9, 'HSC', 0.71],
 ].map(([frequency, gain_db, filter_type, quality], index) => ({
   id: index + 1,
   enabled: true,
@@ -84,8 +84,8 @@ const demoSnapshot = () => ({
   preamp_db: 0,
   auto_preamp_db: 0,
   preamp_total_db: 0,
-  active_preset_name: 'Harman Target 2018',
-  eq_model: 'clean',
+  active_preset_name: 'Balanced',
+  eq_model: 'wide',
   eq_model_amount: 1,
   matched_treble: true,
   tone: {
@@ -241,6 +241,7 @@ let engineStatus = null;
 let hostStatus = null;
 let engineInstallInFlight = false;
 let presetNames = [];
+let presetCatalog = [];
 let presetBusy = false;
 let startupEnabled = false;
 let startupBusy = false;
@@ -356,17 +357,51 @@ function drawGraph() {
 // Rendering
 // ---------------------------------------------------------------------------
 
+const PRESET_GROUP_LABELS = [
+  ['basic', 'Basic'],
+  ['genre', 'Genre'],
+  ['voice', 'Voice'],
+  ['scene', 'Scene'],
+  ['device', 'Device'],
+  ['character', 'Character'],
+  ['repair', 'Repair'],
+  ['gaming', 'Gaming'],
+  ['custom', 'Yours'],
+];
+
+// Factory curves keep the catalogue's own order under their headings; the
+// user's saved files follow in one section of their own.
 function renderPresetSelect() {
   const active = snapshot.active_preset_name || 'Custom curve';
   const names = presetNames.includes(active)
     ? presetNames
     : [active, ...presetNames];
+  const groupOf = new Map(presetCatalog.map((entry) => [entry.name, entry.group]));
+  const known = new Set(groupOf.keys());
+  const present = new Set(names);
+  const ordered = [
+    ...presetCatalog.map((entry) => entry.name).filter((name) => present.has(name)),
+    ...names.filter((name) => !known.has(name)),
+  ];
+  const sections = new Map();
+  for (const name of ordered) {
+    const group = groupOf.get(name) ?? 'custom';
+    if (!sections.has(group)) sections.set(group, []);
+    sections.get(group).push(name);
+  }
   const fragment = document.createDocumentFragment();
-  for (const name of names) {
-    const option = document.createElement('option');
-    option.value = name;
-    option.textContent = name;
-    fragment.appendChild(option);
+  for (const [group, label] of PRESET_GROUP_LABELS) {
+    const entries = sections.get(group);
+    if (!entries?.length) continue;
+    const optgroup = document.createElement('optgroup');
+    optgroup.label = label;
+    for (const name of entries) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      optgroup.appendChild(option);
+    }
+    fragment.appendChild(optgroup);
   }
   els.preset.replaceChildren(fragment);
   els.preset.value = active;
@@ -377,7 +412,10 @@ function renderPresetSelect() {
 async function refreshPresets() {
   if (!invoke) return;
   try {
-    presetNames = await invoke('list_presets');
+    [presetNames, presetCatalog] = await Promise.all([
+      invoke('list_presets'),
+      invoke('list_preset_catalog'),
+    ]);
   } catch (error) {
     showMessage(`Presets: ${error}`);
     return;
