@@ -25,7 +25,7 @@ import {
   MASTER_TARGETS,
 } from './views/rack/index.js';
 import { settings } from './views/settings/index.js';
-import { room, ROOM_PRESETS, KEMAR_HEADS } from './views/room/index.js';
+import { room, KEMAR_HEADS } from './views/room/index.js';
 import {
   F_MIN,
   F_MAX,
@@ -242,6 +242,7 @@ let hostStatus = null;
 let engineInstallInFlight = false;
 let presetNames = [];
 let presetCatalog = [];
+let roomCatalog = [];
 let presetBusy = false;
 let startupEnabled = false;
 let startupBusy = false;
@@ -1287,24 +1288,7 @@ function renderRoom() {
   els.roomPower.textContent = enabled ? 'On' : 'Off';
   els.roomPower.setAttribute('aria-pressed', String(enabled));
 
-  const currentPreset = numberOr(settings.preset, 0);
-  els.roomPresetChips.replaceChildren(
-    ...ROOM_PRESETS.map((p) => {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = `room-chip${p.id === currentPreset ? ' selected' : ''}`;
-      chip.setAttribute('aria-pressed', String(p.id === currentPreset));
-      const lbl = document.createElement('span');
-      lbl.className = 'chip-label';
-      lbl.textContent = p.label;
-      const dtl = document.createElement('span');
-      dtl.className = 'chip-detail';
-      dtl.textContent = p.detail;
-      chip.append(lbl, dtl);
-      chip.addEventListener('click', () => applyRoomPreset(p.id));
-      return chip;
-    })
-  );
+  renderRoomPresets(numberOr(settings.preset, -1));
 
   const currentHead = numberOr(settings.head, 1);
   els.roomHeadChips.replaceChildren(
@@ -1368,6 +1352,67 @@ function renderRoom() {
   setRangeValue(els.roomSub, sub);
   setRangeFill(els.roomSub, ((sub + 12) / 18) * 100);
   els.roomSubVal.textContent = `${formatDb(sub)} dB`;
+}
+
+// Featured rooms first, then the classic ones by group — the order the
+// upstream Room card draws them in.
+const ROOM_SECTIONS = [
+  ['featured', 'Featured'],
+  ['basic', 'Classic · Basic'],
+  ['playback', 'Classic · Playback'],
+  ['character', 'Classic · Character'],
+];
+
+function renderRoomPresets(currentPreset) {
+  const sections = new Map();
+  for (const preset of roomCatalog) {
+    const key = preset.collection === 'featured' ? 'featured' : preset.group;
+    if (!sections.has(key)) sections.set(key, []);
+    sections.get(key).push(preset);
+  }
+
+  const children = [];
+  for (const [key, title] of ROOM_SECTIONS) {
+    const presets = sections.get(key);
+    if (!presets?.length) continue;
+    const heading = document.createElement('p');
+    heading.className = 'eyebrow';
+    heading.textContent = title;
+    const row = document.createElement('div');
+    row.className = 'room-chips';
+    row.append(
+      ...presets.map((preset) => {
+        const selected = preset.index === currentPreset;
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = `room-chip${selected ? ' selected' : ''}`;
+        chip.setAttribute('aria-pressed', String(selected));
+        const label = document.createElement('span');
+        label.className = 'chip-label';
+        label.textContent = preset.label;
+        const detail = document.createElement('span');
+        detail.className = 'chip-detail';
+        detail.textContent = preset.detail;
+        chip.append(label, detail);
+        chip.addEventListener('click', () => applyRoomPreset(preset.index));
+        return chip;
+      })
+    );
+    children.push(heading, row);
+  }
+  els.roomPresetChips.replaceChildren(...children);
+}
+
+async function refreshRoomCatalog() {
+  if (!invoke) return;
+  try {
+    roomCatalog = await invoke('list_room_presets');
+  } catch (error) {
+    roomCatalog = [];
+    showMessage(`Room presets: ${error}`);
+    return;
+  }
+  renderRoom();
 }
 
 async function applyRoomPreset(preset) {
@@ -2356,6 +2401,7 @@ async function boot() {
     clearMessage();
     refreshEngineStatus();
     refreshPresets();
+    refreshRoomCatalog();
     refreshStartup();
     refreshHotkeys();
     refreshGameRules();

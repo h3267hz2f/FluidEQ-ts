@@ -978,6 +978,16 @@ kbd {
   gap: 8px;
 }
 
+.room-preset-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.room-preset-groups .eyebrow {
+  margin-bottom: 6px;
+}
+
 .room-chip {
   display: flex;
   flex-direction: column;

@@ -39,6 +39,7 @@ pub mod rack_stages;
 pub mod remote_audio_runtime;
 pub mod remote_playback;
 pub mod residency;
+pub mod room_catalog;
 pub mod room_heads;
 pub mod wav_ir;
 
@@ -703,23 +704,36 @@ impl AppStateStore {
         Ok(self.snapshot())
     }
 
+    /// Stands the whole room on a built-in preset: shape, every speaker, bass
+    /// management, the stereo fill and the renderer's space and tail. The
+    /// head, `compare_original` and `source_already_spatial` are the
+    /// listener's, so they stay as they are — and choosing a room still turns
+    /// the stage on, because auditioning it is why the chip was pressed.
     pub fn set_room_preset(&mut self, preset_id: i32) -> AppStateSnapshot {
-        let (size_m, distance_m, walls, ambience_mix, ambience_decay_s) = match preset_id {
-            0 => (4.5, 1.2, 0.65, 0.15, 0.35),  // Studio
-            2 => (12.0, 4.0, 0.35, 0.35, 1.20), // Cinema
-            3 => (18.0, 6.0, 0.20, 0.45, 2.20), // Arena
-            4 => (6.5, 2.0, 0.50, 0.30, 0.65),  // Club
-            _ => (8.0, 2.5, 0.45, 0.28, 0.85),  // Stage (1)
-        };
-        self.chain_settings.room.preset = preset_id.clamp(0, 4);
-        self.chain_settings.room.size_m = size_m;
-        self.chain_settings.room.distance_m = distance_m;
-        self.chain_settings.room.walls = walls;
-        self.chain_settings.room.ambience_mix = ambience_mix;
-        self.chain_settings.room.ambience_decay_s = ambience_decay_s;
-        // Choosing a room means auditioning it; leaving the stage off made
-        // the preset chips look like they did nothing.
-        self.chain_settings.room.enabled = 1;
+        if let Some(shape) = crate::room_catalog::shape_of(preset_id) {
+            let room = &mut self.chain_settings.room;
+            room.preset = preset_id;
+            room.size_m = shape.size_m;
+            room.walls = shape.walls;
+            room.distance_m = shape.distance_m;
+            room.centre_db = shape.centre_db;
+            room.sub_db = shape.sub_db;
+            room.angle_deg = shape.angles;
+            room.level_db = shape.levels;
+            room.speaker_distance_m = shape.distances;
+            room.mute = shape.mutes;
+            room.bass_management = i32::from(shape.bass_management);
+            room.crossover_hz = shape.crossover_hz;
+            room.music_upmix = i32::from(shape.music_upmix);
+            room.upmix_amount = shape.upmix_amount;
+            room.renderer_version = shape.renderer_version;
+            room.early_reflection_db = shape.early_reflection_db;
+            room.ambience_mix = shape.ambience_mix;
+            room.ambience_decay_s = shape.ambience_decay_s;
+            room.ambience_damping_hz = shape.ambience_damping_hz;
+            room.preserve_position = i32::from(shape.preserve_position);
+            room.enabled = 1;
+        }
         self.revision += 1;
         self.commit_chain_and_linear_phase_kernel();
         self.snapshot()
@@ -1360,12 +1374,24 @@ mod tests {
     #[test]
     fn room_preset_and_head_selection() {
         let mut store = AppStateStore::new(48_000.0);
-        let snap = store.set_room_preset(2); // Cinema
+        let snap = store.set_room_preset(2); // classic Cinema
         assert_eq!(snap.chain_settings.room.preset, 2);
-        assert_eq!(snap.chain_settings.room.size_m, 12.0);
+        assert_eq!(snap.chain_settings.room.size_m, 9.0);
         assert_eq!(snap.chain_settings.room.distance_m, 4.0);
+        assert_eq!(snap.chain_settings.room.renderer_version, 1);
         // Picking a room turns the stage on so the preset is audible.
         assert_eq!(snap.chain_settings.room.enabled, 1);
+
+        let featured = store.set_room_preset(12); // Reference (second renderer)
+        assert_eq!(featured.chain_settings.room.preset, 12);
+        assert_eq!(featured.chain_settings.room.renderer_version, 2);
+        assert_eq!(featured.chain_settings.room.early_reflection_db, -16.0);
+        assert!(featured.chain_settings.room.preserve_position != 0);
+
+        // The head and the two source choices are the listener's, not a room's.
+        let head_before = featured.chain_settings.room.head;
+        let reshaped = store.set_room_preset(24); // Rear Guard
+        assert_eq!(reshaped.chain_settings.room.head, head_before);
 
         let heads_dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/room/heads");

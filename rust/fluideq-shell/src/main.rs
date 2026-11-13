@@ -433,6 +433,11 @@ fn list_preset_catalog() -> Vec<fluideq_state::presets::PresetListing> {
 }
 
 #[tauri::command]
+fn list_room_presets() -> Vec<fluideq_state::room_catalog::RoomListing> {
+    fluideq_state::room_catalog::catalog()
+}
+
+#[tauri::command]
 fn apply_preset(
     app: tauri::AppHandle,
     state: State<'_, ShellState>,
@@ -1162,6 +1167,7 @@ fn main() {
             export_apo_curve,
             list_presets,
             list_preset_catalog,
+            list_room_presets,
             apply_preset,
             save_preset,
             delete_preset,
