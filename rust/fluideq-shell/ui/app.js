@@ -2147,6 +2147,14 @@ window.addEventListener('focus', () => {
   refreshStartup();
 });
 
+// Windows can drop, bypass or re-create an output while the window sits open,
+// so the engine is read again on a slow beat. Quiet: a health check is not a
+// message.
+window.setInterval(() => {
+  if (document.hidden || !invoke || engineInstallInFlight) return;
+  refreshEngineStatus({ quiet: true });
+}, 20_000);
+
 async function syncOutputVolume() {
   try {
     const volume = await invoke('get_output_volume');
@@ -2216,7 +2224,37 @@ function loadAdvice(endpoint, status) {
   return 'restart Windows audio so the output creates the engine';
 }
 
-function renderEngineStatus(status) {
+// What the one button does next. A restart is enough only when every other
+// fact is healthy and an attached output simply never loaded; anything else
+// rewrites the registration, which is also how a stale DLL is updated and a
+// Windows bypass is cleared.
+function engineAction(status) {
+  const endpoints = Array.isArray(status?.endpoints) ? status.endpoints : [];
+  const attached = endpoints.filter((endpoint) => endpoint.attached).length;
+  const bypassed = endpoints.filter(
+    (endpoint) => endpoint.attached && endpoint.tpBypassed
+  ).length;
+  const unloaded = endpoints.filter(
+    (endpoint) => endpoint.attached && endpoint.loaded === false
+  ).length;
+  const installed = Boolean(status?.installed);
+  const stale =
+    installed &&
+    Boolean(status?.dllVersion) &&
+    Boolean(status?.bundledVersion) &&
+    status.dllVersion !== status.bundledVersion;
+  const bridgeError =
+    typeof status?.bridgeError === 'string' && status.bridgeError.length > 0;
+  if (!installed) return 'install';
+  if (engineBlockers(status).length > 0 || bridgeError || bypassed > 0 || stale) {
+    return 'install';
+  }
+  if (endpoints.length > attached) return 'install';
+  if (unloaded > 0) return 'restart';
+  return null;
+}
+
+function renderEngineStatus(status, quiet = false) {
   engineStatus = status;
   const endpoints = Array.isArray(status?.endpoints) ? status.endpoints : [];
   const attached = endpoints.filter((endpoint) => endpoint.attached).length;
@@ -2242,8 +2280,6 @@ function renderEngineStatus(status) {
   const active =
     installed && attached > 0 && bypassed === 0 && !blocked && !bridgeError;
   const working = active && unloaded < attached;
-  const needsAttention =
-    attachable || bypassed > 0 || stale || blocked || Boolean(bridgeError) || unloaded > 0;
 
   const device = status?.defaultDevice;
   if (device?.name) {
@@ -2293,23 +2329,27 @@ function renderEngineStatus(status) {
   } else {
     els.engineText.textContent = 'System engine off';
   }
-  els.engineInstall.hidden = installed && !needsAttention;
-  els.engineInstall.textContent = installed
-    ? blocked || bridgeError
-      ? 'Repair engine'
-      : bypassed
-        ? 'Fix engine activation'
-        : unloaded > 0
-          ? 'Restart Windows audio'
-          : stale
-            ? 'Update engine'
-            : 'Attach all outputs'
-    : 'Enable system audio';
-  if (unloaded > 0) {
-    showMessage(`Engine never loaded: ${advice}`);
-  } else {
-    clearMessageStartingWith('Engine never loaded:');
-    clearMessageStartingWith('Engine status:');
+  const action = engineAction(status);
+  els.engineInstall.hidden = action === null;
+  els.engineInstall.textContent =
+    action === 'restart'
+      ? 'Restart Windows audio'
+      : installed
+        ? blocked || bridgeError
+          ? 'Repair engine'
+          : bypassed
+            ? 'Fix engine activation'
+            : stale
+              ? 'Update engine'
+              : 'Attach all outputs'
+        : 'Enable system audio';
+  if (!quiet) {
+    if (unloaded > 0) {
+      showMessage(`Engine never loaded: ${advice}`);
+    } else {
+      clearMessageStartingWith('Engine never loaded:');
+      clearMessageStartingWith('Engine status:');
+    }
   }
   if (activeView === 'config') renderConfig();
 }
@@ -2346,30 +2386,42 @@ async function followDefaultDevice(status) {
   }
 }
 
-async function refreshEngineStatus() {
+async function refreshEngineStatus({ quiet = false } = {}) {
   try {
     const status = await invoke('engine_status');
-    renderEngineStatus(status);
+    renderEngineStatus(status, quiet);
     await followDefaultDevice(status);
   } catch (error) {
     els.engineActivation.hidden = false;
     els.engineActivation.classList.remove('active');
     els.engineText.textContent = 'System engine unavailable';
     els.engineInstall.hidden = true;
-    showMessage(`Engine status: ${error}`);
+    if (!quiet) showMessage(`Engine status: ${error}`);
   }
 }
 
 els.engineInstall.addEventListener('click', async () => {
   if (engineInstallInFlight) return;
+  const restart = engineAction(engineStatus) === 'restart';
   engineInstallInFlight = true;
   els.engineInstall.disabled = true;
-  els.engineInstall.textContent = 'Installing…';
+  els.engineInstall.textContent = restart ? 'Restarting…' : 'Installing…';
   try {
-    renderEngineStatus(await invoke('install_engine'));
-    showMessage('System engine enabled — Windows audio restarted', 'ok');
+    renderEngineStatus(
+      await invoke(restart ? 'restart_audio' : 'install_engine')
+    );
+    showMessage(
+      restart
+        ? 'Windows audio restarted — the outputs rebuild the engine'
+        : 'System engine enabled — Windows audio restarted',
+      'ok'
+    );
   } catch (error) {
-    showMessage(`Engine was not enabled: ${error}`);
+    showMessage(
+      restart
+        ? `Windows audio was not restarted: ${error}`
+        : `Engine was not enabled: ${error}`
+    );
     if (engineStatus) renderEngineStatus(engineStatus);
   } finally {
     engineInstallInFlight = false;

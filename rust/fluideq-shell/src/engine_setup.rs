@@ -136,6 +136,19 @@ pub fn install(app: &AppHandle) -> Result<Value, String> {
     status(app)
 }
 
+/// Restart Windows audio without touching the engine's registration.
+///
+/// This is the repair for an output that is attached but never loaded: the
+/// graph is rebuilt and the APO is created. It prompts for administrator
+/// rights, because restarting the audio service does.
+pub fn restart_audio(app: &AppHandle) -> Result<Value, String> {
+    let setup = engine_setup_exe(app)?;
+    let raw = platform::run_elevated(&setup, &["restart-audio"])?;
+    let json = parse_setup_json(&raw)?;
+    require_success(&json, "Windows audio restart")?;
+    status(app)
+}
+
 #[cfg(target_os = "windows")]
 mod platform {
     use fluideq_state::apo_setup_commands::{

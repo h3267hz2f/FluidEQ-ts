@@ -680,6 +680,11 @@ fn install_engine(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn restart_audio(app: tauri::AppHandle) -> Result<Value, String> {
+    engine_setup::restart_audio(&app)
+}
+
+#[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
 }
@@ -1187,6 +1192,7 @@ fn main() {
             set_output_volume,
             engine_status,
             install_engine,
+            restart_audio,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,
