@@ -16,13 +16,14 @@ use fluideq_dsp_sys::{FeqChainSettings, FeqNormalizerMode};
 use std::os::raw::c_int;
 
 /// The stages the rack page shows, in the order the chain runs them.
-pub const STAGE_IDS: [&str; 11] = [
+pub const STAGE_IDS: [&str; 12] = [
     "normalizer",
     "denoise",
     "deesser",
     "exciter",
     "bass-forge",
     "equaliser",
+    "footsteps",
     "bass-punch",
     "dimension",
     "room",
@@ -58,6 +59,7 @@ pub fn set_stage_enabled(
         "exciter" => settings.exciter.enabled = flag(enabled),
         "bass-forge" => settings.bass_forge.enabled = flag(enabled),
         "equaliser" => settings.eq.enabled = flag(enabled),
+        "footsteps" => settings.footsteps.enabled = flag(enabled),
         "bass-punch" => settings.bass_punch.enabled = flag(enabled),
         "dimension" => settings.dimension.enabled = flag(enabled),
         "room" => settings.room.enabled = flag(enabled),
@@ -72,7 +74,13 @@ pub fn set_stage_enabled(
 pub fn stage_supports_isolate(stage: &str) -> bool {
     matches!(
         stage,
-        "denoise" | "deesser" | "exciter" | "equaliser" | "bass-forge" | "bass-punch"
+        "denoise"
+            | "deesser"
+            | "exciter"
+            | "equaliser"
+            | "footsteps"
+            | "bass-forge"
+            | "bass-punch"
     )
 }
 
@@ -90,6 +98,7 @@ pub fn set_stage_isolate(
         "deesser" => settings.deesser.isolate = value,
         "exciter" => settings.exciter.isolate = value,
         "equaliser" => settings.eq.isolate = value,
+        "footsteps" => settings.footsteps.isolate = value,
         "bass-forge" => settings.bass_forge.isolate = value,
         "bass-punch" => settings.bass_punch.isolate = value,
         _ => return Err(format!("the {stage} stage has no difference monitor")),
@@ -103,6 +112,7 @@ pub fn stage_isolate(settings: &FeqChainSettings, stage: &str) -> Option<bool> {
         "deesser" => Some(settings.deesser.isolate != 0),
         "exciter" => Some(settings.exciter.isolate != 0),
         "equaliser" => Some(settings.eq.isolate != 0),
+        "footsteps" => Some(settings.footsteps.isolate != 0),
         "bass-forge" => Some(settings.bass_forge.isolate != 0),
         "bass-punch" => Some(settings.bass_punch.isolate != 0),
         _ => None,
@@ -148,7 +158,7 @@ pub fn set_master_target(settings: &mut FeqChainSettings, target: &str) -> Resul
 
 /// The parameters the rack page may write, with the range each one accepts.
 /// The window draws the same ranges; the clamp here is what the engine gets.
-const PARAMETER_RANGES: [(&str, &str, f64, f64); 29] = [
+const PARAMETER_RANGES: [(&str, &str, f64, f64); 31] = [
     ("normalizer", "target_lufs", -35.0, -5.0),
     ("normalizer", "ceiling_db", -6.0, 0.0),
     ("denoise", "hiss_amount", 0.0, 1.0),
@@ -162,6 +172,8 @@ const PARAMETER_RANGES: [(&str, &str, f64, f64); 29] = [
     ("bass-forge", "sub_amount", 0.0, 1.0),
     ("bass-forge", "mix", 0.0, 1.0),
     ("equaliser", "model_amount", 0.0, 1.0),
+    ("footsteps", "lift", 0.0, 1.0),
+    ("footsteps", "calm", 0.0, 1.0),
     ("bass-punch", "attack", 0.0, 1.0),
     ("bass-punch", "sustain", 0.0, 1.0),
     ("bass-punch", "mix", 0.0, 1.0),
@@ -216,6 +228,8 @@ pub fn set_stage_parameter(
         ("bass-forge", "sub_amount") => settings.bass_forge.sub_amount = value,
         ("bass-forge", "mix") => settings.bass_forge.mix = value,
         ("equaliser", "model_amount") => settings.eq.model_amount = value,
+        ("footsteps", "lift") => settings.footsteps.lift = value,
+        ("footsteps", "calm") => settings.footsteps.calm = value,
         ("bass-punch", "attack") => settings.bass_punch.attack = value,
         ("bass-punch", "sustain") => settings.bass_punch.sustain = value,
         ("bass-punch", "mix") => settings.bass_punch.mix = value,
@@ -261,6 +275,8 @@ pub fn stage_parameter_value(
         ("bass-forge", "sub_amount") => Some(settings.bass_forge.sub_amount),
         ("bass-forge", "mix") => Some(settings.bass_forge.mix),
         ("equaliser", "model_amount") => Some(settings.eq.model_amount),
+        ("footsteps", "lift") => Some(settings.footsteps.lift),
+        ("footsteps", "calm") => Some(settings.footsteps.calm),
         ("bass-punch", "attack") => Some(settings.bass_punch.attack),
         ("bass-punch", "sustain") => Some(settings.bass_punch.sustain),
         ("bass-punch", "mix") => Some(settings.bass_punch.mix),
@@ -291,6 +307,7 @@ pub fn stage_enabled(settings: &FeqChainSettings, stage: &str) -> Option<bool> {
         "exciter" => Some(settings.exciter.enabled != 0),
         "bass-forge" => Some(settings.bass_forge.enabled != 0),
         "equaliser" => Some(settings.eq.enabled != 0),
+        "footsteps" => Some(settings.footsteps.enabled != 0),
         "bass-punch" => Some(settings.bass_punch.enabled != 0),
         "dimension" => Some(settings.dimension.enabled != 0),
         "room" => Some(settings.room.enabled != 0),
@@ -383,6 +400,7 @@ mod tests {
             "deesser",
             "exciter",
             "equaliser",
+            "footsteps",
             "bass-forge",
             "bass-punch",
         ] {

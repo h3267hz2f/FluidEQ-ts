@@ -206,6 +206,35 @@ export const rackStages = [
     ],
   },
   {
+    id: 'footsteps',
+    label: 'Footsteps',
+    badge: 'F',
+    description:
+      'Lifts a game’s quiet steps and calms its rumble without touching the rest.',
+    summary: (s) =>
+      `Lift ${pct(s.footsteps?.lift)} · calm ${pct(s.footsteps?.calm)}`,
+    parameters: [
+      {
+        id: 'lift',
+        label: 'Step lift',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        format: pct,
+        value: (s) => Number(s.footsteps?.lift ?? 0.85),
+      },
+      {
+        id: 'calm',
+        label: 'Rumble calm',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        format: pct,
+        value: (s) => Number(s.footsteps?.calm ?? 0.5),
+      },
+    ],
+  },
+  {
     id: 'bass-punch',
     label: 'Bass Punch',
     badge: '∧',
@@ -283,7 +312,7 @@ export const rackStages = [
         id: 'size_m',
         label: 'Room size',
         min: 2,
-        max: 20,
+        max: 12,
         step: 0.1,
         format: formatMeters,
         value: (s) => Number(s.room?.size_m ?? 6),
@@ -291,8 +320,8 @@ export const rackStages = [
       {
         id: 'distance_m',
         label: 'Listening distance',
-        min: 0.3,
-        max: 10,
+        min: 0.5,
+        max: 6,
         step: 0.1,
         format: formatMeters,
         value: (s) => Number(s.room?.distance_m ?? 1),
@@ -369,6 +398,7 @@ export const ISOLATE_STAGES = [
   'deesser',
   'exciter',
   'equaliser',
+  'footsteps',
   'bass-forge',
   'bass-punch',
 ];
@@ -417,5 +447,5 @@ export function stageSummary(stage, settings) {
 export const rack = {
   id: 'rack',
   title: 'DSP rack',
-  eyebrow: 'Eleven stages',
+  eyebrow: 'Twelve stages',
 };
