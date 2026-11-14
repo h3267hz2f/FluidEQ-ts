@@ -44,6 +44,10 @@ pub const FEQ_CHAIN_ROOM_TRAILER: usize = 11;
 pub const FEQ_CHAIN_FOOTSTEPS_TAG: f64 = 1179602772.0; // 'FOOT'
 pub const FEQ_CHAIN_FOOTSTEPS_VERSION: f64 = 1.0;
 pub const FEQ_CHAIN_FOOTSTEPS_FIELDS: f64 = 4.0;
+pub const FEQ_CHAIN_DYNAMICS_TAG: f64 = 1146703425.0; // 'DYNA'
+pub const FEQ_CHAIN_DYNAMICS_VERSION: f64 = 1.0;
+pub const FEQ_CHAIN_DYNAMICS_FIELDS: f64 = 20.0;
+pub const FEQ_CHAIN_DYNAMICS_TRAILER: usize = 23;
 pub const FEQ_CHAIN_FOOTSTEPS_TRAILER: usize = 7;
 pub const FEQ_CHAIN_TONE_HEADER: usize = 4;
 pub const FEQ_CHAIN_TONE_BAND_PARAMS: usize = 4;
@@ -88,6 +92,7 @@ pub const FEQ_STAGE_HEADROOM: u32 = 1 << 9;
 pub const FEQ_STAGE_MASTER: u32 = 1 << 10;
 pub const FEQ_STAGE_DEESSER: u32 = 1 << 11;
 pub const FEQ_STAGE_FOOTSTEPS: u32 = 1 << 12;
+pub const FEQ_STAGE_DYNAMICS: u32 = 1 << 13;
 
 pub const FEQ_METER_WINDOW: usize = 2048;
 pub const FEQ_METER_BINS: usize = 1024;
@@ -633,6 +638,54 @@ impl Default for FeqFootstepsSettings {
     }
 }
 
+pub const FEQ_COMPANDER_BANDS: usize = 3;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqCompanderBand {
+    pub up_threshold_db: c_double,
+    pub up_ratio: c_double,
+    pub up_max_db: c_double,
+    pub down_threshold_db: c_double,
+    pub down_ratio: c_double,
+}
+
+impl Default for FeqCompanderBand {
+    fn default() -> Self {
+        Self {
+            up_threshold_db: -40.0,
+            up_ratio: 1.0,
+            up_max_db: 0.0,
+            down_threshold_db: -20.0,
+            down_ratio: 1.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FeqCompanderSettings {
+    pub enabled: c_int,
+    pub bands: [FeqCompanderBand; FEQ_COMPANDER_BANDS],
+    pub attack_ms: c_double,
+    pub release_ms: c_double,
+    pub mix: c_double,
+    pub makeup_db: c_double,
+}
+
+impl Default for FeqCompanderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: 0,
+            bands: [FeqCompanderBand::default(); FEQ_COMPANDER_BANDS],
+            attack_ms: 10.0,
+            release_ms: 200.0,
+            mix: 1.0,
+            makeup_db: 0.0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct FeqFootstepsReport {
@@ -1091,6 +1144,8 @@ pub struct FeqChainSettings {
     pub exciter: FeqChainExciterSettings,
     pub eq: FeqChainEqSettings,
     pub footsteps: FeqFootstepsSettings,
+    #[serde(default)]
+    pub compander: FeqCompanderSettings,
     pub dimension: FeqDimensionSettings,
     pub room: FeqChainRoomSettings,
     pub bass_forge: FeqChainBassForgeSettings,
@@ -1112,6 +1167,7 @@ impl Default for FeqChainSettings {
             exciter: FeqChainExciterSettings::default(),
             eq: FeqChainEqSettings::default(),
             footsteps: FeqFootstepsSettings::default(),
+            compander: FeqCompanderSettings::default(),
             dimension: FeqDimensionSettings::default(),
             room: FeqChainRoomSettings::default(),
             bass_forge: FeqChainBassForgeSettings::default(),

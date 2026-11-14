@@ -15,15 +15,17 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //!   2. Low-latency / Game mode (`1` word: `0.0` or `1.0`)
 //!   3. Tagged Room v2 trailer (`11` words starting with `FEQ_CHAIN_ROOM_TAG`)
 //!   4. Tagged Footsteps trailer (`7` words starting with `FEQ_CHAIN_FOOTSTEPS_TAG`)
-//!   5. Tagged Tone trailer (`4 + tone_bands * 4` words starting with `FEQ_CHAIN_TONE_TAG`)
+//!   5. Tagged Dynamics trailer (`23` words starting with `FEQ_CHAIN_DYNAMICS_TAG`)
+//!   6. Tagged Tone trailer (`4 + tone_bands * 4` words starting with `FEQ_CHAIN_TONE_TAG`)
 
 use fluideq_dsp_sys::{
     FeqChainSettings, FeqFilterType, FEQ_CHAIN_BAND_PARAMS, FEQ_CHAIN_DEESSER_FIELDS,
-    FEQ_CHAIN_DEESSER_SIGNATURE, FEQ_CHAIN_EXCITER_BANDS, FEQ_CHAIN_FOOTSTEPS_FIELDS,
-    FEQ_CHAIN_FOOTSTEPS_TAG, FEQ_CHAIN_FOOTSTEPS_VERSION, FEQ_CHAIN_MAX_EQ_BANDS,
-    FEQ_CHAIN_MAX_TONE_BANDS, FEQ_CHAIN_PARAM_LEAD, FEQ_CHAIN_ROOM_FIELDS, FEQ_CHAIN_ROOM_TAG,
-    FEQ_CHAIN_ROOM_VERSION, FEQ_CHAIN_TONE_TAG, FEQ_CHAIN_TONE_VERSION, FEQ_ROOM_MUTE_SLOTS,
-    FEQ_ROOM_SPEAKERS,
+    FEQ_CHAIN_DEESSER_SIGNATURE, FEQ_CHAIN_DYNAMICS_FIELDS, FEQ_CHAIN_DYNAMICS_TAG,
+    FEQ_CHAIN_DYNAMICS_TRAILER, FEQ_CHAIN_DYNAMICS_VERSION, FEQ_CHAIN_EXCITER_BANDS,
+    FEQ_CHAIN_FOOTSTEPS_FIELDS, FEQ_CHAIN_FOOTSTEPS_TAG, FEQ_CHAIN_FOOTSTEPS_VERSION,
+    FEQ_CHAIN_MAX_EQ_BANDS, FEQ_CHAIN_MAX_TONE_BANDS, FEQ_CHAIN_PARAM_LEAD, FEQ_CHAIN_ROOM_FIELDS,
+    FEQ_CHAIN_ROOM_TAG, FEQ_CHAIN_ROOM_VERSION, FEQ_CHAIN_TONE_TAG, FEQ_CHAIN_TONE_VERSION,
+    FEQ_COMPANDER_BANDS, FEQ_ROOM_MUTE_SLOTS, FEQ_ROOM_SPEAKERS,
 };
 
 #[inline]
@@ -62,12 +64,18 @@ pub fn encode_chain_settings_wire(settings: &FeqChainSettings) -> Vec<f64> {
         || settings.footsteps.isolate != 0
         || (settings.footsteps.lift - 0.85).abs() > 1e-9
         || (settings.footsteps.calm - 0.5).abs() > 1e-9;
+    let emit_dynamics = settings.compander.enabled != 0;
 
     let total_capacity = FEQ_CHAIN_PARAM_LEAD
         + band_count * FEQ_CHAIN_BAND_PARAMS
         + 4
         + 11
         + if emit_footsteps { 7 } else { 0 }
+        + if emit_dynamics {
+            FEQ_CHAIN_DYNAMICS_TRAILER
+        } else {
+            0
+        }
         + if tone_count >= 1 {
             4 + tone_count * 4
         } else {
@@ -280,6 +288,25 @@ pub fn encode_chain_settings_wire(settings: &FeqChainSettings) -> Vec<f64> {
         out.push(settings.footsteps.calm);
     }
 
+    // Dynamics trailer (23 words) — written only while the stage is on.
+    if emit_dynamics {
+        out.push(FEQ_CHAIN_DYNAMICS_TAG);
+        out.push(FEQ_CHAIN_DYNAMICS_VERSION);
+        out.push(FEQ_CHAIN_DYNAMICS_FIELDS);
+        out.push(bool_word(settings.compander.enabled));
+        for band in &settings.compander.bands {
+            out.push(band.up_threshold_db);
+            out.push(band.up_ratio);
+            out.push(band.up_max_db);
+            out.push(band.down_threshold_db);
+            out.push(band.down_ratio);
+        }
+        out.push(settings.compander.attack_ms);
+        out.push(settings.compander.release_ms);
+        out.push(settings.compander.mix);
+        out.push(settings.compander.makeup_db);
+    }
+
     // Tone trailer (`4 + tone_count * 4` words) — C++ `chain_decode.cpp` requires `tone[2] >= 1`
     if tone_count >= 1 {
         out.push(FEQ_CHAIN_TONE_TAG);
@@ -347,6 +374,7 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
         && values[at] != FEQ_CHAIN_ROOM_TAG
         && values[at] != FEQ_CHAIN_TONE_TAG
         && values[at] != FEQ_CHAIN_FOOTSTEPS_TAG
+        && values[at] != FEQ_CHAIN_DYNAMICS_TAG
     {
         if values[at] != 0.0 && values[at] != 1.0 {
             return None;
@@ -409,6 +437,38 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
         }
         footsteps_at = Some(at);
         at += foot_words;
+    }
+
+    let mut dynamics_at: Option<usize> = None;
+    if at < values.len() && values[at] == FEQ_CHAIN_DYNAMICS_TAG {
+        if values.len() - at < FEQ_CHAIN_DYNAMICS_TRAILER
+            || values[at + 1] != FEQ_CHAIN_DYNAMICS_VERSION
+            || values[at + 2] != FEQ_CHAIN_DYNAMICS_FIELDS
+            || (values[at + 3] != 0.0 && values[at + 3] != 1.0)
+        {
+            return None;
+        }
+        for band in 0..FEQ_COMPANDER_BANDS {
+            let read = &values[at + 4 + band * 5..at + 9 + band * 5];
+            if !(-80.0..=-10.0).contains(&read[0])
+                || !(1.0..=4.0).contains(&read[1])
+                || !(0.0..=18.0).contains(&read[2])
+                || !(-60.0..=0.0).contains(&read[3])
+                || !(1.0..=20.0).contains(&read[4])
+            {
+                return None;
+            }
+        }
+        let tail = at + 4 + FEQ_COMPANDER_BANDS * 5;
+        if !(1.0..=100.0).contains(&values[tail])
+            || !(20.0..=1000.0).contains(&values[tail + 1])
+            || !(0.0..=1.0).contains(&values[tail + 2])
+            || !(-12.0..=12.0).contains(&values[tail + 3])
+        {
+            return None;
+        }
+        dynamics_at = Some(at);
+        at += FEQ_CHAIN_DYNAMICS_TRAILER;
     }
 
     let mut tone_at: Option<(usize, usize)> = None;
@@ -686,6 +746,23 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
         settings.footsteps.calm = values[fc + 6];
     }
 
+    if let Some(dc) = dynamics_at {
+        settings.compander.enabled = read_bool(values[dc + 3]);
+        for band in 0..FEQ_COMPANDER_BANDS {
+            let read = dc + 4 + band * 5;
+            settings.compander.bands[band].up_threshold_db = values[read];
+            settings.compander.bands[band].up_ratio = values[read + 1];
+            settings.compander.bands[band].up_max_db = values[read + 2];
+            settings.compander.bands[band].down_threshold_db = values[read + 3];
+            settings.compander.bands[band].down_ratio = values[read + 4];
+        }
+        let tail = dc + 4 + FEQ_COMPANDER_BANDS * 5;
+        settings.compander.attack_ms = values[tail];
+        settings.compander.release_ms = values[tail + 1];
+        settings.compander.mix = values[tail + 2];
+        settings.compander.makeup_db = values[tail + 3];
+    }
+
     if let Some((tc, tone_bands)) = tone_at {
         settings.tone.band_count = tone_bands as u32;
         settings.tone.matched = read_bool(values[tc + 3]);
@@ -714,9 +791,39 @@ mod tests {
         // nor `FEQ_CHAIN_FOOTSTEPS_TAG` should be emitted on the wire.
         assert!(!encoded.contains(&FEQ_CHAIN_TONE_TAG));
         assert!(!encoded.contains(&FEQ_CHAIN_FOOTSTEPS_TAG));
+        assert!(!encoded.contains(&FEQ_CHAIN_DYNAMICS_TAG));
         let decoded = decode_chain_settings_wire(&encoded)
             .expect("default FeqChainSettings wire must decode cleanly");
         assert_eq!(decoded, defaults);
+    }
+
+    #[test]
+    fn dynamics_trailer_round_trips_its_three_bands() {
+        let mut original = FeqChainSettings::default();
+        original.compander.enabled = 1;
+        original.compander.bands[0].up_threshold_db = -48.0;
+        original.compander.bands[0].up_ratio = 2.5;
+        original.compander.bands[0].up_max_db = 9.0;
+        original.compander.bands[1].down_threshold_db = -14.0;
+        original.compander.bands[1].down_ratio = 4.0;
+        original.compander.bands[2].up_ratio = 1.5;
+        original.compander.bands[2].down_ratio = 8.0;
+        original.compander.attack_ms = 25.0;
+        original.compander.release_ms = 350.0;
+        original.compander.mix = 0.75;
+        original.compander.makeup_db = -3.0;
+
+        let encoded = encode_chain_settings_wire(&original);
+        assert_eq!(
+            encoded
+                .iter()
+                .filter(|word| **word == FEQ_CHAIN_DYNAMICS_TAG)
+                .count(),
+            1
+        );
+        let decoded =
+            decode_chain_settings_wire(&encoded).expect("dynamics wire must decode cleanly");
+        assert_eq!(decoded.compander, original.compander);
     }
 
     #[test]

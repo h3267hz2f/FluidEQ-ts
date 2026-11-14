@@ -207,6 +207,7 @@ void feq_chain_settings_defaults(FeqChainSettings* settings) {
   settings->room.ambience_mix = room.ambience_mix;
   settings->room.ambience_decay_s = room.ambience_decay_s;
   settings->room.ambience_damping_hz = room.ambience_damping_hz;
+  feq_compander_settings_defaults(&settings->compander);
   settings->room.preserve_position = room.preserve_position;
   settings->room.compare_original = room.compare_original;
   settings->room.source_already_spatial = room.source_already_spatial;
@@ -423,6 +424,8 @@ FeqChain* feq_chain_create(double sample_rate,
   chain->deesser = feq_deesser_create(sample_rate, chain->channels);
   // And for the same reason a rack missing Footsteps still plays.
   chain->footsteps = feq_footsteps_create(sample_rate, chain->channels);
+  // And a rack missing Dynamics.
+  chain->compander = feq_compander_create(sample_rate, chain->channels);
 
   // Both sets, so the first published one is complete and the spare is not a
   // half-built rack waiting to be swapped in.
@@ -476,6 +479,8 @@ void feq_chain_destroy(FeqChain* chain) {
   chain->deesser = nullptr;
   feq_footsteps_destroy(chain->footsteps);
   chain->footsteps = nullptr;
+  feq_compander_destroy(chain->compander);
+  chain->compander = nullptr;
   delete chain;
 }
 
@@ -533,6 +538,7 @@ void feq_chain_configure(FeqChain* chain, const FeqChainSettings* settings) {
   // through.
   chain_configure_deesser(chain);
   feq_footsteps_configure(chain->footsteps, &chain->settings.footsteps);
+  feq_compander_configure(chain->compander, &chain->settings.compander);
   {
     FeqRoomSettings room{};
     feq_room_settings_defaults(&room);
@@ -591,6 +597,7 @@ void feq_chain_set_lfe_channel(FeqChain* chain, int channel) {
   feq_room_set_layout(chain->room, chain->room_speakers, chain->lfe_channel);
   chain_apply_deesser_layout(chain);
   feq_footsteps_set_lfe(chain->footsteps, chain->lfe_channel);
+  feq_compander_set_lfe(chain->compander, chain->lfe_channel);
 }
 
 void feq_chain_set_room_head(FeqChain* chain, const float* left,
@@ -721,6 +728,8 @@ void feq_chain_reset(FeqChain* chain, FeqChainResetReason reason) {
   feq_deesser_reset(chain->deesser);
   // A new passage has a new bed, learnt again before anything is lifted.
   feq_footsteps_reset(chain->footsteps);
+  // Its gains were the passage before's; the next one starts level.
+  feq_compander_reset(chain->compander);
 
   if (reason != FEQ_CHAIN_RESET_SEEK) {
     /**
@@ -833,9 +842,10 @@ uint32_t feq_chain_active_stages(const FeqChain* chain) {
       settings.master.enabled != 0,
       settings.deesser.enabled != 0 && chain->deesser != nullptr,
       settings.footsteps.enabled != 0 && chain->footsteps != nullptr,
+      settings.compander.enabled != 0 && chain->compander != nullptr,
   };
   uint32_t mask = 0;
-  for (uint32_t stage = 0; stage < 13u; ++stage) {
+  for (uint32_t stage = 0; stage < 14u; ++stage) {
     if (active[stage]) mask |= 1u << stage;
   }
   return mask;

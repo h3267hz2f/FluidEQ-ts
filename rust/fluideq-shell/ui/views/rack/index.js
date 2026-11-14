@@ -21,6 +21,62 @@ const formatLufs = (value) => `${(Number(value) || 0).toFixed(1)} LUFS`;
 const formatHz = (value) => `${Math.round(Number(value) || 0)} Hz`;
 const formatMeters = (value) => `${(Number(value) || 0).toFixed(1)} m`;
 
+const dynamicsBandParameters = () =>
+  [
+    { key: 'band1', index: 0, label: 'Low' },
+    { key: 'band2', index: 1, label: 'Mid' },
+    { key: 'band3', index: 2, label: 'High' },
+  ].flatMap(({ key, index, label }) => {
+    const band = (s) => s.compander?.bands?.[index] ?? {};
+    return [
+      {
+        id: `${key}_up_threshold_db`,
+        label: `${label} lift under`,
+        min: -80,
+        max: -10,
+        step: 1,
+        format: formatDb,
+        value: (s) => Number(band(s).up_threshold_db ?? -40),
+      },
+      {
+        id: `${key}_up_ratio`,
+        label: `${label} lift ratio`,
+        min: 1,
+        max: 4,
+        step: 0.1,
+        format: (v) => `${(Number(v) || 1).toFixed(1)}:1`,
+        value: (s) => Number(band(s).up_ratio ?? 1),
+      },
+      {
+        id: `${key}_up_max_db`,
+        label: `${label} most lift`,
+        min: 0,
+        max: 18,
+        step: 0.5,
+        format: formatDb,
+        value: (s) => Number(band(s).up_max_db ?? 0),
+      },
+      {
+        id: `${key}_down_threshold_db`,
+        label: `${label} hold over`,
+        min: -60,
+        max: 0,
+        step: 1,
+        format: formatDb,
+        value: (s) => Number(band(s).down_threshold_db ?? -20),
+      },
+      {
+        id: `${key}_down_ratio`,
+        label: `${label} hold ratio`,
+        min: 1,
+        max: 20,
+        step: 0.1,
+        format: (v) => `${(Number(v) || 1).toFixed(1)}:1`,
+        value: (s) => Number(band(s).down_ratio ?? 1),
+      },
+    ];
+  });
+
 const normalizerMode = (setting) => {
   const mode = Number(setting?.mode) || 0;
   if (mode === 2) return 'Leveler';
@@ -338,6 +394,54 @@ export const rackStages = [
     ],
   },
   {
+    id: 'dynamics',
+    label: 'Dynamics',
+    badge: '⇅',
+    description:
+      'Lifts what is quiet and holds what is loud, in three bands, before the ceiling.',
+    summary: (s) =>
+      `Make-up ${db(s.compander?.makeup_db)} dB · mix ${pct(s.compander?.mix)}`,
+    parameters: [
+      ...dynamicsBandParameters(),
+      {
+        id: 'attack_ms',
+        label: 'Attack',
+        min: 1,
+        max: 100,
+        step: 1,
+        format: (v) => `${Math.round(Number(v) || 0)} ms`,
+        value: (s) => Number(s.compander?.attack_ms ?? 10),
+      },
+      {
+        id: 'release_ms',
+        label: 'Release',
+        min: 20,
+        max: 1000,
+        step: 5,
+        format: (v) => `${Math.round(Number(v) || 0)} ms`,
+        value: (s) => Number(s.compander?.release_ms ?? 200),
+      },
+      {
+        id: 'mix',
+        label: 'Mix',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        format: pct,
+        value: (s) => Number(s.compander?.mix ?? 1),
+      },
+      {
+        id: 'makeup_db',
+        label: 'Make-up',
+        min: -12,
+        max: 12,
+        step: 0.5,
+        format: formatDb,
+        value: (s) => Number(s.compander?.makeup_db ?? 0),
+      },
+    ],
+  },
+  {
     id: 'maximizer',
     label: 'Maximizer',
     badge: '↑',
@@ -391,7 +495,11 @@ export const rackStages = [
 ];
 
 const settingFor = (settings, id) =>
-  id === 'equaliser' ? settings?.eq : settings?.[id.replace('-', '_')];
+  id === 'equaliser'
+    ? settings?.eq
+    : id === 'dynamics'
+      ? settings?.compander
+      : settings?.[id.replace('-', '_')];
 
 export const ISOLATE_STAGES = [
   'denoise',
@@ -447,5 +555,5 @@ export function stageSummary(stage, settings) {
 export const rack = {
   id: 'rack',
   title: 'DSP rack',
-  eyebrow: 'Twelve stages',
+  eyebrow: 'Thirteen stages',
 };

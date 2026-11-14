@@ -123,6 +123,7 @@ add_library(fluideq-dsp-core STATIC
   dsp-core/src/deesser_decide.cpp
   dsp-core/src/footsteps.cpp
   dsp-core/src/footsteps_decide.cpp
+  dsp-core/src/compander.cpp
   dsp-core/src/meters.cpp
   dsp-core/src/meters_deesser.cpp
   dsp-core/src/meters_footsteps.cpp
@@ -207,6 +208,13 @@ add_test(NAME deesser-modes COMMAND fluideq-deesser-modes-test)
 add_executable(fluideq-footsteps-test dsp-core/tests/footsteps_test.cpp)
 target_link_libraries(fluideq-footsteps-test PRIVATE fluideq-dsp-core feq_strict)
 add_test(NAME footsteps COMMAND fluideq-footsteps-test)
+
+# Dynamics: lifts what is quiet and holds what is loud, per band, with the
+# ratios at one leaving the input to the bit, silence untouched and the image
+# in place.
+add_executable(fluideq-compander-test dsp-core/tests/compander_test.cpp)
+target_link_libraries(fluideq-compander-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME compander COMMAND fluideq-compander-test)
 
 # Footsteps in mixes the way games play them: loud, paused, heavy in the bass
 # — where judging against fixed levels lifted a match's steps 0.4 dB.

@@ -29,6 +29,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <stdint.h>
 
 #include "fluideq/biquad.h"
+#include "fluideq/compander.h"
 #include "fluideq/crossfade.h"
 #include "fluideq/deesser.h"
 #include "fluideq/denoise.h"
@@ -227,6 +228,13 @@ typedef struct FeqChainSettings {
    * the stage, which would refuse a line longer than it knows.
    */
   FeqFootstepsSettings footsteps;
+  /**
+   * Dynamics, the upward and downward compressor, just before the Maximizer
+   * (`compander.h`): what it lifts too far the Maximizer still catches. On
+   * the wire in a tagged trailer of its own (`FEQ_CHAIN_DYNAMICS_TAG`),
+   * written only while the stage is on, as Footsteps' is.
+   */
+  FeqCompanderSettings compander;
   /**
    * Stereo width per band. Touches the side signal only, so the mono sum is
    * unchanged at every setting — `dimension_test.cpp` asserts that as equality.
@@ -452,6 +460,17 @@ typedef struct FeqChainSettings {
 #define FEQ_CHAIN_FOOTSTEPS_FIELDS 4
 #define FEQ_CHAIN_FOOTSTEPS_TRAILER 7
 /**
+ * DYNA tag, schema version, field count, then the Dynamics stage's switch,
+ * each of its three bands' upward threshold, ratio and largest lift and
+ * downward threshold and ratio, then attack, release, mix and make-up. After
+ * Footsteps' trailer when there is one, before the tone; written only while
+ * the stage is on (`dynamicsTrailer` in `dynamicsWire.ts`).
+ */
+#define FEQ_CHAIN_DYNAMICS_TAG 1146703425
+#define FEQ_CHAIN_DYNAMICS_SCHEMA 1
+#define FEQ_CHAIN_DYNAMICS_FIELDS 20
+#define FEQ_CHAIN_DYNAMICS_TRAILER 23
+/**
  * TONE tag, schema version, band count and design, then each band's type,
  * frequency, gain and Q. Last on the line, after the low-latency word, the
  * Room's trailer and Footsteps' when there are those: `appendPresetTone` in
@@ -463,11 +482,11 @@ typedef struct FeqChainSettings {
 #define FEQ_CHAIN_TONE_BAND_PARAMS 4
 /**
  * Normalizer (3), explicit low latency (1), tagged Room (11), tagged
- * Footsteps (7), and the tone at its longest.
+ * Footsteps (7), Dynamics (23), and the tone at its longest.
  */
 #define FEQ_CHAIN_MAX_TRAILER                                        \
-  (15 + FEQ_CHAIN_FOOTSTEPS_TRAILER + FEQ_CHAIN_TONE_HEADER +        \
-   FEQ_CHAIN_MAX_TONE_BANDS * FEQ_CHAIN_TONE_BAND_PARAMS)
+  (15 + FEQ_CHAIN_FOOTSTEPS_TRAILER + FEQ_CHAIN_DYNAMICS_TRAILER +   \
+   FEQ_CHAIN_TONE_HEADER + FEQ_CHAIN_MAX_TONE_BANDS * FEQ_CHAIN_TONE_BAND_PARAMS)
 #define FEQ_CHAIN_MAX_PARAMS (FEQ_CHAIN_PARAM_LEAD + FEQ_CHAIN_MAX_EQ_BANDS * FEQ_CHAIN_BAND_PARAMS + FEQ_CHAIN_MAX_TRAILER)
 
 /** Non-zero on success. Leaves `out` untouched on a layout it cannot read. */

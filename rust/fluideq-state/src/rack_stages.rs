@@ -16,7 +16,7 @@ use fluideq_dsp_sys::{FeqChainSettings, FeqNormalizerMode};
 use std::os::raw::c_int;
 
 /// The stages the rack page shows, in the order the chain runs them.
-pub const STAGE_IDS: [&str; 12] = [
+pub const STAGE_IDS: [&str; 13] = [
     "normalizer",
     "denoise",
     "deesser",
@@ -27,6 +27,7 @@ pub const STAGE_IDS: [&str; 12] = [
     "bass-punch",
     "dimension",
     "room",
+    "dynamics",
     "maximizer",
     "master",
 ];
@@ -63,6 +64,7 @@ pub fn set_stage_enabled(
         "bass-punch" => settings.bass_punch.enabled = flag(enabled),
         "dimension" => settings.dimension.enabled = flag(enabled),
         "room" => settings.room.enabled = flag(enabled),
+        "dynamics" => settings.compander.enabled = flag(enabled),
         "maximizer" => settings.maximizer.enabled = flag(enabled),
         "master" => settings.master.enabled = flag(enabled),
         _ => return Err(format!("there is no rack stage named \"{stage}\"")),
@@ -158,7 +160,7 @@ pub fn set_master_target(settings: &mut FeqChainSettings, target: &str) -> Resul
 
 /// The parameters the rack page may write, with the range each one accepts.
 /// The window draws the same ranges; the clamp here is what the engine gets.
-const PARAMETER_RANGES: [(&str, &str, f64, f64); 31] = [
+const PARAMETER_RANGES: [(&str, &str, f64, f64); 50] = [
     ("normalizer", "target_lufs", -35.0, -5.0),
     ("normalizer", "ceiling_db", -6.0, 0.0),
     ("denoise", "hiss_amount", 0.0, 1.0),
@@ -187,6 +189,25 @@ const PARAMETER_RANGES: [(&str, &str, f64, f64); 31] = [
     ("room", "crossover_hz", 40.0, 160.0),
     ("room", "centre_db", -12.0, 6.0),
     ("room", "sub_db", -12.0, 6.0),
+    ("dynamics", "band1_up_threshold_db", -80.0, -10.0),
+    ("dynamics", "band1_up_ratio", 1.0, 4.0),
+    ("dynamics", "band1_up_max_db", 0.0, 18.0),
+    ("dynamics", "band1_down_threshold_db", -60.0, 0.0),
+    ("dynamics", "band1_down_ratio", 1.0, 20.0),
+    ("dynamics", "band2_up_threshold_db", -80.0, -10.0),
+    ("dynamics", "band2_up_ratio", 1.0, 4.0),
+    ("dynamics", "band2_up_max_db", 0.0, 18.0),
+    ("dynamics", "band2_down_threshold_db", -60.0, 0.0),
+    ("dynamics", "band2_down_ratio", 1.0, 20.0),
+    ("dynamics", "band3_up_threshold_db", -80.0, -10.0),
+    ("dynamics", "band3_up_ratio", 1.0, 4.0),
+    ("dynamics", "band3_up_max_db", 0.0, 18.0),
+    ("dynamics", "band3_down_threshold_db", -60.0, 0.0),
+    ("dynamics", "band3_down_ratio", 1.0, 20.0),
+    ("dynamics", "attack_ms", 1.0, 100.0),
+    ("dynamics", "release_ms", 20.0, 1000.0),
+    ("dynamics", "mix", 0.0, 1.0),
+    ("dynamics", "makeup_db", -12.0, 12.0),
     ("maximizer", "drive_db", 0.0, 24.0),
     ("master", "output_trim_db", -24.0, 12.0),
     ("master", "loudness_target_lufs", -24.0, -8.0),
@@ -243,6 +264,37 @@ pub fn set_stage_parameter(
         ("room", "crossover_hz") => settings.room.crossover_hz = value,
         ("room", "centre_db") => settings.room.centre_db = value,
         ("room", "sub_db") => settings.room.sub_db = value,
+        ("dynamics", "band1_up_threshold_db") => {
+            settings.compander.bands[0].up_threshold_db = value
+        }
+        ("dynamics", "band1_up_ratio") => settings.compander.bands[0].up_ratio = value,
+        ("dynamics", "band1_up_max_db") => settings.compander.bands[0].up_max_db = value,
+        ("dynamics", "band1_down_threshold_db") => {
+            settings.compander.bands[0].down_threshold_db = value
+        }
+        ("dynamics", "band1_down_ratio") => settings.compander.bands[0].down_ratio = value,
+        ("dynamics", "band2_up_threshold_db") => {
+            settings.compander.bands[1].up_threshold_db = value
+        }
+        ("dynamics", "band2_up_ratio") => settings.compander.bands[1].up_ratio = value,
+        ("dynamics", "band2_up_max_db") => settings.compander.bands[1].up_max_db = value,
+        ("dynamics", "band2_down_threshold_db") => {
+            settings.compander.bands[1].down_threshold_db = value
+        }
+        ("dynamics", "band2_down_ratio") => settings.compander.bands[1].down_ratio = value,
+        ("dynamics", "band3_up_threshold_db") => {
+            settings.compander.bands[2].up_threshold_db = value
+        }
+        ("dynamics", "band3_up_ratio") => settings.compander.bands[2].up_ratio = value,
+        ("dynamics", "band3_up_max_db") => settings.compander.bands[2].up_max_db = value,
+        ("dynamics", "band3_down_threshold_db") => {
+            settings.compander.bands[2].down_threshold_db = value
+        }
+        ("dynamics", "band3_down_ratio") => settings.compander.bands[2].down_ratio = value,
+        ("dynamics", "attack_ms") => settings.compander.attack_ms = value,
+        ("dynamics", "release_ms") => settings.compander.release_ms = value,
+        ("dynamics", "mix") => settings.compander.mix = value,
+        ("dynamics", "makeup_db") => settings.compander.makeup_db = value,
         ("maximizer", "drive_db") => settings.maximizer.drive_db = value,
         ("master", "output_trim_db") => settings.master.output_trim_db = value,
         ("master", "loudness_target_lufs") => settings.master.loudness_target_lufs = value,
@@ -290,6 +342,31 @@ pub fn stage_parameter_value(
         ("room", "crossover_hz") => Some(settings.room.crossover_hz),
         ("room", "centre_db") => Some(settings.room.centre_db),
         ("room", "sub_db") => Some(settings.room.sub_db),
+        ("dynamics", "band1_up_threshold_db") => Some(settings.compander.bands[0].up_threshold_db),
+        ("dynamics", "band1_up_ratio") => Some(settings.compander.bands[0].up_ratio),
+        ("dynamics", "band1_up_max_db") => Some(settings.compander.bands[0].up_max_db),
+        ("dynamics", "band1_down_threshold_db") => {
+            Some(settings.compander.bands[0].down_threshold_db)
+        }
+        ("dynamics", "band1_down_ratio") => Some(settings.compander.bands[0].down_ratio),
+        ("dynamics", "band2_up_threshold_db") => Some(settings.compander.bands[1].up_threshold_db),
+        ("dynamics", "band2_up_ratio") => Some(settings.compander.bands[1].up_ratio),
+        ("dynamics", "band2_up_max_db") => Some(settings.compander.bands[1].up_max_db),
+        ("dynamics", "band2_down_threshold_db") => {
+            Some(settings.compander.bands[1].down_threshold_db)
+        }
+        ("dynamics", "band2_down_ratio") => Some(settings.compander.bands[1].down_ratio),
+        ("dynamics", "band3_up_threshold_db") => Some(settings.compander.bands[2].up_threshold_db),
+        ("dynamics", "band3_up_ratio") => Some(settings.compander.bands[2].up_ratio),
+        ("dynamics", "band3_up_max_db") => Some(settings.compander.bands[2].up_max_db),
+        ("dynamics", "band3_down_threshold_db") => {
+            Some(settings.compander.bands[2].down_threshold_db)
+        }
+        ("dynamics", "band3_down_ratio") => Some(settings.compander.bands[2].down_ratio),
+        ("dynamics", "attack_ms") => Some(settings.compander.attack_ms),
+        ("dynamics", "release_ms") => Some(settings.compander.release_ms),
+        ("dynamics", "mix") => Some(settings.compander.mix),
+        ("dynamics", "makeup_db") => Some(settings.compander.makeup_db),
         ("maximizer", "drive_db") => Some(settings.maximizer.drive_db),
         ("master", "output_trim_db") => Some(settings.master.output_trim_db),
         ("master", "loudness_target_lufs") => Some(settings.master.loudness_target_lufs),
@@ -311,6 +388,7 @@ pub fn stage_enabled(settings: &FeqChainSettings, stage: &str) -> Option<bool> {
         "bass-punch" => Some(settings.bass_punch.enabled != 0),
         "dimension" => Some(settings.dimension.enabled != 0),
         "room" => Some(settings.room.enabled != 0),
+        "dynamics" => Some(settings.compander.enabled != 0),
         "maximizer" => Some(settings.maximizer.enabled != 0),
         "master" => Some(settings.master.enabled != 0),
         _ => None,

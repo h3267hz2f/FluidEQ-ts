@@ -332,6 +332,8 @@ struct FeqChain {
   FeqDeEsser* deesser = nullptr;
   /** Footsteps, owned and made with the chain; null leaves it out. */
   FeqFootsteps* footsteps = nullptr;
+  /** Dynamics, owned and made with the chain; null leaves it out. */
+  FeqCompander* compander = nullptr;
 
   ChainEqSlot slots[FEQ_CHAIN_MAX_CHANNELS];
   ChainExciterPath paths[kExciterPaths];
