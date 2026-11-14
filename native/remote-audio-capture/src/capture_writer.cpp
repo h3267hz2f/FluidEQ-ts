@@ -8,6 +8,13 @@ CaptureWriter::CaptureWriter(HANDLE output, HANDLE parent,
       sample_rate_(sample_rate), channels_(channels) {
   if (output == nullptr || output == INVALID_HANDLE_VALUE ||
       parent == nullptr || parent == INVALID_HANDLE_VALUE) { return; }
+  // Windows says which kind of handle this is; guessing from the caller's
+  // transport would fail for every pipe the caller opened itself.
+  FILE_MODE_INFO mode{};
+  if (GetFileInformationByHandleEx(output_, FileModeInfo, &mode,
+                                   sizeof(mode))) {
+    overlapped_ = mode.SynchronousIo == FALSE;
+  }
   available_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   completed_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -58,6 +65,16 @@ bool CaptureWriter::reply(std::uint32_t kind, std::uint32_t id,
 bool CaptureWriter::write(const void* data, std::uint32_t bytes) noexcept {
   const auto* cursor = static_cast<const std::uint8_t*>(data);
   while (bytes != 0 && !stopping_.load(std::memory_order_acquire)) {
+    if (!overlapped_) {
+      DWORD written = 0;
+      if (!WriteFile(output_, cursor, bytes, &written, nullptr) ||
+          written == 0 || written > bytes) {
+        return false;
+      }
+      cursor += written;
+      bytes -= written;
+      continue;
+    }
     OVERLAPPED operation{};
     operation.hEvent = completed_;
     ResetEvent(completed_);

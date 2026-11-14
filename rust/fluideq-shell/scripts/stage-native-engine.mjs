@@ -56,6 +56,8 @@ const engineFiles = [
   'FluidEQ-Outputs.exe',
   'FluidEQ-Games.exe',
   'FluidEQ-Media.exe',
+  'FluidEQ-LAN-Capture.exe',
+  'FluidEQ-LAN-Playback.exe',
 ];
 const runtimeFiles = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'];
 const files = [...engineFiles, ...runtimeFiles];
@@ -169,6 +171,8 @@ run(
     'fluideq-dsp-host',
     'fluideq-output-watch',
     'fluideq-foreground-watch',
+    'fluideq-remote-audio-capture',
+    'fluideq-remote-audio-playback',
     '--parallel',
   ],
   repoRoot,

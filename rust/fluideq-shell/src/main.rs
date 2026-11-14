@@ -21,6 +21,7 @@ pub mod host_runtime;
 pub mod media_watch;
 pub mod hotkeys;
 pub mod output_watch;
+pub mod second_output;
 pub mod spectrum_bridge;
 pub mod startup;
 pub mod system_daemons;
@@ -830,6 +831,52 @@ fn media_command(
     state.send(&command)
 }
 
+/// The second output as it stands, plus whether this build carries the
+/// helper that plays it.
+#[tauri::command]
+fn second_output_status(
+    app: tauri::AppHandle,
+    state: State<'_, second_output::SecondOutputState>,
+) -> second_output::SecondOutputSnapshot {
+    let mut snapshot = state.snapshot();
+    snapshot.available = second_output::capture_exe(&app).is_some();
+    snapshot
+}
+
+#[tauri::command]
+fn second_output_start(
+    app: tauri::AppHandle,
+    state: State<'_, second_output::SecondOutputState>,
+    endpoint: String,
+    name: Option<String>,
+    volume: Option<f64>,
+) -> Result<second_output::SecondOutputSnapshot, String> {
+    state.start(
+        &app,
+        &endpoint,
+        name.as_deref().unwrap_or("Second output"),
+        volume.unwrap_or(0.8),
+    )
+}
+
+#[tauri::command]
+fn second_output_stop(
+    app: tauri::AppHandle,
+    state: State<'_, second_output::SecondOutputState>,
+) -> Result<second_output::SecondOutputSnapshot, String> {
+    let mut snapshot = state.stop()?;
+    snapshot.available = second_output::capture_exe(&app).is_some();
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn second_output_volume(
+    state: State<'_, second_output::SecondOutputState>,
+    volume: f64,
+) -> Result<second_output::SecondOutputSnapshot, String> {
+    state.set_volume(volume)
+}
+
 #[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
@@ -1282,6 +1329,7 @@ fn main() {
                 spectrum: Mutex::new(spectrum_bridge::SpectrumBridge::new(96)),
             });
             app.manage(media_watch::MediaWatchState::start(app.handle()));
+            app.manage(second_output::SecondOutputState::new());
             setup_tray(app)?;
             hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
             output_watch::spawn(app.handle().clone(), follow_default_output_now);
@@ -1373,6 +1421,10 @@ fn main() {
             engine_settle,
             media_status,
             media_command,
+            second_output_status,
+            second_output_start,
+            second_output_stop,
+            second_output_volume,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,

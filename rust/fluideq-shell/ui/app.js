@@ -13,6 +13,7 @@ import { registerView, viewFor } from './views/registry.js';
 import { equalizer } from './views/equalizer/index.js';
 import { config } from './views/config/index.js';
 import { games } from './views/games/index.js';
+import { share } from './views/share/index.js';
 import {
   rack,
   rackStages,
@@ -190,6 +191,12 @@ const els = {
   configProfilesEmpty: document.getElementById('config-profiles-empty'),
   configLog: document.getElementById('config-log'),
   configLogEmpty: document.getElementById('config-log-empty'),
+  shareEndpoint: document.getElementById('share-endpoint'),
+  shareToggle: document.getElementById('share-toggle'),
+  shareVolume: document.getElementById('share-volume'),
+  shareVolumeValue: document.getElementById('share-volume-value'),
+  shareState: document.getElementById('share-state'),
+  shareUnavailable: document.getElementById('share-unavailable'),
   gamesList: document.getElementById('games-list'),
   gamesEmpty: document.getElementById('games-empty'),
   gamesUnavailable: document.getElementById('games-unavailable'),
@@ -256,6 +263,7 @@ registerView(config);
 registerView(rack);
 registerView(room);
 registerView(games);
+registerView(share);
 registerView(settings);
 
 let activeView = 'equalizer';
@@ -276,6 +284,9 @@ let engineStatus = null;
 let hostStatus = null;
 let engineInstallInFlight = false;
 let engineEndpointInFlight = false;
+let secondOutput = null;
+let secondOutputInFlight = false;
+let shareVolumeDragging = false;
 let presetNames = [];
 let presetCatalog = [];
 let roomCatalog = [];
@@ -1024,6 +1035,121 @@ function renderConfig() {
   els.configLog.textContent = log.join('\n');
   els.configLog.hidden = log.length === 0;
   els.configLogEmpty.hidden = log.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Second output
+// ---------------------------------------------------------------------------
+
+// The main output is the one FluidEQ already follows; playing the tap back to
+// that same device would put every sound in twice, so it is never offered.
+function shareEndpoints() {
+  const endpoints = Array.isArray(engineStatus?.endpoints)
+    ? engineStatus.endpoints
+    : [];
+  const currentGuid =
+    engineStatus?.defaultDevice?.guid || snapshot.active_device_guid || '';
+  return endpoints.filter(
+    (endpoint) => endpoint?.guid && endpoint.guid !== currentGuid
+  );
+}
+
+function renderSecondOutput() {
+  const endpoints = shareEndpoints();
+  const previous = els.shareEndpoint.value;
+  els.shareEndpoint.replaceChildren(
+    ...endpoints.map((endpoint) => {
+      const option = document.createElement('option');
+      option.value = endpoint.guid;
+      option.textContent = endpoint.name || 'Unnamed output';
+      return option;
+    })
+  );
+  const wanted = secondOutput?.endpoint || previous;
+  if (endpoints.some((endpoint) => endpoint.guid === wanted)) {
+    els.shareEndpoint.value = wanted;
+  }
+
+  const active = Boolean(secondOutput?.active);
+  const available = Boolean(secondOutput?.available);
+  els.shareToggle.textContent = active ? 'On' : 'Off';
+  els.shareToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
+  els.shareToggle.disabled =
+    !available || endpoints.length === 0 || secondOutputInFlight;
+  els.shareEndpoint.disabled =
+    !available || endpoints.length === 0 || active || secondOutputInFlight;
+  els.shareVolume.disabled = !active || secondOutputInFlight;
+  els.shareUnavailable.hidden = available;
+
+  if (!shareVolumeDragging) {
+    const volume = Number.isFinite(Number(secondOutput?.volume))
+      ? Number(secondOutput.volume)
+      : 0.8;
+    els.shareVolume.value = String(Math.round(volume * 100));
+    els.shareVolumeValue.textContent = `${Math.round(volume * 100)}%`;
+  }
+
+  const parts = [];
+  if (active) {
+    parts.push(`Playing to ${secondOutput.endpointName || 'the second output'}`);
+    const rate = Number(secondOutput.sampleRate);
+    if (Number.isFinite(rate) && rate > 0) {
+      parts.push(`${(rate / 1000).toFixed(rate % 1000 === 0 ? 0 : 1)} kHz`);
+    }
+    if (secondOutput.channels) parts.push(`${secondOutput.channels} ch`);
+    if (secondOutput.delayUs) {
+      parts.push(`${(secondOutput.delayUs / 1000).toFixed(1)} ms behind`);
+    }
+  } else if (secondOutput?.problem) {
+    parts.push(secondOutput.problem);
+  } else if (endpoints.length === 0) {
+    parts.push('There is no other output to play to.');
+  } else {
+    parts.push('Nothing is being mirrored yet.');
+  }
+  els.shareState.textContent = parts.join(' · ');
+}
+
+async function refreshSecondOutput() {
+  if (!invoke) return renderSecondOutput();
+  try {
+    secondOutput = await invoke('second_output_status');
+  } catch {
+    secondOutput = null;
+  }
+  renderSecondOutput();
+}
+
+async function toggleSecondOutput() {
+  if (!invoke || secondOutputInFlight) return;
+  const active = Boolean(secondOutput?.active);
+  if (!active && !els.shareEndpoint.value) {
+    showMessage('Pick the device to play to');
+    return;
+  }
+  secondOutputInFlight = true;
+  renderSecondOutput();
+  try {
+    if (active) {
+      secondOutput = await invoke('second_output_stop');
+      showMessage('Second output stopped', 'ok');
+    } else {
+      const guid = els.shareEndpoint.value;
+      const chosen = shareEndpoints().find((endpoint) => endpoint.guid === guid);
+      secondOutput = await invoke('second_output_start', {
+        endpoint: guid,
+        name: chosen?.name || 'Second output',
+        volume: Number(els.shareVolume.value) / 100,
+      });
+      showMessage(`Playing to ${chosen?.name || 'the second output'}`, 'ok');
+    }
+  } catch (error) {
+    showMessage(`Second output: ${error}`);
+    await refreshSecondOutput();
+  } finally {
+    secondOutputInFlight = false;
+    renderSecondOutput();
+  }
 }
 
 function renderGamePresetChoices() {
@@ -1800,6 +1926,10 @@ function showView(id) {
   if (view.id === 'rack') renderRack();
   if (view.id === 'room') renderRoom();
   if (view.id === 'games') renderGames();
+  if (view.id === 'share') {
+    renderSecondOutput();
+    refreshSecondOutput();
+  }
   if (view.id === 'settings') renderSettings();
 }
 
@@ -2520,6 +2650,25 @@ for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]'))
   button.addEventListener('click', () => showView(button.dataset.view));
 }
 
+els.shareToggle.addEventListener('click', toggleSecondOutput);
+
+els.shareVolume.addEventListener('input', () => {
+  shareVolumeDragging = true;
+  els.shareVolumeValue.textContent = `${els.shareVolume.value}%`;
+});
+els.shareVolume.addEventListener('change', async () => {
+  shareVolumeDragging = false;
+  if (!invoke || !secondOutput?.active) return;
+  try {
+    secondOutput = await invoke('second_output_volume', {
+      volume: Number(els.shareVolume.value) / 100,
+    });
+  } catch (error) {
+    showMessage(`Second output level: ${error}`);
+  }
+  renderSecondOutput();
+});
+
 els.gamesForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const executable = els.gamesExecutable.value.trim();
@@ -2765,6 +2914,7 @@ function renderEngineStatus(status, quiet = false) {
     }
   }
   if (activeView === 'config') renderConfig();
+  if (activeView === 'share') renderSecondOutput();
 }
 
 async function refreshEngineHost() {
@@ -2911,6 +3061,7 @@ async function boot() {
     clearMessage();
     refreshEngineStatus();
     refreshMedia();
+    refreshSecondOutput();
     refreshPresets();
     refreshRoomCatalog();
     refreshStartup();
@@ -2944,6 +3095,13 @@ async function boot() {
 TAURI?.event?.listen?.('snapshot', (event) => {
   snapshot = event.payload;
   renderAll();
+});
+
+// The helper answers ready, refusals, a mirror's failure and its delay on the
+// same stream; the page reads the newest one instead of polling for it.
+TAURI?.event?.listen?.('second-output', (event) => {
+  secondOutput = event.payload;
+  if (activeView === 'share') renderSecondOutput();
 });
 
 function mediaClock(ms) {

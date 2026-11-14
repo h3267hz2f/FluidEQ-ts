@@ -52,6 +52,12 @@
               <path d="M8 11v2M7 12h2M15.5 11.5h.01M17 13.5h.01" />
             </svg>
           </button>
+          <button class="nav-btn" type="button" aria-label="Share" data-view="share">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9v6h3l4 3V6L7 9H4Z" />
+              <path d="M15 9c1.2 1.2 1.2 4.8 0 6M18 6c2.8 2.6 2.8 9.4 0 12" />
+            </svg>
+          </button>
           <button class="nav-btn" type="button" aria-label="Settings" data-view="settings">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
@@ -522,6 +528,31 @@
               <select id="games-preset" class="preset-select" aria-label="Preset for the game"></select>
               <button class="preset-action accent" type="submit">Add game</button>
             </form>
+          </div>
+        </section>
+
+        <section class="view-share" data-view-panel="share" hidden>
+          <div class="card settings-card share-card">
+            <div class="settings-group">
+              <p class="eyebrow">Second output</p>
+              <h2 class="settings-title">One more set of speakers</h2>
+              <p class="settings-note">FluidEQ taps the system mix and plays it to a second device, so two sets of speakers hear the same music. The tap leaves FluidEQ's own playback out, so the second output never feeds itself.</p>
+              <div class="stat-row">
+                <span>Play to</span>
+                <select id="share-endpoint" class="preset-select" aria-label="Second output"></select>
+              </div>
+              <div class="stat-row">
+                <span>Second output</span>
+                <button id="share-toggle" class="stat-toggle" type="button" aria-pressed="false" disabled>Off</button>
+              </div>
+              <div class="stat-row share-level">
+                <span>Level</span>
+                <input id="share-volume" class="range" type="range" min="0" max="100" step="1" value="80" aria-label="Second output level" />
+                <strong id="share-volume-value">80%</strong>
+              </div>
+              <p id="share-state" class="settings-note">Nothing is being mirrored yet.</p>
+              <p id="share-unavailable" class="settings-note" hidden>The capture helper is not installed in this build; stage the native engine to use a second output.</p>
+            </div>
           </div>
         </section>
 

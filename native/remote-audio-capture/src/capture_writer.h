@@ -6,7 +6,10 @@
 
 class CaptureWriter final {
  public:
-  // output must have FILE_FLAG_OVERLAPPED (Node's stdio: 'overlapped').
+  // The wire is whatever stdout the app handed down. A pipe opened with
+  // FILE_FLAG_OVERLAPPED (Node's stdio: 'overlapped') needs overlapped
+  // writes; an ordinary anonymous pipe (CreatePipe, Rust's Stdio::piped)
+  // rejects them, so the mode is read from the handle itself.
   CaptureWriter(HANDLE output, HANDLE parent, std::uint32_t sample_rate,
                 std::uint16_t channels);
   ~CaptureWriter();
@@ -30,6 +33,7 @@ class CaptureWriter final {
   const HANDLE parent_;
   const std::uint32_t sample_rate_;
   const std::uint16_t channels_;
+  bool overlapped_ = true;
   HANDLE available_ = nullptr;
   HANDLE stop_ = nullptr;
   HANDLE completed_ = nullptr;

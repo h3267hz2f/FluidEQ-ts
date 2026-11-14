@@ -140,7 +140,8 @@ bool mirror_reply(std::uint32_t kind, std::uint32_t id, HRESULT result) {
  * The app serves the pipe and takes the first two connections that open with
  * the token it put on this helper's command line; anything else on the pipe is
  * dropped. `frames` is opened overlapped because `CaptureWriter` writes that
- * way, `commands` synchronously because the command reader blocks on it. The
+ * way (stdio in `--pipe-overlapped` mode is read from its handle instead),
+ * `commands` synchronously because the command reader blocks on it. The
  * pipe exists before the playback helper is asked to start this one, so a
  * busy pipe is only ever another instance being set up: wait on Windows for it
  * to free, never on a clock.

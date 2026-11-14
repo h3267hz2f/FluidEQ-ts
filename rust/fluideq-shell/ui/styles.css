@@ -911,6 +911,32 @@ kbd {
   padding-right: 2px;
 }
 
+/* Share: the tap that feeds a second device, and where it stands. */
+.view-share {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.share-card {
+  max-width: 780px;
+}
+
+.share-level {
+  gap: 12px;
+}
+
+.share-level .range {
+  flex: 1;
+}
+
+.share-level strong {
+  min-width: 3.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .games-card {
   max-width: 780px;
 }
