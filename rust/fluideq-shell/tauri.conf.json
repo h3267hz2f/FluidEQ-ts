@@ -21,6 +21,21 @@
         "visible": true,
         "decorations": true,
         "theme": "Dark"
+      },
+      {
+        "label": "player",
+        "title": "FluidEQ Player",
+        "url": "player.html",
+        "width": 380,
+        "height": 186,
+        "minWidth": 320,
+        "minHeight": 150,
+        "resizable": false,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "theme": "Dark"
       }
     ],
     "security": {

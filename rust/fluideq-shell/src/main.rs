@@ -726,8 +726,35 @@ fn get_output_volume() -> Result<f64, String> {
 }
 
 #[tauri::command]
-fn set_output_volume(volume: f64) -> Result<f64, String> {
-    audio_endpoint::set_master_volume(volume)
+fn set_output_volume(app: tauri::AppHandle, volume: f64) -> Result<f64, String> {
+    let applied = audio_endpoint::set_master_volume(volume)?;
+    // Every window follows the one number, whichever one moved it.
+    let _ = app.emit("volume", applied);
+    Ok(applied)
+}
+
+/// The compact player is a second, frameless window that lives off the same
+/// media events; showing it never takes focus from what is playing.
+#[tauri::command]
+fn show_compact_player(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("player")
+        .ok_or_else(|| String::from("the compact player is not configured"))?;
+    window
+        .show()
+        .map_err(|error| format!("could not show the compact player: {error}"))?;
+    let _ = window.set_always_on_top(true);
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_compact_player(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("player")
+        .ok_or_else(|| String::from("the compact player is not configured"))?;
+    window
+        .hide()
+        .map_err(|error| format!("could not hide the compact player: {error}"))
 }
 
 /// The helper's answer plus this process's own failures: a config file that
@@ -1336,6 +1363,8 @@ fn main() {
             set_room_bass_management,
             get_output_volume,
             set_output_volume,
+            show_compact_player,
+            hide_compact_player,
             engine_status,
             install_engine,
             restart_audio,

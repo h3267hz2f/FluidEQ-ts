@@ -94,7 +94,7 @@
 
 这些模块在上游占很大代码体积，但独立于系统级 EQ 核心，按需分阶段立项：
 
-1. **系统媒体栏与小窗（Transport & Compact Player）**：接入 `FluidEQ-Media`（SMTC）与 `FluidEQ-Volume`。
+1. **[x] 系统媒体栏与小窗（Transport & Compact Player）**：2026-11-14 已接入 `FluidEQ-Media`（SMTC 读取 + play/pause/next/previous 命令），顶部媒体栏与置顶无边框小窗已完成；音量沿用现有端点主音量命令，未单独打包 `FluidEQ-Volume`。
 2. **第二输出与局域网共享（Second Output & Share Audio）**：打包 `remote-audio-capture/playback`，建配对与路由页。
 3. **本地曲库播放器（Library）**：文件夹异步扫描、标签/封面解析、双 Deck 播放与曲间 Crossfade。
 4. **视觉与外设（Visualizers / Wallpaper / Lighting）**：打包 `FluidEQ-Wallpaper` 与 `lighting-host`，接 GPU 频谱外观与灯效。

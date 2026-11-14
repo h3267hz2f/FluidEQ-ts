@@ -209,6 +209,7 @@ const els = {
   mediaPrevious: document.getElementById('media-previous'),
   mediaNext: document.getElementById('media-next'),
   mediaTime: document.getElementById('media-time'),
+  mediaMini: document.getElementById('media-mini'),
   roomPower: document.getElementById('room-power'),
   roomPresetChips: document.getElementById('room-preset-chips'),
   roomHeadChips: document.getElementById('room-head-chips'),
@@ -3009,6 +3010,15 @@ els.mediaPlay.addEventListener('click', () => {
 });
 els.mediaPrevious.addEventListener('click', () => sendMediaCommand('previous'));
 els.mediaNext.addEventListener('click', () => sendMediaCommand('next'));
+els.mediaMini.addEventListener('click', async () => {
+  if (!invoke) return;
+  try {
+    await invoke('show_compact_player');
+    clearMessage();
+  } catch (error) {
+    showMessage(`Could not open the compact player: ${error}`);
+  }
+});
 
 TAURI?.event?.listen?.('media', (event) => renderMedia(event.payload));
 
