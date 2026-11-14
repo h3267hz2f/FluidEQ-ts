@@ -108,6 +108,20 @@
           </div>
         </header>
 
+        <section id="media-bar" class="media-bar" hidden aria-label="Now playing">
+          <img id="media-cover" class="media-cover" alt="" hidden />
+          <div class="media-text">
+            <p id="media-title" class="media-title"></p>
+            <p id="media-artist" class="media-artist"></p>
+          </div>
+          <div class="media-controls">
+            <button id="media-previous" class="media-btn" type="button" aria-label="Previous track">Prev</button>
+            <button id="media-play" class="media-btn" type="button">Play</button>
+            <button id="media-next" class="media-btn" type="button" aria-label="Next track">Next</button>
+          </div>
+          <output id="media-time" class="media-time"></output>
+        </section>
+
         <section class="hero" data-view-panel="equalizer">
           <div class="card graph-card">
             <div class="graph-head">

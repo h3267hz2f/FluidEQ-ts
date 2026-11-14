@@ -55,6 +55,7 @@ const engineFiles = [
   'FluidEQ-DSP.exe',
   'FluidEQ-Outputs.exe',
   'FluidEQ-Games.exe',
+  'FluidEQ-Media.exe',
 ];
 const runtimeFiles = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'];
 const files = [...engineFiles, ...runtimeFiles];

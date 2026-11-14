@@ -18,6 +18,7 @@ pub mod engine_host;
 pub mod engine_setup;
 pub mod game_presets;
 pub mod host_runtime;
+pub mod media_watch;
 pub mod hotkeys;
 pub mod output_watch;
 pub mod spectrum_bridge;
@@ -784,6 +785,24 @@ fn engine_settle(app: tauri::AppHandle) -> Result<Value, String> {
     engine_setup::settle(&app).map(enrich_engine_status)
 }
 
+/// What the rest of the machine is playing, as the bar last heard it.
+#[tauri::command]
+fn media_status(state: State<'_, media_watch::MediaWatchState>) -> media_watch::MediaSnapshot {
+    state.snapshot()
+}
+
+/// One transport move, passed to the player the bar names.
+#[tauri::command]
+fn media_command(
+    state: State<'_, media_watch::MediaWatchState>,
+    command: String,
+) -> Result<(), String> {
+    if !matches!(command.as_str(), "play" | "pause" | "next" | "previous") {
+        return Err(format!("there is no media command named \"{command}\""));
+    }
+    state.send(&command)
+}
+
 #[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
@@ -1235,6 +1254,7 @@ fn main() {
                 game_restore: Mutex::new(None),
                 spectrum: Mutex::new(spectrum_bridge::SpectrumBridge::new(96)),
             });
+            app.manage(media_watch::MediaWatchState::start(app.handle()));
             setup_tray(app)?;
             hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
             output_watch::spawn(app.handle().clone(), follow_default_output_now);
@@ -1322,6 +1342,8 @@ fn main() {
             engine_attach,
             engine_detach,
             engine_settle,
+            media_status,
+            media_command,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,

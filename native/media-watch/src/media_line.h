@@ -169,6 +169,41 @@ inline std::string reading_shape(const Reading& reading) {
 constexpr const char* kNothingLine = "null";
 
 /**
+ * What the app may ask the helper, one command a line on its input pipe.
+ * Nothing else is read: the pipeline's playback is the player's, and the
+ * helper only passes on the four moves a transport bar offers.
+ */
+enum class Command { None, Play, Pause, Next, Previous };
+
+inline Command command_from(std::string_view text) {
+  std::size_t begin = 0;
+  std::size_t end = text.size();
+  const auto blank = [](char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+  };
+  while (begin < end && blank(text[begin])) {
+    ++begin;
+  }
+  while (end > begin && blank(text[end - 1])) {
+    --end;
+  }
+  const std::string_view word = text.substr(begin, end - begin);
+  if (word == "play") {
+    return Command::Play;
+  }
+  if (word == "pause") {
+    return Command::Pause;
+  }
+  if (word == "next") {
+    return Command::Next;
+  }
+  if (word == "previous") {
+    return Command::Previous;
+  }
+  return Command::None;
+}
+
+/**
  * The picture's line. Every part is already safe inside a JSON string — a
  * hex id, one of four fixed types, base64 — so nothing is escaped.
  */

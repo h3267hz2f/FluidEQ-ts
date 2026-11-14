@@ -249,6 +249,21 @@ void the_cover_line_and_its_id() {
         "a cover line is the one systemMedia.test.ts reads");
 }
 
+void the_app_commands_are_four_words() {
+  using fluideq_media::Command;
+  check(fluideq_media::command_from("play") == Command::Play, "play");
+  check(fluideq_media::command_from(" pause\r\n") == Command::Pause,
+        "a paused line still is the command");
+  check(fluideq_media::command_from("next") == Command::Next, "next");
+  check(fluideq_media::command_from("\tprevious ") == Command::Previous,
+        "previous, whatever space came with it");
+  check(fluideq_media::command_from("Play") == Command::None,
+        "the app's own spelling only");
+  check(fluideq_media::command_from("seek 1000") == Command::None,
+        "anything else is nothing");
+  check(fluideq_media::command_from("") == Command::None, "an empty line");
+}
+
 }  // namespace
 
 int main() {
@@ -258,6 +273,7 @@ int main() {
   base64_is_the_standard_one();
   pictures_are_sniffed_by_their_bytes();
   the_cover_line_and_its_id();
+  the_app_commands_are_four_words();
   if (failures != 0) {
     std::printf("%d media line check(s) failed\n", failures);
     return 1;

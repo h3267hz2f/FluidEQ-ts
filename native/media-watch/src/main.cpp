@@ -96,8 +96,18 @@ HANDLE wake_event = nullptr;
 HANDLE input_closed = nullptr;
 /** The manager said sessions came or went; the loop reads the list again. */
 std::atomic<bool> sessions_changed{true};
+/** What the app asked for; the loop applies it before the next look. */
+std::mutex command_lock;
+std::vector<fluideq_media::Command> queued_commands;
 
 void wake() { SetEvent(wake_event); }
+
+std::vector<fluideq_media::Command> take_commands() {
+  std::lock_guard<std::mutex> guard(command_lock);
+  std::vector<fluideq_media::Command> taken;
+  taken.swap(queued_commands);
+  return taken;
+}
 
 /** One line to the app; only the loop thread calls this. */
 void say(const std::string& line) {
@@ -123,10 +133,27 @@ void say(const std::string& line) {
 DWORD WINAPI read_input(void*) {
   char buffer[256];
   DWORD count = 0;
+  std::string pending;
   while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), buffer, sizeof(buffer),
                   &count, nullptr) &&
          count != 0) {
-    // The app writes nothing: this pipe exists to be closed.
+    pending.append(buffer, count);
+    for (;;) {
+      const std::size_t line_end = pending.find('\n');
+      if (line_end == std::string::npos) {
+        break;
+      }
+      const fluideq_media::Command command =
+          fluideq_media::command_from(std::string_view(pending).substr(0, line_end));
+      pending.erase(0, line_end + 1);
+      if (command != fluideq_media::Command::None) {
+        {
+          std::lock_guard<std::mutex> guard(command_lock);
+          queued_commands.push_back(command);
+        }
+        wake();
+      }
+    }
   }
   SetEvent(input_closed);
   return 0;
@@ -544,6 +571,51 @@ class Watcher {
   }
 
   /**
+   * One of the four moves the transport bar offers, applied to the session
+   * the bar names. Choosing by the same rule as the reading is what keeps a
+   * button and the card above it on the same player when several are open.
+   */
+  void command(fluideq_media::Command wanted) {
+    std::vector<bool> playing;
+    playing.reserve(tracked_.size());
+    for (const Tracked& entry : tracked_) {
+      bool is_playing = false;
+      try {
+        is_playing = entry.session.GetPlaybackInfo().PlaybackStatus() ==
+                     PlaybackStatus::Playing;
+      } catch (const winrt::hresult_error&) {
+        // Unreadable is not playing, as everywhere else here.
+      }
+      playing.push_back(is_playing);
+    }
+    const std::optional<std::size_t> chosen = choose(playing);
+    if (!chosen) {
+      return;
+    }
+    try {
+      const Session session = tracked_[*chosen].session;
+      switch (wanted) {
+        case fluideq_media::Command::Play:
+          session.TryPlayAsync();
+          break;
+        case fluideq_media::Command::Pause:
+          session.TryPauseAsync();
+          break;
+        case fluideq_media::Command::Next:
+          session.TrySkipNextAsync();
+          break;
+        case fluideq_media::Command::Previous:
+          session.TrySkipPreviousAsync();
+          break;
+        case fluideq_media::Command::None:
+          break;
+      }
+    } catch (const winrt::hresult_error&) {
+      // The player refused or went away; its events will say what now holds.
+    }
+  }
+
+  /**
    * The cover follows the song it was read for. A player publishes the title
    * a moment before the picture, so a song with no picture yet is read again
    * on each properties answer until one arrives — the script tried on its
@@ -746,6 +818,9 @@ int run(const wchar_t* self) {
       if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) !=
           WAIT_OBJECT_0 + 1) {
         break;
+      }
+      for (const fluideq_media::Command command : take_commands()) {
+        watcher.command(command);
       }
       watcher.look();
     }

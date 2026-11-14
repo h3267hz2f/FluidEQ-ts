@@ -201,6 +201,14 @@ const els = {
   rackEditorTitle: document.getElementById('rack-editor-title'),
   rackEditorDetail: document.getElementById('rack-editor-detail'),
   rackEditorControls: document.getElementById('rack-editor-controls'),
+  mediaBar: document.getElementById('media-bar'),
+  mediaCover: document.getElementById('media-cover'),
+  mediaTitle: document.getElementById('media-title'),
+  mediaArtist: document.getElementById('media-artist'),
+  mediaPlay: document.getElementById('media-play'),
+  mediaPrevious: document.getElementById('media-previous'),
+  mediaNext: document.getElementById('media-next'),
+  mediaTime: document.getElementById('media-time'),
   roomPower: document.getElementById('room-power'),
   roomPresetChips: document.getElementById('room-preset-chips'),
   roomHeadChips: document.getElementById('room-head-chips'),
@@ -2901,6 +2909,7 @@ async function boot() {
     setConnection('Rust state centre connected · C++ core linked', 'live');
     clearMessage();
     refreshEngineStatus();
+    refreshMedia();
     refreshPresets();
     refreshRoomCatalog();
     refreshStartup();
@@ -2935,6 +2944,73 @@ TAURI?.event?.listen?.('snapshot', (event) => {
   snapshot = event.payload;
   renderAll();
 });
+
+function mediaClock(ms) {
+  if (!Number.isFinite(Number(ms)) || Number(ms) < 0) return '0:00';
+  const total = Math.floor(Number(ms) / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = String(total % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+function renderMedia(media) {
+  const reading = media?.reading ?? null;
+  if (!reading || !reading.title) {
+    els.mediaBar.hidden = true;
+    return;
+  }
+  els.mediaBar.hidden = false;
+  els.mediaTitle.textContent = reading.title;
+  els.mediaArtist.textContent = [reading.artist, reading.app]
+    .filter(Boolean)
+    .join(' · ');
+  els.mediaPlay.textContent = reading.isPlaying ? 'Pause' : 'Play';
+  els.mediaPrevious.disabled = !reading.canPrevious;
+  els.mediaNext.disabled = !reading.canNext;
+
+  const cover = media?.cover;
+  if (cover?.id && cover.id === reading.coverId && cover.data) {
+    const source = `data:${cover.type};base64,${cover.data}`;
+    if (els.mediaCover.src !== source) els.mediaCover.src = source;
+    els.mediaCover.hidden = false;
+  } else {
+    els.mediaCover.hidden = true;
+  }
+
+  const position = reading.positionMs;
+  const duration = reading.durationMs;
+  els.mediaTime.textContent = Number.isFinite(Number(duration)) && duration > 0
+    ? `${mediaClock(position)} / ${mediaClock(duration)}`
+    : mediaClock(position);
+}
+
+async function refreshMedia() {
+  if (!invoke) return;
+  try {
+    renderMedia(await invoke('media_status'));
+  } catch {
+    renderMedia(null);
+  }
+}
+
+async function sendMediaCommand(command) {
+  if (!invoke) return;
+  try {
+    await invoke('media_command', { command });
+    clearMessage();
+  } catch (error) {
+    showMessage(`Could not reach the player: ${error}`);
+  }
+}
+
+els.mediaPlay.addEventListener('click', () => {
+  const playing = Boolean(els.mediaPlay.textContent === 'Pause');
+  sendMediaCommand(playing ? 'pause' : 'play');
+});
+els.mediaPrevious.addEventListener('click', () => sendMediaCommand('previous'));
+els.mediaNext.addEventListener('click', () => sendMediaCommand('next'));
+
+TAURI?.event?.listen?.('media', (event) => renderMedia(event.payload));
 
 // Live spectrum and multi-stage telemetry. The Rust bridge only emits while
 // the window is focused and sound is actually playing, so this listener never
