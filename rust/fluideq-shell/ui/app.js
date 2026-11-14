@@ -110,6 +110,9 @@ const els = {
   preset: document.getElementById('preset'),
   presetSave: document.getElementById('preset-save'),
   presetDelete: document.getElementById('preset-delete'),
+  chainExport: document.getElementById('chain-export'),
+  chainImport: document.getElementById('chain-import'),
+  chainFile: document.getElementById('chain-file'),
   presetForm: document.getElementById('preset-form'),
   presetName: document.getElementById('preset-name'),
   presetConfirm: document.getElementById('preset-confirm'),
@@ -2037,6 +2040,42 @@ els.presetDelete.addEventListener('click', async () => {
     renderAll();
   } catch (error) {
     showMessage(`Could not delete the preset: ${error}`);
+  }
+});
+
+// A chain bundle is the whole rack, Room and voicing in one file; it is not a
+// preset in the picker, so importing one names the curve and leaves the saved
+// list alone.
+els.chainExport.addEventListener('click', async () => {
+  if (!invoke) return;
+  try {
+    const path = await invoke('export_chain_bundle');
+    clearMessage();
+    showMessage(`Chain saved to ${path}`, 'ok');
+  } catch (error) {
+    showMessage(`Could not export the chain: ${error}`);
+  }
+});
+
+els.chainImport.addEventListener('click', () => els.chainFile.click());
+
+els.chainFile.addEventListener('change', async () => {
+  const file = els.chainFile.files?.[0];
+  if (!invoke || !file) {
+    els.chainFile.value = '';
+    return;
+  }
+  try {
+    const text = await file.text();
+    snapshot = await invoke('import_chain_bundle', { text });
+    clearMessage();
+    showMessage(`Imported "${snapshot.active_preset_name}"`, 'ok');
+    renderAll();
+    refreshPresets();
+  } catch (error) {
+    showMessage(`Could not import ${file.name}: ${error}`);
+  } finally {
+    els.chainFile.value = '';
   }
 });
 

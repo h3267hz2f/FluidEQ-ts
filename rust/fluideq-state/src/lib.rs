@@ -25,6 +25,7 @@ pub mod apo_split_and_leveling;
 pub mod apo_split_tap_and_reader;
 pub mod apo_watcher;
 pub mod biquad;
+pub mod chain_bundle;
 pub mod chain_wire;
 pub mod compressed_audio;
 pub mod deck_transport;
@@ -593,6 +594,53 @@ impl AppStateStore {
         self.sync_eq_and_tone_into_chain_settings();
         self.commit_chain_and_linear_phase_kernel();
         self.snapshot()
+    }
+
+    /// The whole chain as a `.fluideq` file, ready to be written somewhere.
+    pub fn export_chain_bundle(&self, exported_from: Option<&str>) -> Result<String, String> {
+        let exported_at_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        chain_bundle::export_bundle(&self.snapshot(), exported_from, exported_at_unix)
+    }
+
+    /// Adopt a bundle's curve, voicing and rack. The master switch stays where
+    /// the listener left it — a chain is a sound, not a power state — and the
+    /// transient monitor flags never travel, so an imported solo cannot mute
+    /// the programme.
+    pub fn import_chain_bundle(&mut self, text: &str) -> Result<AppStateSnapshot, String> {
+        let bundle = chain_bundle::parse_bundle(text)?;
+        let master_power = self.master_power;
+        let mut chain = bundle.chain_settings;
+        chain.denoise.isolate = 0;
+        chain.deesser.isolate = 0;
+        chain.footsteps.isolate = 0;
+        chain.exciter.isolate = 0;
+        chain.eq.isolate = 0;
+        chain.bass_forge.isolate = 0;
+        chain.bass_punch.isolate = 0;
+        chain.room.compare_original = 0;
+        crate::room_catalog::normalize_preset(&mut chain.room);
+        self.chain_settings = chain;
+        self.eq_model_amount = bundle.eq_model_amount.clamp(0.0, 1.0);
+        self.set_eq_bands_and_config(
+            bundle.bands,
+            &bundle.eq_model,
+            bundle.matched_treble,
+            master_power,
+            bundle.auto_headroom,
+            bundle.preamp_db,
+            bundle.tone,
+        );
+        let name = bundle.preset.trim();
+        self.active_preset_name = if name.is_empty() {
+            String::from("Imported chain")
+        } else {
+            name.to_string()
+        };
+        self.revision += 1;
+        Ok(self.snapshot())
     }
 
     /// Names the curve the window is showing, for a preset that was just
@@ -1492,6 +1540,44 @@ mod tests {
         assert_eq!(room.ambience_mix, 0.0);
         assert!(room.preserve_position != 0);
         assert_eq!(room.preset, crate::room_catalog::CUSTOM_PRESET);
+    }
+
+    #[test]
+    fn a_chain_bundle_round_trips_and_keeps_the_power_switch() {
+        let mut source = AppStateStore::new(48_000.0);
+        source.eq_model_amount = 0.35;
+        source.set_eq_bands_and_config(
+            source.snapshot().bands,
+            "wide",
+            true,
+            true,
+            false,
+            -3.5,
+            ToneSettings {
+                bass_db: 4.0,
+                ..ToneSettings::default()
+            },
+        );
+        source.active_preset_name = String::from("Desk");
+        source.chain_settings.room.size_m = 8.0;
+        source.chain_settings.denoise.isolate = 1;
+        let text = source.export_chain_bundle(Some("Speakers")).expect("export");
+
+        let mut target = AppStateStore::new(48_000.0);
+        target.master_power = false;
+        let imported = target.import_chain_bundle(&text).expect("import");
+        assert_eq!(imported.active_preset_name, "Desk");
+        assert_eq!(imported.eq_model, "wide");
+        assert!((imported.eq_model_amount - 0.35).abs() < 1e-9);
+        assert!((imported.tone.bass_db - 4.0).abs() < 1e-9);
+        assert!((imported.chain_settings.room.size_m - 8.0).abs() < 1e-9);
+        assert!(!imported.master_power);
+        assert_eq!(imported.chain_settings.denoise.isolate, 0);
+        assert_eq!(imported.chain_settings.eq.model_amount, 0.35);
+
+        let before = target.snapshot();
+        assert!(target.import_chain_bundle("{\"app\":\"OtherEQ\"}").is_err());
+        assert_eq!(target.snapshot().active_preset_name, before.active_preset_name);
     }
 
     #[test]
