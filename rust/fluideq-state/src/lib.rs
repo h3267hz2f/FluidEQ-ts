@@ -712,30 +712,58 @@ impl AppStateStore {
     /// listener's, so they stay as they are — and choosing a room still turns
     /// the stage on, because auditioning it is why the chip was pressed.
     pub fn set_room_preset(&mut self, preset_id: i32) -> AppStateSnapshot {
-        if let Some(shape) = crate::room_catalog::shape_of(preset_id) {
-            let room = &mut self.chain_settings.room;
-            room.preset = preset_id;
-            room.size_m = shape.size_m;
-            room.walls = shape.walls;
-            room.distance_m = shape.distance_m;
-            room.centre_db = shape.centre_db;
-            room.sub_db = shape.sub_db;
-            room.angle_deg = shape.angles;
-            room.level_db = shape.levels;
-            room.speaker_distance_m = shape.distances;
-            room.mute = shape.mutes;
-            room.bass_management = i32::from(shape.bass_management);
-            room.crossover_hz = shape.crossover_hz;
-            room.music_upmix = i32::from(shape.music_upmix);
-            room.upmix_amount = shape.upmix_amount;
-            room.renderer_version = shape.renderer_version;
-            room.early_reflection_db = shape.early_reflection_db;
-            room.ambience_mix = shape.ambience_mix;
-            room.ambience_decay_s = shape.ambience_decay_s;
-            room.ambience_damping_hz = shape.ambience_damping_hz;
-            room.preserve_position = i32::from(shape.preserve_position);
-            room.enabled = 1;
+        if self.apply_room_shape(preset_id) {
+            self.chain_settings.room.enabled = 1;
         }
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
+    }
+
+    fn apply_room_shape(&mut self, preset_id: i32) -> bool {
+        let Some(shape) = crate::room_catalog::shape_of(preset_id) else {
+            return false;
+        };
+        let room = &mut self.chain_settings.room;
+        room.preset = preset_id;
+        room.size_m = shape.size_m;
+        room.walls = shape.walls;
+        room.distance_m = shape.distance_m;
+        room.centre_db = shape.centre_db;
+        room.sub_db = shape.sub_db;
+        room.angle_deg = shape.angles;
+        room.level_db = shape.levels;
+        room.speaker_distance_m = shape.distances;
+        room.mute = shape.mutes;
+        room.bass_management = i32::from(shape.bass_management);
+        room.crossover_hz = shape.crossover_hz;
+        room.music_upmix = i32::from(shape.music_upmix);
+        room.upmix_amount = shape.upmix_amount;
+        room.renderer_version = shape.renderer_version;
+        room.early_reflection_db = shape.early_reflection_db;
+        room.ambience_mix = shape.ambience_mix;
+        room.ambience_decay_s = shape.ambience_decay_s;
+        room.ambience_damping_hz = shape.ambience_damping_hz;
+        room.preserve_position = i32::from(shape.preserve_position);
+        true
+    }
+
+    /// Reset starts again in the modern Reference room rather than in the
+    /// rack's default living room, which is still on the first renderer; the
+    /// power switch is the listener's and stays as it was.
+    pub fn reset_room(&mut self) -> AppStateSnapshot {
+        let enabled = self.chain_settings.room.enabled;
+        self.apply_room_shape(12);
+        self.chain_settings.room.enabled = enabled;
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        self.snapshot()
+    }
+
+    /// Move a classic room to the second renderer, on the listener's press:
+    /// the walls at the first renderer's level, no tail, positions kept.
+    pub fn migrate_room_renderer(&mut self) -> AppStateSnapshot {
+        crate::room_catalog::room_on_new_renderer(&mut self.chain_settings.room);
         self.revision += 1;
         self.commit_chain_and_linear_phase_kernel();
         self.snapshot()
@@ -1414,6 +1442,36 @@ mod tests {
             bass_snap.chain_settings.room.preset,
             crate::room_catalog::CUSTOM_PRESET
         );
+    }
+
+    #[test]
+    fn room_reset_lands_on_the_modern_reference_and_keeps_the_switch() {
+        let mut store = AppStateStore::new(48_000.0);
+        store.set_room_preset(2); // classic Cinema
+        store.chain_settings.room.enabled = 0;
+
+        let reset = store.reset_room();
+        let room = &reset.chain_settings.room;
+        assert_eq!(room.preset, 12);
+        assert_eq!(room.renderer_version, 2);
+        assert_eq!(room.enabled, 0);
+    }
+
+    #[test]
+    fn moving_a_classic_room_to_the_modern_renderer_keeps_its_shape() {
+        let mut store = AppStateStore::new(48_000.0);
+        let classic = store.set_room_preset(2).chain_settings.room;
+
+        let migrated = store.migrate_room_renderer();
+        let room = &migrated.chain_settings.room;
+        assert_eq!(room.renderer_version, 2);
+        assert_eq!(room.size_m, classic.size_m);
+        assert_eq!(room.walls, classic.walls);
+        assert_eq!(room.angle_deg, classic.angle_deg);
+        assert_eq!(room.early_reflection_db, 0.0);
+        assert_eq!(room.ambience_mix, 0.0);
+        assert!(room.preserve_position != 0);
+        assert_eq!(room.preset, crate::room_catalog::CUSTOM_PRESET);
     }
 
     #[test]

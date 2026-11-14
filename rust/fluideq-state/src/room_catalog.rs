@@ -707,6 +707,19 @@ fn has_shape(room: &FeqChainRoomSettings, shape: &RoomShape) -> bool {
         && (room.preserve_position != 0) == shape.preserve_position
 }
 
+/// A classic room moved to the second renderer, asked for and never assumed:
+/// the same room and speakers, the walls as loud as the first renderer plays
+/// them (0 dB), no tail, the speakers' positions kept. It is no longer the
+/// preset it came from — the speakers now stand between the head's measured
+/// directions instead of on the nearest one, which is a different sound.
+pub fn room_on_new_renderer(room: &mut FeqChainRoomSettings) {
+    room.renderer_version = 2;
+    room.early_reflection_db = 0.0;
+    room.ambience_mix = 0.0;
+    room.preserve_position = 1;
+    room.preset = CUSTOM_PRESET;
+}
+
 /// Keeps a room's name only while the room still is that preset. A snapshot
 /// written before the catalogue was ported names its room with the old
 /// five-room numbers; those shapes no longer match, so the room becomes

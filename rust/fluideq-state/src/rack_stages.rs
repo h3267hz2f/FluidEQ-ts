@@ -162,7 +162,7 @@ pub fn set_master_target(settings: &mut FeqChainSettings, target: &str) -> Resul
 
 /// The parameters the rack page may write, with the range each one accepts.
 /// The window draws the same ranges; the clamp here is what the engine gets.
-const PARAMETER_RANGES: [(&str, &str, f64, f64); 54] = [
+const PARAMETER_RANGES: [(&str, &str, f64, f64); 58] = [
     ("normalizer", "target_lufs", -35.0, -5.0),
     ("normalizer", "ceiling_db", -6.0, 0.0),
     ("denoise", "hiss_amount", 0.0, 1.0),
@@ -195,6 +195,10 @@ const PARAMETER_RANGES: [(&str, &str, f64, f64); 54] = [
     ("room", "crossover_hz", 40.0, 160.0),
     ("room", "centre_db", -12.0, 6.0),
     ("room", "sub_db", -12.0, 6.0),
+    ("room", "early_reflection_db", -60.0, 0.0),
+    ("room", "ambience_damping_hz", 1000.0, 12000.0),
+    ("room", "music_upmix", 0.0, 1.0),
+    ("room", "upmix_amount", 0.0, 1.0),
     ("dynamics", "band1_up_threshold_db", -80.0, -10.0),
     ("dynamics", "band1_up_ratio", 1.0, 4.0),
     ("dynamics", "band1_up_max_db", 0.0, 18.0),
@@ -274,6 +278,12 @@ pub fn set_stage_parameter(
         ("room", "crossover_hz") => settings.room.crossover_hz = value,
         ("room", "centre_db") => settings.room.centre_db = value,
         ("room", "sub_db") => settings.room.sub_db = value,
+        ("room", "early_reflection_db") => settings.room.early_reflection_db = value,
+        ("room", "ambience_damping_hz") => settings.room.ambience_damping_hz = value,
+        ("room", "music_upmix") => {
+            settings.room.music_upmix = if value >= 0.5 { 1 } else { 0 }
+        }
+        ("room", "upmix_amount") => settings.room.upmix_amount = value,
         ("dynamics", "band1_up_threshold_db") => {
             settings.compander.bands[0].up_threshold_db = value
         }
@@ -356,6 +366,10 @@ pub fn stage_parameter_value(
         ("room", "crossover_hz") => Some(settings.room.crossover_hz),
         ("room", "centre_db") => Some(settings.room.centre_db),
         ("room", "sub_db") => Some(settings.room.sub_db),
+        ("room", "early_reflection_db") => Some(settings.room.early_reflection_db),
+        ("room", "ambience_damping_hz") => Some(settings.room.ambience_damping_hz),
+        ("room", "music_upmix") => Some(settings.room.music_upmix as f64),
+        ("room", "upmix_amount") => Some(settings.room.upmix_amount),
         ("dynamics", "band1_up_threshold_db") => Some(settings.compander.bands[0].up_threshold_db),
         ("dynamics", "band1_up_ratio") => Some(settings.compander.bands[0].up_ratio),
         ("dynamics", "band1_up_max_db") => Some(settings.compander.bands[0].up_max_db),

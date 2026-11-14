@@ -217,6 +217,17 @@ const els = {
   roomCentreVal: document.getElementById('room-centre-val'),
   roomSub: document.getElementById('room-sub'),
   roomSubVal: document.getElementById('room-sub-val'),
+  roomSpace: document.getElementById('room-space'),
+  roomSpaceVal: document.getElementById('room-space-val'),
+  roomDamping: document.getElementById('room-damping'),
+  roomDampingVal: document.getElementById('room-damping-val'),
+  roomRendererVal: document.getElementById('room-renderer-val'),
+  roomRendererNote: document.getElementById('room-renderer-note'),
+  roomUpgrade: document.getElementById('room-upgrade'),
+  roomReset: document.getElementById('room-reset'),
+  roomUpmix: document.getElementById('room-upmix'),
+  roomUpmixAmount: document.getElementById('room-upmix-amount'),
+  roomUpmixAmountVal: document.getElementById('room-upmix-amount-val'),
 };
 
 const graph = registerView(equalizer).createGraph(els.canvas);
@@ -1357,6 +1368,17 @@ async function setDynamicsPreset(preset) {
   }
 }
 
+async function runRoomCommand(command, failure) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke(command);
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`${failure}: ${error}`);
+  }
+}
+
 async function setRackParameter(stage, parameter, value) {
   if (!invoke) return;
   try {
@@ -1384,11 +1406,51 @@ async function setRackStage(stage, enabled) {
 // Room view
 // ---------------------------------------------------------------------------
 
+// Space is stored in dB, but -60 to 0 is not heard evenly: the top 24 dB carry
+// the room and the rest is effectively none. The dial is a share of that
+// audible range, as upstream's `roomView.ts` maps it.
+const SPACE_OFF_DB = -60;
+const SPACE_FLOOR_DB = -36;
+
+function spaceOfDb(db) {
+  if (db <= SPACE_OFF_DB) return 0;
+  const percent = Math.round(
+    ((db - SPACE_FLOOR_DB) / (0 - SPACE_FLOOR_DB)) * 100
+  );
+  return Math.min(100, Math.max(1, percent));
+}
+
+function dbOfSpace(percent) {
+  const whole = Math.min(100, Math.max(0, Math.round(percent)));
+  if (whole === 0) return SPACE_OFF_DB;
+  const db = SPACE_FLOOR_DB + (whole / 100) * (0 - SPACE_FLOOR_DB);
+  return Math.round(db * 100) / 100;
+}
+
 function renderRoom() {
   const settings = snapshot.chain_settings?.room ?? {};
   const enabled = Boolean(settings.enabled);
   els.roomPower.textContent = enabled ? 'On' : 'Off';
   els.roomPower.setAttribute('aria-pressed', String(enabled));
+
+  // Space is the stored level of the walls, -60 dB for none; the dial is a
+  // share of the audible range so the ear moves it evenly (upstream
+  // `roomView.ts`).
+  const rendererVersion = numberOr(settings.renderer_version, 1);
+  const modern = rendererVersion === 2;
+  els.roomRendererVal.textContent = modern ? 'Modern' : 'Classic';
+  els.roomUpgrade.hidden = modern;
+  els.roomRendererNote.textContent = modern
+    ? 'Space and Ambience belong to the modern renderer.'
+    : 'This classic room has no Space or Ambience until it moves to the modern renderer.';
+  for (const control of [
+    els.roomSpace,
+    els.roomDamping,
+    els.roomAmbience,
+    els.roomDecay,
+  ]) {
+    control.disabled = !modern;
+  }
 
   renderRoomPresets(numberOr(settings.preset, -1));
 
@@ -1435,6 +1497,26 @@ function renderRoom() {
   setRangeValue(els.roomDecay, decay);
   setRangeFill(els.roomDecay, ((decay - 0.1) / 1.7) * 100);
   els.roomDecayVal.textContent = `${decay.toFixed(2)} s`;
+
+  const space = spaceOfDb(numberOr(settings.early_reflection_db, 0));
+  setRangeValue(els.roomSpace, space);
+  setRangeFill(els.roomSpace, space);
+  els.roomSpaceVal.textContent = `${Math.round(space)}%`;
+
+  const damping = numberOr(settings.ambience_damping_hz, 6000);
+  setRangeValue(els.roomDamping, damping);
+  setRangeFill(els.roomDamping, ((damping - 1000) / 11000) * 100);
+  els.roomDampingVal.textContent = `${Math.round(damping)} Hz`;
+
+  const upmix = Boolean(settings.music_upmix);
+  els.roomUpmix.textContent = upmix ? 'On' : 'Off';
+  els.roomUpmix.setAttribute('aria-pressed', String(upmix));
+
+  const upmixAmount = numberOr(settings.upmix_amount, 0.6);
+  setRangeValue(els.roomUpmixAmount, upmixAmount);
+  setRangeFill(els.roomUpmixAmount, upmixAmount * 100);
+  els.roomUpmixAmountVal.textContent = `${Math.round(upmixAmount * 100)}%`;
+  els.roomUpmixAmount.disabled = !upmix;
 
   const bassMgmt = Boolean(settings.bass_management);
   els.roomBassMgmt.textContent = bassMgmt ? 'On' : 'Off';
@@ -2132,6 +2214,44 @@ els.apoExport.addEventListener('click', exportApoFile);
 
 els.roomPower.addEventListener('click', toggleRoomPower);
 els.roomBassMgmt.addEventListener('click', toggleRoomBassManagement);
+
+els.roomUpgrade.addEventListener('click', () =>
+  runRoomCommand('room_migrate_renderer', 'Could not move the room to the modern renderer')
+);
+els.roomReset.addEventListener('click', () =>
+  runRoomCommand('room_reset', 'Could not reset the room')
+);
+
+els.roomSpace.addEventListener('input', () => {
+  const percent = Number(els.roomSpace.value);
+  setRangeFill(els.roomSpace, percent);
+  els.roomSpaceVal.textContent = `${Math.round(percent)}%`;
+});
+els.roomSpace.addEventListener('change', () =>
+  setRackParameter('room', 'early_reflection_db', dbOfSpace(Number(els.roomSpace.value)))
+);
+
+els.roomDamping.addEventListener('input', () => {
+  const damping = Number(els.roomDamping.value);
+  setRangeFill(els.roomDamping, ((damping - 1000) / 11000) * 100);
+  els.roomDampingVal.textContent = `${Math.round(damping)} Hz`;
+});
+els.roomDamping.addEventListener('change', () =>
+  setRackParameter('room', 'ambience_damping_hz', Number(els.roomDamping.value))
+);
+
+els.roomUpmix.addEventListener('click', () =>
+  setRackParameter('room', 'music_upmix', Boolean(snapshot.chain_settings?.room?.music_upmix) ? 0 : 1)
+);
+
+els.roomUpmixAmount.addEventListener('input', () => {
+  const amount = Number(els.roomUpmixAmount.value);
+  setRangeFill(els.roomUpmixAmount, amount * 100);
+  els.roomUpmixAmountVal.textContent = `${Math.round(amount * 100)}%`;
+});
+els.roomUpmixAmount.addEventListener('change', () =>
+  setRackParameter('room', 'upmix_amount', Number(els.roomUpmixAmount.value))
+);
 
 els.roomSize.addEventListener('input', () => {
   const size = Number(els.roomSize.value);

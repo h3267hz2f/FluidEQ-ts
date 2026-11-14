@@ -627,6 +627,26 @@ fn set_room_preset(
 }
 
 #[tauri::command]
+fn room_reset(state: State<'_, ShellState>) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.reset_room();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_migrate_renderer(state: State<'_, ShellState>) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.migrate_room_renderer();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_room_head(
     app: tauri::AppHandle,
     state: State<'_, ShellState>,
@@ -1203,6 +1223,8 @@ fn main() {
             list_opra_models,
             apply_opra_curve,
             set_room_preset,
+            room_reset,
+            room_migrate_renderer,
             set_room_head,
             set_room_bass_management,
             get_output_volume,
