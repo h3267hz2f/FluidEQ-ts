@@ -71,12 +71,16 @@ int main() {
   // And Footsteps' trailer, Dynamics' and the preset's curve at its longest
   // after the Room's trailer, which is the longest line there is.
   max.push_back(FEQ_CHAIN_FOOTSTEPS_TAG);
-  max.push_back(FEQ_CHAIN_FOOTSTEPS_SCHEMA);
-  max.push_back(FEQ_CHAIN_FOOTSTEPS_FIELDS);
+  max.push_back(FEQ_CHAIN_GAME_SCHEMA);
+  max.push_back(FEQ_CHAIN_GAME_FIELDS);
   max.push_back(1);
   max.push_back(0);
   max.push_back(0.85);
   max.push_back(0.5);
+  max.push_back(0);
+  max.push_back(0);
+  max.push_back(0);
+  max.push_back(0);
   max.push_back(FEQ_CHAIN_DYNAMICS_TAG);
   max.push_back(FEQ_CHAIN_DYNAMICS_SCHEMA);
   max.push_back(FEQ_CHAIN_DYNAMICS_FIELDS);
@@ -104,8 +108,9 @@ int main() {
   }
   check(max.size() == FEQ_CHAIN_MAX_PARAMS && decode(max, &settings) &&
             settings.tone.band_count == FEQ_CHAIN_MAX_TONE_BANDS &&
-            settings.footsteps.enabled == 1 && settings.compander.enabled == 1,
-        "the longest payload, 64 bands, the Room, Footsteps, Dynamics and a "
-        "whole curve, fits the shared host/APO bound");
+            settings.footsteps.enabled == 1 && settings.footsteps.heavy == 0 &&
+            settings.compander.enabled == 1,
+        "the longest payload, 64 bands, the Room, Game, Dynamics and a whole "
+        "curve, fits the shared host/APO bound");
   return feq_test::finish();
 }

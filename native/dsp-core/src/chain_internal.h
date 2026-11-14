@@ -867,6 +867,10 @@ void chain_process_deesser(FeqChain* chain, float* const* channels,
 
 /* --- Footsteps, from `chain_footsteps.cpp` ------------------------------- */
 
+/** Configure it and reserve the limiter's headroom for what it adds. */
+void chain_configure_footsteps(FeqChain* chain);
+/** Tell it which channels are the LFE and the centre. CONTROL thread. */
+void chain_apply_footsteps_layout(FeqChain* chain);
 /** Run it on the block and report what it did. AUDIO thread. */
 void chain_process_footsteps(FeqChain* chain, float* const* channels,
                              uint32_t frames);

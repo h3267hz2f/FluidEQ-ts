@@ -122,7 +122,12 @@ add_library(fluideq-dsp-core STATIC
   dsp-core/src/deesser_process.cpp
   dsp-core/src/deesser_decide.cpp
   dsp-core/src/footsteps.cpp
+  dsp-core/src/footsteps_bed.cpp
   dsp-core/src/footsteps_decide.cpp
+  dsp-core/src/footsteps_headroom.cpp
+  dsp-core/src/game_dialogue.cpp
+  dsp-core/src/game_environment.cpp
+  dsp-core/src/game_shared.cpp
   dsp-core/src/compander.cpp
   dsp-core/src/meters.cpp
   dsp-core/src/meters_deesser.cpp
@@ -215,6 +220,12 @@ add_test(NAME footsteps COMMAND fluideq-footsteps-test)
 add_executable(fluideq-compander-test dsp-core/tests/compander_test.cpp)
 target_link_libraries(fluideq-compander-test PRIVATE fluideq-dsp-core feq_strict)
 add_test(NAME compander COMMAND fluideq-compander-test)
+
+# The Game filter's other two parts: Environment and Dialogue beside the
+# lift, each off at zero and exactly the input while it does nothing.
+add_executable(fluideq-game-parts-test dsp-core/tests/game_parts_test.cpp)
+target_link_libraries(fluideq-game-parts-test PRIVATE fluideq-dsp-core feq_strict)
+add_test(NAME game-parts COMMAND fluideq-game-parts-test)
 
 # Footsteps in mixes the way games play them: loud, paused, heavy in the bass
 # — where judging against fixed levels lifted a match's steps 0.4 dB.

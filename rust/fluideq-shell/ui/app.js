@@ -1199,6 +1199,28 @@ function rackEditorExtras(stage, settings) {
     row.append(label, toggle);
     extras.push(row);
   }
+  if (stage.id === 'footsteps') {
+    for (const [id, label] of [
+      ['heavy', 'Heavy steps'],
+      ['duck', 'Make room for voices'],
+    ]) {
+      const row = document.createElement('div');
+      row.className = 'stat-row';
+      const heading = document.createElement('span');
+      heading.textContent = label;
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'stat-toggle';
+      const on = Number(settings?.footsteps?.[id]) > 0;
+      toggle.textContent = on ? 'On' : 'Off';
+      toggle.setAttribute('aria-pressed', String(on));
+      toggle.addEventListener('click', () =>
+        setRackParameter(stage.id, id, on ? 0 : 1)
+      );
+      row.append(heading, toggle);
+      extras.push(row);
+    }
+  }
   if (stage.id === 'normalizer') {
     extras.push(
       buildChipGroup(

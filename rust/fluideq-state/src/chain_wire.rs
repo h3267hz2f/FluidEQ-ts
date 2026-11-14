@@ -14,7 +14,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //!   1. Normalizer (`3` words: `mode`, `ceiling_db`, `target_lufs`)
 //!   2. Low-latency / Game mode (`1` word: `0.0` or `1.0`)
 //!   3. Tagged Room v2 trailer (`11` words starting with `FEQ_CHAIN_ROOM_TAG`)
-//!   4. Tagged Footsteps trailer (`7` words starting with `FEQ_CHAIN_FOOTSTEPS_TAG`)
+//!   4. Tagged Footsteps/Game trailer (`7` or `11` words starting with `FEQ_CHAIN_FOOTSTEPS_TAG`)
 //!   5. Tagged Dynamics trailer (`23` words starting with `FEQ_CHAIN_DYNAMICS_TAG`)
 //!   6. Tagged Tone trailer (`4 + tone_bands * 4` words starting with `FEQ_CHAIN_TONE_TAG`)
 
@@ -23,6 +23,7 @@ use fluideq_dsp_sys::{
     FEQ_CHAIN_DEESSER_SIGNATURE, FEQ_CHAIN_DYNAMICS_FIELDS, FEQ_CHAIN_DYNAMICS_TAG,
     FEQ_CHAIN_DYNAMICS_TRAILER, FEQ_CHAIN_DYNAMICS_VERSION, FEQ_CHAIN_EXCITER_BANDS,
     FEQ_CHAIN_FOOTSTEPS_FIELDS, FEQ_CHAIN_FOOTSTEPS_TAG, FEQ_CHAIN_FOOTSTEPS_VERSION,
+    FEQ_CHAIN_GAME_FIELDS, FEQ_CHAIN_GAME_TRAILER, FEQ_CHAIN_GAME_VERSION,
     FEQ_CHAIN_MAX_EQ_BANDS, FEQ_CHAIN_MAX_TONE_BANDS, FEQ_CHAIN_PARAM_LEAD, FEQ_CHAIN_ROOM_FIELDS,
     FEQ_CHAIN_ROOM_TAG, FEQ_CHAIN_ROOM_VERSION, FEQ_CHAIN_TONE_TAG, FEQ_CHAIN_TONE_VERSION,
     FEQ_COMPANDER_BANDS, FEQ_ROOM_MUTE_SLOTS, FEQ_ROOM_SPEAKERS,
@@ -63,14 +64,22 @@ pub fn encode_chain_settings_wire(settings: &FeqChainSettings) -> Vec<f64> {
     let emit_footsteps = settings.footsteps.enabled != 0
         || settings.footsteps.isolate != 0
         || (settings.footsteps.lift - 0.85).abs() > 1e-9
-        || (settings.footsteps.calm - 0.5).abs() > 1e-9;
+        || settings.footsteps.calm.abs() > 1e-9
+        || settings.footsteps.heavy != 0
+        || settings.footsteps.environment.abs() > 1e-9
+        || settings.footsteps.voices.abs() > 1e-9
+        || settings.footsteps.duck != 0;
     let emit_dynamics = settings.compander.enabled != 0;
 
     let total_capacity = FEQ_CHAIN_PARAM_LEAD
         + band_count * FEQ_CHAIN_BAND_PARAMS
         + 4
         + 11
-        + if emit_footsteps { 7 } else { 0 }
+        + if emit_footsteps {
+            FEQ_CHAIN_GAME_TRAILER
+        } else {
+            0
+        }
         + if emit_dynamics {
             FEQ_CHAIN_DYNAMICS_TRAILER
         } else {
@@ -277,15 +286,19 @@ pub fn encode_chain_settings_wire(settings: &FeqChainSettings) -> Vec<f64> {
     out.push(bool_word(settings.room.compare_original));
     out.push(bool_word(settings.room.source_already_spatial));
 
-    // Footsteps trailer (7 words) — emitted when footsteps is active or customized
+    // Footsteps/Game trailer (11 words) — emitted when active or customized.
     if emit_footsteps {
         out.push(FEQ_CHAIN_FOOTSTEPS_TAG);
-        out.push(FEQ_CHAIN_FOOTSTEPS_VERSION);
-        out.push(FEQ_CHAIN_FOOTSTEPS_FIELDS);
+        out.push(FEQ_CHAIN_GAME_VERSION);
+        out.push(FEQ_CHAIN_GAME_FIELDS);
         out.push(bool_word(settings.footsteps.enabled));
         out.push(bool_word(settings.footsteps.isolate));
         out.push(settings.footsteps.lift);
         out.push(settings.footsteps.calm);
+        out.push(bool_word(settings.footsteps.heavy));
+        out.push(settings.footsteps.environment);
+        out.push(settings.footsteps.voices);
+        out.push(bool_word(settings.footsteps.duck));
     }
 
     // Dynamics trailer (23 words) — written only while the stage is on.
@@ -418,14 +431,24 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
 
     let mut footsteps_at: Option<usize> = None;
     if at < values.len() && values[at] == FEQ_CHAIN_FOOTSTEPS_TAG {
-        if values.len() - at < 3
-            || values[at + 1] != FEQ_CHAIN_FOOTSTEPS_VERSION
-            || values[at + 2] != FEQ_CHAIN_FOOTSTEPS_FIELDS
-        {
+        if values.len() - at < 3 {
             return None;
         }
-        let foot_words = 3 + (FEQ_CHAIN_FOOTSTEPS_FIELDS as usize);
-        if values.len() - at < foot_words {
+        let schema = values[at + 1];
+        let words = if schema == FEQ_CHAIN_GAME_VERSION {
+            if values[at + 2] != FEQ_CHAIN_GAME_FIELDS {
+                return None;
+            }
+            FEQ_CHAIN_GAME_TRAILER
+        } else if schema == FEQ_CHAIN_FOOTSTEPS_VERSION {
+            if values[at + 2] != FEQ_CHAIN_FOOTSTEPS_FIELDS {
+                return None;
+            }
+            7
+        } else {
+            return None;
+        };
+        if values.len() - at < words {
             return None;
         }
         if (values[at + 3] != 0.0 && values[at + 3] != 1.0)
@@ -435,8 +458,17 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
         {
             return None;
         }
+        if words == FEQ_CHAIN_GAME_TRAILER {
+            if (values[at + 7] != 0.0 && values[at + 7] != 1.0)
+                || !(-1.0..=1.0).contains(&values[at + 8])
+                || !(0.0..=1.0).contains(&values[at + 9])
+                || (values[at + 10] != 0.0 && values[at + 10] != 1.0)
+            {
+                return None;
+            }
+        }
         footsteps_at = Some(at);
-        at += foot_words;
+        at += words;
     }
 
     let mut dynamics_at: Option<usize> = None;
@@ -744,6 +776,12 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
         settings.footsteps.isolate = read_bool(values[fc + 4]);
         settings.footsteps.lift = values[fc + 5];
         settings.footsteps.calm = values[fc + 6];
+        if values[fc + 1] == FEQ_CHAIN_GAME_VERSION {
+            settings.footsteps.heavy = read_bool(values[fc + 7]);
+            settings.footsteps.environment = values[fc + 8];
+            settings.footsteps.voices = values[fc + 9];
+            settings.footsteps.duck = read_bool(values[fc + 10]);
+        }
     }
 
     if let Some(dc) = dynamics_at {
@@ -795,6 +833,46 @@ mod tests {
         let decoded = decode_chain_settings_wire(&encoded)
             .expect("default FeqChainSettings wire must decode cleanly");
         assert_eq!(decoded, defaults);
+    }
+
+    #[test]
+    fn game_schema_round_trips_the_whole_filter() {
+        let mut original = FeqChainSettings::default();
+        original.footsteps.enabled = 1;
+        original.footsteps.lift = 0.6;
+        original.footsteps.calm = 0.2;
+        original.footsteps.heavy = 1;
+        original.footsteps.environment = -0.45;
+        original.footsteps.voices = 0.7;
+        original.footsteps.duck = 1;
+
+        let encoded = encode_chain_settings_wire(&original);
+        let decoded =
+            decode_chain_settings_wire(&encoded).expect("game wire must decode cleanly");
+        assert_eq!(decoded.footsteps, original.footsteps);
+    }
+
+    #[test]
+    fn schema_one_footsteps_still_decodes() {
+        let mut wire = encode_chain_settings_wire(&FeqChainSettings::default());
+        wire.extend([
+            FEQ_CHAIN_FOOTSTEPS_TAG,
+            FEQ_CHAIN_FOOTSTEPS_VERSION,
+            FEQ_CHAIN_FOOTSTEPS_FIELDS,
+            1.0,
+            0.0,
+            0.7,
+            0.3,
+        ]);
+        let decoded =
+            decode_chain_settings_wire(&wire).expect("schema one must still decode cleanly");
+        assert_eq!(decoded.footsteps.enabled, 1);
+        assert_eq!(decoded.footsteps.lift, 0.7);
+        assert_eq!(decoded.footsteps.calm, 0.3);
+        assert_eq!(decoded.footsteps.heavy, 0);
+        assert_eq!(decoded.footsteps.environment, 0.0);
+        assert_eq!(decoded.footsteps.voices, 0.0);
+        assert_eq!(decoded.footsteps.duck, 0);
     }
 
     #[test]

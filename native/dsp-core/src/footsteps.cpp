@@ -17,9 +17,18 @@ namespace {
 
 using feq_footsteps_detail::BandPass;
 using feq_footsteps_detail::decide;
+using feq_footsteps_detail::dialogue_apply;
+using feq_footsteps_detail::dialogue_decide;
+using feq_footsteps_detail::dialogue_idle;
+using feq_footsteps_detail::dialogue_listen;
+using feq_footsteps_detail::environment_apply;
+using feq_footsteps_detail::environment_decide;
+using feq_footsteps_detail::environment_idle;
+using feq_footsteps_detail::environment_listen;
 using feq_footsteps_detail::History;
 using feq_footsteps_detail::kBands;
 using feq_footsteps_detail::kFloorDb;
+using feq_footsteps_detail::overlay_headroom;
 using feq_footsteps_detail::State;
 
 constexpr double kPi = 3.14159265358979323846;
@@ -66,6 +75,15 @@ constexpr double kLearnSeconds = 0.4;
 /** A lift starts within two milliseconds and lets go over forty. */
 constexpr double kGainAttackMs = 2.0;
 constexpr double kGainReleaseMs = 40.0;
+/**
+ * Hold through carrier troughs down to 20 Hz, then release the reservation
+ * promptly. A decaying peak without a hold modulated a partially limited
+ * Environment tone (-53 dBc at 80 Hz), even though it retained hot originals.
+ */
+constexpr double kHeadroomPeakHoldMs = 32.0;
+/** The lowest additive cue band is 300 Hz, rather than full-band ambience. */
+constexpr double kCueHeadroomPeakHoldMs = 3.0;
+constexpr double kHeadroomPeakReleaseMs = 20.0;
 /** The whole signal, for "is anything around it loud". */
 constexpr double kWholeReleaseMs = 60.0;
 
@@ -120,7 +138,8 @@ bool settled(const State& s) {
   for (int b = 0; b < FEQ_FOOTSTEPS_BANDS; ++b) {
     if (s.band_gain_db[b] != 0.0 || s.band_gain[b] != 1.0) return false;
   }
-  return s.calm_cut_db == 0.0 && s.calm_gain == 1.0;
+  return s.calm_cut_db == 0.0 && s.calm_gain == 1.0 &&
+         environment_idle(s.environment) && dialogue_idle(s.dialogue);
 }
 
 }  // namespace
@@ -131,7 +150,6 @@ void feq_footsteps_settings_defaults(FeqFootstepsSettings* settings) {
   if (settings == nullptr) return;
   *settings = FeqFootstepsSettings{};
   settings->lift = 0.85;
-  settings->calm = 0.5;
 }
 
 FeqFootsteps* feq_footsteps_create(double sample_rate, uint32_t channels) {
@@ -143,6 +161,10 @@ FeqFootsteps* feq_footsteps_create(double sample_rate, uint32_t channels) {
   if (f == nullptr) return nullptr;
   f->sample_rate = sample_rate;
   f->channels = channels;
+  if (!feq_footsteps_detail::prepare_bed_history(*f)) {
+    delete f;
+    return nullptr;
+  }
   f->control_step = std::max<uint32_t>(
       1u, static_cast<uint32_t>(std::lround(sample_rate / kControlHz)));
   f->learn_frames = static_cast<uint32_t>(std::lround(kLearnSeconds * sample_rate));
@@ -154,6 +176,12 @@ FeqFootsteps* feq_footsteps_create(double sample_rate, uint32_t channels) {
   const double control_rate = sample_rate / f->control_step;
   f->a_power_attack = pole(sample_rate, kPowerAttackMs);
   f->a_power_release = pole(sample_rate, kPowerReleaseMs);
+  f->a_overlay_release = pole(sample_rate, kGainReleaseMs);
+  f->a_headroom_peak_release = pole(sample_rate, kHeadroomPeakReleaseMs);
+  f->headroom_hold_frames = static_cast<uint32_t>(
+      std::lround(sample_rate * kHeadroomPeakHoldMs * 0.001));
+  f->cue_headroom_hold_frames = static_cast<uint32_t>(
+      std::lround(sample_rate * kCueHeadroomPeakHoldMs * 0.001));
   f->a_whole_release = pole(sample_rate, kWholeReleaseMs);
   f->a_calm_power_release = pole(sample_rate, kCalmPowerReleaseMs);
   f->a_level_attack = pole(control_rate, kLevelAttackMs);
@@ -172,6 +200,10 @@ FeqFootsteps* feq_footsteps_create(double sample_rate, uint32_t channels) {
   f->a_programme_fall = pole(control_rate, kProgrammeFallMs);
   f->hold_decisions =
       static_cast<uint32_t>(std::lround(kHoldMs * 0.001 * control_rate));
+  feq_footsteps_detail::environment_design(f->environment_design, sample_rate,
+                                           control_rate);
+  feq_footsteps_detail::dialogue_design(f->dialogue_design, sample_rate,
+                                        control_rate);
   clear_report(f->report);
   FeqFootstepsSettings defaults{};
   feq_footsteps_settings_defaults(&defaults);
@@ -193,6 +225,24 @@ void feq_footsteps_configure(FeqFootsteps* footsteps,
   };
   footsteps->lift.store(unit(settings->lift), std::memory_order_relaxed);
   footsteps->calm.store(unit(settings->calm), std::memory_order_relaxed);
+  footsteps->heavy.store(settings->heavy != 0 ? 1 : 0, std::memory_order_relaxed);
+  footsteps->environment.store(
+      std::isfinite(settings->environment)
+          ? std::clamp(settings->environment, -1.0, 1.0)
+          : 0.0,
+      std::memory_order_relaxed);
+  footsteps->voices.store(unit(settings->voices), std::memory_order_relaxed);
+  footsteps->duck.store(settings->duck != 0 ? 1 : 0, std::memory_order_relaxed);
+}
+
+void feq_footsteps_set_centre(FeqFootsteps* footsteps, int centre_channel) {
+  if (footsteps == nullptr) return;
+  footsteps->centre.store(
+      centre_channel >= 0 &&
+              static_cast<uint32_t>(centre_channel) < footsteps->channels
+          ? centre_channel
+          : -1,
+      std::memory_order_relaxed);
 }
 
 void feq_footsteps_set_lfe(FeqFootsteps* footsteps, int lfe_channel) {
@@ -220,21 +270,66 @@ void feq_footsteps_process(FeqFootsteps* footsteps, float* const* channels,
       enabled && f.isolate.load(std::memory_order_relaxed) != 0;
   const double lift = f.lift.load(std::memory_order_relaxed);
   const double calm = f.calm.load(std::memory_order_relaxed);
+  const bool heavy = f.heavy.load(std::memory_order_relaxed) != 0;
+  const double environment = f.environment.load(std::memory_order_relaxed);
+  const double voices = f.voices.load(std::memory_order_relaxed);
+  const double cue_ceiling = f.cue_ceiling.load(std::memory_order_relaxed);
+  const bool duck = f.duck.load(std::memory_order_relaxed) != 0;
   const int lfe = f.lfe.load(std::memory_order_relaxed);
+  const int centre = f.centre.load(std::memory_order_relaxed);
   const uint32_t count = f.channels;
+  double applied[FEQ_FOOTSTEPS_BANDS] = {};
+  double environment_applied = 1.0, voice_applied = 1.0;
+  double duck_applied = 1.0, calm_applied = 1.0;
 
   for (uint32_t i = 0; i < frames; ++i) {
     if (s.until_control == 0) {
-      decide(f, enabled, lift, calm);
+      const double step = static_cast<double>(f.control_step);
+      decide(f, enabled, lift, calm, heavy);
+      const bool moving = enabled && !s.learning;
+      environment_decide(f.environment_design, s.environment,
+                         moving ? environment : 0.0, s.learning, step,
+                         f.report);
+      dialogue_decide(f.dialogue_design, s.dialogue, moving ? voices : 0.0,
+                      moving && duck, s.programme_db, s.quiet_around, step,
+                      f.report);
       s.until_control = f.control_step;
     }
     --s.until_control;
 
+    // `x` is the stage's input, which Environment and Dialogue listen to;
+    // the lift listens to, and lifts, what Environment leaves of it.
+    double input[FEQ_FOOTSTEPS_MAX_CHANNELS];
     double x[FEQ_FOOTSTEPS_MAX_CHANNELS];
+    for (uint32_t c = 0; c < count; ++c) {
+      input[c] = channels[c][i];
+      x[c] = input[c];
+    }
+    environment_listen(f.environment_design, s.environment, input, count);
+    dialogue_listen(f.dialogue_design, s.dialogue, input, count, centre);
+    const bool environment_moving = !environment_idle(s.environment);
+    if (environment_moving) {
+      environment_apply(f.environment_design, s.environment, x, count, lfe);
+      double delta[FEQ_FOOTSTEPS_MAX_CHANNELS];
+      for (uint32_t c = 0; c < count; ++c) delta[c] = x[c] - input[c];
+      const double gain = overlay_headroom(f, input, delta, count, lfe,
+          s.environment_overlay, s.environment.gain[0] > 1 ||
+          s.environment.gain[1] > 1 || s.environment.gain[2] > 1,
+          f.headroom_hold_frames);
+      for (uint32_t c = 0; c < count; ++c) x[c] = input[c] + gain * delta[c];
+      for (int b = 0; b < feq_footsteps_detail::kEnvironmentBands; ++b) {
+        const double effective = 1 + gain * (s.environment.gain[b] - 1);
+        if (std::fabs(effective - 1) > std::fabs(environment_applied - 1)) {
+          environment_applied = effective;
+        }
+      }
+    } else {
+      s.environment_overlay = {};
+    }
+
     double added[FEQ_FOOTSTEPS_MAX_CHANNELS] = {};
     double whole_peak = 0.0;
     for (uint32_t c = 0; c < count; ++c) {
-      x[c] = channels[c][i];
       if (static_cast<int>(c) != lfe) whole_peak = std::max(whole_peak, x[c] * x[c]);
     }
     s.whole_power += (whole_peak > s.whole_power ? f.a_power_attack
@@ -248,8 +343,12 @@ void feq_footsteps_process(FeqFootsteps* footsteps, float* const* channels,
       for (uint32_t c = 0; c < count; ++c) {
         if (static_cast<int>(c) == lfe) continue;
         y[c] = run_band(f.band[b], s.band_history[b][c], x[c]);
-        const double heard = run_band(f.band[b], s.detect_history[b][c], y[c]);
         peak = std::max(peak, y[c] * y[c]);
+      }
+      feq_footsteps_detail::cue_residual(f, b, lfe, y);
+      for (uint32_t c = 0; c < count; ++c) {
+        if (static_cast<int>(c) == lfe) continue;
+        const double heard = run_band(f.band[b], s.detect_history[b][c], y[c]);
         heard_peak = std::max(heard_peak, heard * heard);
       }
       double& heard_power = s.band_power[b];
@@ -289,17 +388,68 @@ void feq_footsteps_process(FeqFootsteps* footsteps, float* const* channels,
                     (calm_peak - s.calm_power);
     s.calm_gain += s.calm_step;
     const double kc = s.calm_gain - 1.0;
+    double cue_delta[FEQ_FOOTSTEPS_MAX_CHANNELS] = {};
+    for (uint32_t c = 0; c < count; ++c) {
+      if (static_cast<int>(c) != lfe) cue_delta[c] = added[c] + kc * low[c];
+    }
+    const bool adding_cue = s.band_gain[0] > 1 || s.band_gain[1] > 1 || s.band_gain[2] > 1;
+    const double overlay = overlay_headroom(f, x, cue_delta, count, lfe,
+        s.overlay, adding_cue, f.cue_headroom_hold_frames,
+        adding_cue ? cue_ceiling : feq_footsteps_detail::kOverlayCeiling);
+    for (uint32_t c = 0; c < count; ++c) cue_delta[c] *= overlay;
+    for (int b = 0; b < FEQ_FOOTSTEPS_BANDS; ++b) {
+      applied[b] = std::max(applied[b], (s.band_gain[b] - 1.0) * overlay);
+    }
+    calm_applied = std::min(calm_applied, 1 + kc * overlay);
 
+    const bool dialogue_moving = !dialogue_idle(s.dialogue);
+    if (!dialogue_moving) s.dialogue_overlay = {};
+    if (!environment_moving && !dialogue_moving) {
+      // The lift alone, written as it always was: Isolate is its delta to
+      // the bit, not the output less the input.
+      for (uint32_t c = 0; c < count; ++c) {
+        if (static_cast<int>(c) == lfe) {
+          if (isolate) channels[c][i] = 0.0f;
+          continue;
+        }
+        const double delta = cue_delta[c];
+        channels[c][i] = static_cast<float>(isolate ? delta : x[c] + delta);
+      }
+      continue;
+    }
+    double out[FEQ_FOOTSTEPS_MAX_CHANNELS];
+    for (uint32_t c = 0; c < count; ++c) {
+      out[c] = x[c] + cue_delta[c];
+    }
+    if (dialogue_moving) {
+      double before[FEQ_FOOTSTEPS_MAX_CHANNELS];
+      for (uint32_t c = 0; c < count; ++c) before[c] = out[c];
+      dialogue_apply(f.dialogue_design, s.dialogue, out, count, lfe, centre);
+      double delta[FEQ_FOOTSTEPS_MAX_CHANNELS];
+      for (uint32_t c = 0; c < count; ++c) delta[c] = out[c] - before[c];
+      const double gain = overlay_headroom(f, before, delta, count, lfe,
+          s.dialogue_overlay, s.dialogue.lift_gain > 1, f.headroom_hold_frames);
+      for (uint32_t c = 0; c < count; ++c) out[c] = before[c] + gain * delta[c];
+      voice_applied = std::max(voice_applied, 1 + gain * (s.dialogue.lift_gain - 1));
+      duck_applied = std::min(duck_applied, 1 + gain * (s.dialogue.duck_gain - 1));
+    }
     for (uint32_t c = 0; c < count; ++c) {
       if (static_cast<int>(c) == lfe) {
         if (isolate) channels[c][i] = 0.0f;
         continue;
       }
-      const double delta = added[c] + kc * low[c];
-      channels[c][i] = static_cast<float>(isolate ? delta : x[c] + delta);
+      channels[c][i] =
+          static_cast<float>(isolate ? out[c] - input[c] : out[c]);
     }
   }
 
+  for (int b = 0; b < FEQ_FOOTSTEPS_BANDS; ++b) {
+    f.report.lift_db[b] = static_cast<float>(20.0 * std::log10(1.0 + applied[b]));
+  }
+  f.report.environment_db = static_cast<float>(20 * std::log10(environment_applied));
+  f.report.voice_db = static_cast<float>(20 * std::log10(voice_applied));
+  f.report.duck_db = static_cast<float>(20 * std::log10(duck_applied));
+  f.report.calm_db = static_cast<float>(20 * std::log10(calm_applied));
   if (!enabled && settled(s)) {
     // Every gain is at unity: the next block is the input, untouched, and
     // the next switch-on learns the bed afresh.
@@ -309,7 +459,10 @@ void feq_footsteps_process(FeqFootsteps* footsteps, float* const* channels,
 
 void feq_footsteps_transfer(FeqFootsteps* prepared, FeqFootsteps* previous) {
   if (prepared == nullptr || previous == nullptr || prepared == previous) return;
+  if (prepared->sample_rate != previous->sample_rate ||
+      prepared->channels != previous->channels) return;
   prepared->state = previous->state;
+  feq_footsteps_detail::transfer_bed_history(*prepared, *previous);
 }
 
 void feq_footsteps_reset(FeqFootsteps* footsteps) {

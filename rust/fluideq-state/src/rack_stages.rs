@@ -160,7 +160,7 @@ pub fn set_master_target(settings: &mut FeqChainSettings, target: &str) -> Resul
 
 /// The parameters the rack page may write, with the range each one accepts.
 /// The window draws the same ranges; the clamp here is what the engine gets.
-const PARAMETER_RANGES: [(&str, &str, f64, f64); 50] = [
+const PARAMETER_RANGES: [(&str, &str, f64, f64); 54] = [
     ("normalizer", "target_lufs", -35.0, -5.0),
     ("normalizer", "ceiling_db", -6.0, 0.0),
     ("denoise", "hiss_amount", 0.0, 1.0),
@@ -176,6 +176,10 @@ const PARAMETER_RANGES: [(&str, &str, f64, f64); 50] = [
     ("equaliser", "model_amount", 0.0, 1.0),
     ("footsteps", "lift", 0.0, 1.0),
     ("footsteps", "calm", 0.0, 1.0),
+    ("footsteps", "heavy", 0.0, 1.0),
+    ("footsteps", "environment", -1.0, 1.0),
+    ("footsteps", "voices", 0.0, 1.0),
+    ("footsteps", "duck", 0.0, 1.0),
     ("bass-punch", "attack", 0.0, 1.0),
     ("bass-punch", "sustain", 0.0, 1.0),
     ("bass-punch", "mix", 0.0, 1.0),
@@ -251,6 +255,10 @@ pub fn set_stage_parameter(
         ("equaliser", "model_amount") => settings.eq.model_amount = value,
         ("footsteps", "lift") => settings.footsteps.lift = value,
         ("footsteps", "calm") => settings.footsteps.calm = value,
+        ("footsteps", "heavy") => settings.footsteps.heavy = if value >= 0.5 { 1 } else { 0 },
+        ("footsteps", "environment") => settings.footsteps.environment = value,
+        ("footsteps", "voices") => settings.footsteps.voices = value,
+        ("footsteps", "duck") => settings.footsteps.duck = if value >= 0.5 { 1 } else { 0 },
         ("bass-punch", "attack") => settings.bass_punch.attack = value,
         ("bass-punch", "sustain") => settings.bass_punch.sustain = value,
         ("bass-punch", "mix") => settings.bass_punch.mix = value,
@@ -329,6 +337,10 @@ pub fn stage_parameter_value(
         ("equaliser", "model_amount") => Some(settings.eq.model_amount),
         ("footsteps", "lift") => Some(settings.footsteps.lift),
         ("footsteps", "calm") => Some(settings.footsteps.calm),
+        ("footsteps", "heavy") => Some(settings.footsteps.heavy as f64),
+        ("footsteps", "environment") => Some(settings.footsteps.environment),
+        ("footsteps", "voices") => Some(settings.footsteps.voices),
+        ("footsteps", "duck") => Some(settings.footsteps.duck as f64),
         ("bass-punch", "attack") => Some(settings.bass_punch.attack),
         ("bass-punch", "sustain") => Some(settings.bass_punch.sustain),
         ("bass-punch", "mix") => Some(settings.bass_punch.mix),

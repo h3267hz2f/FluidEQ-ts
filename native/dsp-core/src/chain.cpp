@@ -537,7 +537,7 @@ void feq_chain_configure(FeqChain* chain, const FeqChainSettings* settings) {
   // After the tone is in `settings`, which the De-esser hears its bands
   // through.
   chain_configure_deesser(chain);
-  feq_footsteps_configure(chain->footsteps, &chain->settings.footsteps);
+  chain_configure_footsteps(chain);
   feq_compander_configure(chain->compander, &chain->settings.compander);
   {
     FeqRoomSettings room{};
@@ -596,7 +596,7 @@ void feq_chain_set_lfe_channel(FeqChain* chain, int channel) {
           : -1;
   feq_room_set_layout(chain->room, chain->room_speakers, chain->lfe_channel);
   chain_apply_deesser_layout(chain);
-  feq_footsteps_set_lfe(chain->footsteps, chain->lfe_channel);
+  chain_apply_footsteps_layout(chain);
   feq_compander_set_lfe(chain->compander, chain->lfe_channel);
 }
 
@@ -618,6 +618,7 @@ void feq_chain_set_room_layout(FeqChain* chain, const int* speaker) {
   }
   feq_room_set_layout(chain->room, chain->room_speakers, chain->lfe_channel);
   chain_apply_deesser_layout(chain);
+  chain_apply_footsteps_layout(chain);
 }
 
 int feq_chain_room_active(const FeqChain* chain) {

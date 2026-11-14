@@ -44,6 +44,9 @@ pub const FEQ_CHAIN_ROOM_TRAILER: usize = 11;
 pub const FEQ_CHAIN_FOOTSTEPS_TAG: f64 = 1179602772.0; // 'FOOT'
 pub const FEQ_CHAIN_FOOTSTEPS_VERSION: f64 = 1.0;
 pub const FEQ_CHAIN_FOOTSTEPS_FIELDS: f64 = 4.0;
+pub const FEQ_CHAIN_GAME_VERSION: f64 = 2.0;
+pub const FEQ_CHAIN_GAME_FIELDS: f64 = 8.0;
+pub const FEQ_CHAIN_GAME_TRAILER: usize = 11;
 pub const FEQ_CHAIN_DYNAMICS_TAG: f64 = 1146703425.0; // 'DYNA'
 pub const FEQ_CHAIN_DYNAMICS_VERSION: f64 = 1.0;
 pub const FEQ_CHAIN_DYNAMICS_FIELDS: f64 = 20.0;
@@ -625,6 +628,10 @@ pub struct FeqFootstepsSettings {
     pub isolate: c_int,
     pub lift: c_double,
     pub calm: c_double,
+    pub heavy: c_int,
+    pub environment: c_double,
+    pub voices: c_double,
+    pub duck: c_int,
 }
 
 impl Default for FeqFootstepsSettings {
@@ -633,7 +640,11 @@ impl Default for FeqFootstepsSettings {
             enabled: 0,
             isolate: 0,
             lift: 0.85,
-            calm: 0.5,
+            calm: 0.0,
+            heavy: 0,
+            environment: 0.0,
+            voices: 0.0,
+            duck: 0,
         }
     }
 }
@@ -694,6 +705,11 @@ pub struct FeqFootstepsReport {
     pub bed_db: c_float,
     pub lift_db: [c_float; FEQ_FOOTSTEPS_BANDS],
     pub calm_db: c_float,
+    pub environment_db: c_float,
+    pub ambience: c_float,
+    pub voice: c_float,
+    pub voice_db: c_float,
+    pub duck_db: c_float,
 }
 
 #[repr(C)]
