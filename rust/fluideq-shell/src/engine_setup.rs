@@ -149,6 +149,54 @@ pub fn restart_audio(app: &AppHandle) -> Result<Value, String> {
     status(app)
 }
 
+fn activation_args(command: &str, guids: &[String]) -> Vec<String> {
+    let mut args = Vec::with_capacity(guids.len() + 1);
+    args.push(command.to_string());
+    args.extend(guids.iter().cloned());
+    args
+}
+
+/// Attach the engine to the named outputs on their own, without reinstalling
+/// or restarting Windows audio. This is the narrow move a Config card makes;
+/// `install` stays the whole-machine one.
+pub fn attach(app: &AppHandle, guids: &[String]) -> Result<Value, String> {
+    if guids.is_empty() {
+        return Err(String::from("no output was named"));
+    }
+    let setup = engine_setup_exe(app)?;
+    let args = activation_args("attach", guids);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = platform::run_elevated(&setup, &borrowed)?;
+    let json = parse_setup_json(&raw)?;
+    require_success(&json, "Engine attach")?;
+    status(app)
+}
+
+/// Put the named outputs back the way they were before FluidEQ was attached,
+/// leaving the rest of the machine and the registration alone.
+pub fn detach(app: &AppHandle, guids: &[String]) -> Result<Value, String> {
+    if guids.is_empty() {
+        return Err(String::from("no output was named"));
+    }
+    let setup = engine_setup_exe(app)?;
+    let args = activation_args("detach", guids);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = platform::run_elevated(&setup, &borrowed)?;
+    let json = parse_setup_json(&raw)?;
+    require_success(&json, "Engine detach")?;
+    status(app)
+}
+
+/// Wait until Windows audio has finished starting or stopping, then describe
+/// the result. No administrator rights: nothing is written.
+pub fn settle(app: &AppHandle) -> Result<Value, String> {
+    let setup = engine_setup_exe(app)?;
+    let raw = platform::run_unelevated(&setup, &["settle"])?;
+    let json = parse_setup_json(&raw)?;
+    require_success(&json, "Windows audio settle")?;
+    status(app)
+}
+
 #[cfg(target_os = "windows")]
 mod platform {
     use fluideq_state::apo_setup_commands::{
@@ -321,7 +369,23 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnosis_lines, parse_setup_json, require_success};
+    use super::{activation_args, diagnosis_lines, parse_setup_json, require_success};
+
+    #[test]
+    fn an_activation_names_its_command_and_every_output_in_order() {
+        let guids = vec![
+            String::from("{11111111-2222-3333-4444-555555555555}"),
+            String::from("{66666666-7777-8888-9999-000000000000}"),
+        ];
+        assert_eq!(
+            activation_args("detach", &guids),
+            vec![
+                "detach".to_string(),
+                guids[0].clone(),
+                guids[1].clone()
+            ]
+        );
+    }
 
     #[test]
     fn only_the_engine_verdicts_are_kept_and_the_tail_is_bounded() {

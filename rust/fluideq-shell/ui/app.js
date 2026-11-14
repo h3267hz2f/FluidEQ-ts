@@ -181,6 +181,7 @@ const els = {
   hotkeyState: document.getElementById('hotkey-state'),
   configEndpoints: document.getElementById('config-endpoints'),
   configEndpointsEmpty: document.getElementById('config-endpoints-empty'),
+  configSettle: document.getElementById('config-settle'),
   configNow: document.getElementById('config-now'),
   configProfiles: document.getElementById('config-profiles'),
   configProfilesEmpty: document.getElementById('config-profiles-empty'),
@@ -254,6 +255,7 @@ let bandCommitQueued = false;
 let engineStatus = null;
 let hostStatus = null;
 let engineInstallInFlight = false;
+let engineEndpointInFlight = false;
 let presetNames = [];
 let presetCatalog = [];
 let roomCatalog = [];
@@ -887,12 +889,22 @@ function configEndpointCard(endpoint, currentGuid) {
       : '',
   ];
   const current = Boolean(currentGuid) && endpoint.guid === currentGuid;
-  return configCard(
+  const card = configCard(
     endpoint.name || 'Unnamed output',
     facts,
     endpoint.guid,
     current
   );
+  if (endpoint.guid) {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'stat-toggle';
+    action.textContent = endpoint.attached ? 'Detach' : 'Attach';
+    action.disabled = engineEndpointInFlight;
+    action.addEventListener('click', () => toggleEndpointAttachment(endpoint));
+    card.append(action);
+  }
+  return card;
 }
 
 function configProfileCard(profile, isActive) {
@@ -2362,7 +2374,7 @@ window.addEventListener('resize', scheduleDraw);
 // window is open, or switch the default output outright; asking again when it
 // comes back to the front keeps the pill, the footer and the volume honest.
 window.addEventListener('focus', () => {
-  if (!invoke || engineInstallInFlight) return;
+  if (!invoke || engineInstallInFlight || engineEndpointInFlight) return;
   refreshEngineStatus();
   syncOutputVolume();
   refreshEngineHost();
@@ -2373,7 +2385,7 @@ window.addEventListener('focus', () => {
 // so the engine is read again on a slow beat. Quiet: a health check is not a
 // message.
 window.setInterval(() => {
-  if (document.hidden || !invoke || engineInstallInFlight) return;
+  if (document.hidden || !invoke || engineInstallInFlight || engineEndpointInFlight) return;
   refreshEngineStatus({ quiet: true });
 }, 20_000);
 
@@ -2621,6 +2633,51 @@ async function refreshEngineStatus({ quiet = false } = {}) {
     if (!quiet) showMessage(`Engine status: ${error}`);
   }
 }
+
+// Attaching one output is the narrow move: it rewrites that output's effect
+// list and nothing else, so a machine with several endpoints does not need a
+// full install to add the one that was missing. Windows builds the APO on the
+// output's next stream, which is why the advice after a successful attach is
+// to wait or restart rather than to install again.
+async function toggleEndpointAttachment(endpoint) {
+  if (!invoke || !endpoint?.guid || engineEndpointInFlight) return;
+  const attach = !endpoint.attached;
+  const name = endpoint.name || 'the output';
+  engineEndpointInFlight = true;
+  renderConfig();
+  try {
+    const status = await invoke(attach ? 'engine_attach' : 'engine_detach', {
+      guids: [endpoint.guid],
+    });
+    renderEngineStatus(status, true);
+    showMessage(
+      attach
+        ? `Attached ${name}; restart Windows audio if it never loads`
+        : `Detached ${name}`,
+      'ok'
+    );
+  } catch (error) {
+    showMessage(`Could not ${attach ? 'attach' : 'detach'} ${name}: ${error}`);
+  } finally {
+    engineEndpointInFlight = false;
+    renderConfig();
+  }
+}
+
+els.configSettle.addEventListener('click', async () => {
+  if (!invoke) return;
+  els.configSettle.disabled = true;
+  els.configSettle.textContent = 'Waiting…';
+  try {
+    renderEngineStatus(await invoke('engine_settle'), true);
+    showMessage('Windows audio has settled', 'ok');
+  } catch (error) {
+    showMessage(`Windows audio did not settle: ${error}`);
+  } finally {
+    els.configSettle.disabled = false;
+    els.configSettle.textContent = 'Wait for audio';
+  }
+});
 
 els.engineInstall.addEventListener('click', async () => {
   if (engineInstallInFlight) return;

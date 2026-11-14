@@ -684,18 +684,17 @@ fn set_output_volume(volume: f64) -> Result<f64, String> {
     audio_endpoint::set_master_volume(volume)
 }
 
-#[tauri::command]
-fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
-    let mut status = engine_setup::status(&app)?;
-    // The two ways the window can look right while the engine reads nothing:
-    // the config file could not be written, or the owner pipe never came up.
-    // Both are this process's failure, so they ride beside the helper's answer
-    // rather than being guessed at from it.
+/// The helper's answer plus this process's own failures: a config file that
+/// could not be written, or an owner pipe that never came up. Both ride beside
+/// the helper's answer rather than being guessed at from it, and so do the
+/// engine's last verdicts, where an output that was attached but never
+/// instantiated says why.
+fn enrich_engine_status(mut status: Value) -> Value {
     if let Some(object) = status.as_object_mut() {
         if let Some(error) = apo_bridge::last_error() {
             object.insert("bridgeError".to_string(), Value::String(error));
         }
-        // And the engine's own last verdicts, which are where an output that
+        // And the engine's own last verdicts, which is where an output that
         // was attached but never instantiated says why.
         object.insert(
             "engineLog".to_string(),
@@ -707,17 +706,37 @@ fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
             ),
         );
     }
-    Ok(status)
+    status
+}
+
+#[tauri::command]
+fn engine_status(app: tauri::AppHandle) -> Result<Value, String> {
+    engine_setup::status(&app).map(enrich_engine_status)
 }
 
 #[tauri::command]
 fn install_engine(app: tauri::AppHandle) -> Result<Value, String> {
-    engine_setup::install(&app)
+    engine_setup::install(&app).map(enrich_engine_status)
 }
 
 #[tauri::command]
 fn restart_audio(app: tauri::AppHandle) -> Result<Value, String> {
-    engine_setup::restart_audio(&app)
+    engine_setup::restart_audio(&app).map(enrich_engine_status)
+}
+
+#[tauri::command]
+fn engine_attach(app: tauri::AppHandle, guids: Vec<String>) -> Result<Value, String> {
+    engine_setup::attach(&app, &guids).map(enrich_engine_status)
+}
+
+#[tauri::command]
+fn engine_detach(app: tauri::AppHandle, guids: Vec<String>) -> Result<Value, String> {
+    engine_setup::detach(&app, &guids).map(enrich_engine_status)
+}
+
+#[tauri::command]
+fn engine_settle(app: tauri::AppHandle) -> Result<Value, String> {
+    engine_setup::settle(&app).map(enrich_engine_status)
 }
 
 #[tauri::command]
@@ -1232,6 +1251,9 @@ fn main() {
             engine_status,
             install_engine,
             restart_audio,
+            engine_attach,
+            engine_detach,
+            engine_settle,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,
