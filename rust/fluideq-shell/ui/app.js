@@ -201,6 +201,14 @@ const els = {
   roomPower: document.getElementById('room-power'),
   roomPresetChips: document.getElementById('room-preset-chips'),
   roomHeadChips: document.getElementById('room-head-chips'),
+  roomSpeakerChips: document.getElementById('room-speaker-chips'),
+  roomSpeakerMute: document.getElementById('room-speaker-mute'),
+  roomSpeakerAngle: document.getElementById('room-speaker-angle'),
+  roomSpeakerAngleVal: document.getElementById('room-speaker-angle-val'),
+  roomSpeakerDist: document.getElementById('room-speaker-dist'),
+  roomSpeakerDistVal: document.getElementById('room-speaker-dist-val'),
+  roomSpeakerLevel: document.getElementById('room-speaker-level'),
+  roomSpeakerLevelVal: document.getElementById('room-speaker-level-val'),
   roomSize: document.getElementById('room-size'),
   roomSizeVal: document.getElementById('room-size-val'),
   roomDist: document.getElementById('room-dist'),
@@ -259,6 +267,21 @@ let engineEndpointInFlight = false;
 let presetNames = [];
 let presetCatalog = [];
 let roomCatalog = [];
+let selectedRoomSpeaker = 0;
+
+// The wire's order: front left and right, centre, side pair, rear pair, then
+// the subwoofer, which has a level and a mute but no place on the ring.
+const ROOM_SPEAKERS = [
+  ['FL', 'Front left'],
+  ['FR', 'Front right'],
+  ['C', 'Centre'],
+  ['SL', 'Side left'],
+  ['SR', 'Side right'],
+  ['RL', 'Rear left'],
+  ['RR', 'Rear right'],
+  ['Sub', 'Subwoofer'],
+];
+const ROOM_SUBWOOFER = 7;
 let presetBusy = false;
 let startupEnabled = false;
 let startupBusy = false;
@@ -1391,6 +1414,21 @@ async function runRoomCommand(command, failure) {
   }
 }
 
+async function commitRoomSpeaker(parameter, value) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_room_speaker', {
+      speaker: selectedRoomSpeaker,
+      parameter,
+      value,
+    });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not move the speaker: ${error}`);
+  }
+}
+
 async function setRackParameter(stage, parameter, value) {
   if (!invoke) return;
   try {
@@ -1484,6 +1522,66 @@ function renderRoom() {
       return chip;
     })
   );
+
+  const speaker = Math.min(
+    Math.max(Math.trunc(numberOr(selectedRoomSpeaker, 0)), 0),
+    ROOM_SUBWOOFER
+  );
+  selectedRoomSpeaker = speaker;
+  const isSub = speaker === ROOM_SUBWOOFER;
+  const angles = Array.isArray(settings.angle_deg) ? settings.angle_deg : [];
+  const levels = Array.isArray(settings.level_db) ? settings.level_db : [];
+  const ownDistances = Array.isArray(settings.speaker_distance_m)
+    ? settings.speaker_distance_m
+    : [];
+  const mutes = Array.isArray(settings.mute) ? settings.mute : [];
+  els.roomSpeakerChips.replaceChildren(
+    ...ROOM_SPEAKERS.map(([label, detail], index) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `room-chip${index === speaker ? ' selected' : ''}`;
+      chip.setAttribute('aria-pressed', String(index === speaker));
+      const lbl = document.createElement('span');
+      lbl.className = 'chip-label';
+      lbl.textContent = label;
+      const dtl = document.createElement('span');
+      dtl.className = 'chip-detail';
+      dtl.textContent =
+        index === ROOM_SUBWOOFER ? detail : `${numberOr(angles[index], 0)}°`;
+      chip.append(lbl, dtl);
+      chip.addEventListener('click', () => {
+        selectedRoomSpeaker = index;
+        renderRoom();
+      });
+      return chip;
+    })
+  );
+
+  const muted = Boolean(mutes[speaker]);
+  els.roomSpeakerMute.textContent = muted ? 'Muted' : 'Off';
+  els.roomSpeakerMute.setAttribute('aria-pressed', String(muted));
+
+  const angle = numberOr(angles[speaker], 0);
+  setRangeValue(els.roomSpeakerAngle, angle);
+  setRangeFill(els.roomSpeakerAngle, ((angle + 180) / 360) * 100);
+  els.roomSpeakerAngleVal.textContent = `${Math.round(angle)}°`;
+  els.roomSpeakerAngle.disabled = isSub;
+
+  const ownDistance = numberOr(ownDistances[speaker], 0);
+  const distance = ownDistance > 0 ? ownDistance : numberOr(settings.distance_m, 1);
+  setRangeValue(els.roomSpeakerDist, distance);
+  setRangeFill(els.roomSpeakerDist, ((distance - 0.5) / 5.5) * 100);
+  els.roomSpeakerDistVal.textContent = `${distance.toFixed(1)} m`;
+  els.roomSpeakerDist.disabled = isSub;
+
+  const level = isSub
+    ? numberOr(settings.sub_db, 0)
+    : numberOr(levels[speaker], 0);
+  const levelMin = isSub ? -12 : -24;
+  els.roomSpeakerLevel.min = String(levelMin);
+  setRangeValue(els.roomSpeakerLevel, level);
+  setRangeFill(els.roomSpeakerLevel, ((level - levelMin) / (12 - levelMin)) * 100);
+  els.roomSpeakerLevelVal.textContent = `${formatDb(level)} dB`;
 
   const size = numberOr(settings.size_m, 6);
   setRangeValue(els.roomSize, size);
@@ -2309,6 +2407,39 @@ els.roomDecay.addEventListener('input', () => {
 els.roomDecay.addEventListener('change', () =>
   setRackParameter('room', 'ambience_decay_s', Number(els.roomDecay.value))
 );
+
+els.roomSpeakerAngle.addEventListener('input', () => {
+  const angle = Number(els.roomSpeakerAngle.value);
+  setRangeFill(els.roomSpeakerAngle, ((angle + 180) / 360) * 100);
+  els.roomSpeakerAngleVal.textContent = `${Math.round(angle)}°`;
+});
+els.roomSpeakerAngle.addEventListener('change', () =>
+  commitRoomSpeaker('angle_deg', Number(els.roomSpeakerAngle.value))
+);
+
+els.roomSpeakerDist.addEventListener('input', () => {
+  const distance = Number(els.roomSpeakerDist.value);
+  setRangeFill(els.roomSpeakerDist, ((distance - 0.5) / 5.5) * 100);
+  els.roomSpeakerDistVal.textContent = `${distance.toFixed(1)} m`;
+});
+els.roomSpeakerDist.addEventListener('change', () =>
+  commitRoomSpeaker('distance_m', Number(els.roomSpeakerDist.value))
+);
+
+els.roomSpeakerLevel.addEventListener('input', () => {
+  const level = Number(els.roomSpeakerLevel.value);
+  const min = Number(els.roomSpeakerLevel.min);
+  setRangeFill(els.roomSpeakerLevel, ((level - min) / (12 - min)) * 100);
+  els.roomSpeakerLevelVal.textContent = `${formatDb(level)} dB`;
+});
+els.roomSpeakerLevel.addEventListener('change', () =>
+  commitRoomSpeaker('level_db', Number(els.roomSpeakerLevel.value))
+);
+
+els.roomSpeakerMute.addEventListener('click', () => {
+  const mutes = snapshot.chain_settings?.room?.mute ?? [];
+  commitRoomSpeaker('mute', mutes[selectedRoomSpeaker] ? 0 : 1);
+});
 
 els.roomCrossover.addEventListener('input', () => {
   const crossover = Number(els.roomCrossover.value);

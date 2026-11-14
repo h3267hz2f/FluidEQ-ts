@@ -647,6 +647,21 @@ fn room_migrate_renderer(state: State<'_, ShellState>) -> Result<AppStateSnapsho
 }
 
 #[tauri::command]
+fn set_room_speaker(
+    state: State<'_, ShellState>,
+    speaker: u32,
+    parameter: String,
+    value: f64,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let snapshot = store.set_room_speaker(speaker, &parameter, value)?;
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_room_head(
     app: tauri::AppHandle,
     state: State<'_, ShellState>,
@@ -1244,6 +1259,7 @@ fn main() {
             set_room_preset,
             room_reset,
             room_migrate_renderer,
+            set_room_speaker,
             set_room_head,
             set_room_bass_management,
             get_output_volume,

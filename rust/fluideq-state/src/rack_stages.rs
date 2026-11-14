@@ -652,6 +652,52 @@ pub fn set_dynamics_preset(settings: &mut FeqChainSettings, id: &str) -> Result<
     Ok(())
 }
 
+/// The seven speakers around the listener, in the wire's order — front left,
+/// front right, centre, side left, side right, rear left, rear right — plus
+/// the subwoofer, which has no angle or distance and shares the mute list.
+pub const ROOM_SPEAKERS: u32 = 7;
+pub const ROOM_SUBWOOFER: u32 = 7;
+
+/// Move one speaker. `parameter` is `angle_deg`, `distance_m`, `level_db` or
+/// `mute`; the subwoofer accepts only `level_db` and `mute`. Every move makes
+/// the room `custom`, because a speaker's position is part of its shape.
+pub fn set_room_speaker(
+    settings: &mut FeqChainSettings,
+    speaker: u32,
+    parameter: &str,
+    value: f64,
+) -> Result<(), String> {
+    if speaker > ROOM_SUBWOOFER {
+        return Err(format!("there is no speaker number {speaker}"));
+    }
+    let index = speaker as usize;
+    let is_sub = speaker == ROOM_SUBWOOFER;
+    let (low, high) = match parameter {
+        "mute" => (0.0, 1.0),
+        "level_db" if is_sub => (-12.0, 12.0),
+        "level_db" => (-24.0, 12.0),
+        _ if is_sub => {
+            return Err(String::from(
+                "the subwoofer has a level and a mute, no angle or distance",
+            ))
+        }
+        "angle_deg" => (-180.0, 180.0),
+        "distance_m" => (0.5, 6.0),
+        _ => return Err(format!("there is no speaker control named \"{parameter}\"")),
+    };
+    let value = value.clamp(low, high);
+    match parameter {
+        "angle_deg" => settings.room.angle_deg[index] = value,
+        "distance_m" => settings.room.speaker_distance_m[index] = value,
+        "level_db" if is_sub => settings.room.sub_db = value,
+        "level_db" => settings.room.level_db[index] = value,
+        "mute" => settings.room.mute[index] = if value >= 0.5 { 1 } else { 0 },
+        _ => unreachable!("the range table above accepts every name that reaches here"),
+    }
+    settings.room.preset = crate::room_catalog::CUSTOM_PRESET;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,6 +820,30 @@ mod tests {
         assert_eq!(settings.master.loudness_target_lufs, -24.0);
         assert_eq!(settings.master.ceiling_db, -2.0);
         assert!(set_master_target(&mut settings, "vinyl").is_err());
+    }
+
+    #[test]
+    fn moving_a_speaker_marks_the_room_custom_and_clamps() {
+        let mut settings = FeqChainSettings::default();
+        settings.room.preset = 12;
+
+        set_room_speaker(&mut settings, 0, "angle_deg", -400.0).expect("angle");
+        assert_eq!(settings.room.angle_deg[0], -180.0);
+        set_room_speaker(&mut settings, 2, "distance_m", 0.0).expect("distance");
+        assert_eq!(settings.room.speaker_distance_m[2], 0.5);
+        set_room_speaker(&mut settings, 1, "level_db", 99.0).expect("level");
+        assert_eq!(settings.room.level_db[1], 12.0);
+        set_room_speaker(&mut settings, 3, "mute", 0.7).expect("mute");
+        assert_eq!(settings.room.mute[3], 1);
+        set_room_speaker(&mut settings, ROOM_SUBWOOFER, "level_db", -99.0).expect("sub level");
+        assert_eq!(settings.room.sub_db, -12.0);
+        set_room_speaker(&mut settings, ROOM_SUBWOOFER, "mute", 1.0).expect("sub mute");
+        assert_eq!(settings.room.mute[ROOM_SUBWOOFER as usize], 1);
+        assert_eq!(settings.room.preset, crate::room_catalog::CUSTOM_PRESET);
+
+        assert!(set_room_speaker(&mut settings, 8, "mute", 1.0).is_err());
+        assert!(set_room_speaker(&mut settings, ROOM_SUBWOOFER, "angle_deg", 0.0).is_err());
+        assert!(set_room_speaker(&mut settings, 0, "pan", 0.0).is_err());
     }
 
     #[test]

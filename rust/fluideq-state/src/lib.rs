@@ -769,6 +769,26 @@ impl AppStateStore {
         self.snapshot()
     }
 
+    /// A speaker's angle, distance, level or mute, and with them the room's
+    /// name: where a speaker stands is part of the room, not a preference on
+    /// top of it.
+    pub fn set_room_speaker(
+        &mut self,
+        speaker: u32,
+        parameter: &str,
+        value: f64,
+    ) -> Result<AppStateSnapshot, String> {
+        crate::rack_stages::set_room_speaker(
+            &mut self.chain_settings,
+            speaker,
+            parameter,
+            value,
+        )?;
+        self.revision += 1;
+        self.commit_chain_and_linear_phase_kernel();
+        Ok(self.snapshot())
+    }
+
     pub fn set_room_head_choice(
         &mut self,
         head: i32,
