@@ -458,14 +458,13 @@ pub fn decode_chain_settings_wire(values: &[f64]) -> Option<FeqChainSettings> {
         {
             return None;
         }
-        if words == FEQ_CHAIN_GAME_TRAILER {
-            if (values[at + 7] != 0.0 && values[at + 7] != 1.0)
+        if words == FEQ_CHAIN_GAME_TRAILER
+            && ((values[at + 7] != 0.0 && values[at + 7] != 1.0)
                 || !(-1.0..=1.0).contains(&values[at + 8])
                 || !(0.0..=1.0).contains(&values[at + 9])
-                || (values[at + 10] != 0.0 && values[at + 10] != 1.0)
-            {
-                return None;
-            }
+                || (values[at + 10] != 0.0 && values[at + 10] != 1.0))
+        {
+            return None;
         }
         footsteps_at = Some(at);
         at += words;
