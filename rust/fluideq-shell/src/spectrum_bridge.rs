@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 pub const SPECTRUM_SILENCE_FLOOR_DB: f32 = -96.0;
 pub const SILENCE_SLEEP_HOLD_FRAMES: u32 = 45;
 
+/// Whether the bridge should hand the window a frame at all. Warm and cold
+/// windows get none: a sleeping packet every fifth of a second is still a
+/// timer waking a WebView that is not on screen.
+pub fn should_emit_frame(residency: WindowResidencyMode) -> bool {
+    residency == WindowResidencyMode::Active
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoudnessReadingSnapshot {
     pub momentary_lufs: f32,
@@ -185,6 +192,13 @@ impl SpectrumBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_active_window_gets_frames() {
+        assert!(should_emit_frame(WindowResidencyMode::Active));
+        assert!(!should_emit_frame(WindowResidencyMode::MinimizedWarm));
+        assert!(!should_emit_frame(WindowResidencyMode::ColdStandby));
+    }
 
     #[test]
     fn an_inactive_window_sleeps_without_emitting_bins() {

@@ -959,6 +959,17 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    // Showing the window is waking it: restore the meters and the snapshot
+    // here as well, so a tray restore does not wait for a focus event that
+    // Windows may not send.
+    wake_from_residency(app);
+}
+
+/// A hidden window is a warm one: no meters, no spectrum frames, no redraws,
+/// while the chain and the WebView stay resident for an instant return.
+fn hide_to_warm(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let _ = window.hide();
+    minimize_to_warm(app);
 }
 
 /// Pushes spectrum bins and multi-stage telemetry to the window on a timer.
@@ -980,6 +991,15 @@ fn spawn_spectrum_loop(app: tauri::AppHandle) {
             let Ok(mut store) = state.store.lock() else {
                 break;
             };
+            // Warm and cold states emit nothing at all. A sleeping packet every
+            // fifth of a second was still a timer waking the WebView for a
+            // canvas that is not on screen.
+            if !spectrum_bridge::should_emit_frame(store.residency_mode()) {
+                drop(store);
+                drop(bridge);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
             let (momentary_lufs, true_peak_db) = {
                 let meters = store.native_meters_mut();
                 let loudness = meters.read_loudness();
@@ -1072,7 +1092,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
                     if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
+                        hide_to_warm(app, &window);
                     } else {
                         show_main_window(app);
                     }
@@ -1211,7 +1231,7 @@ fn main() {
                             };
                         if close_to_tray {
                             api.prevent_close();
-                            let _ = window_for_event.hide();
+                            hide_to_warm(&app_for_event, &window_for_event);
                         }
                     }
                     WindowEvent::Resized(_)
