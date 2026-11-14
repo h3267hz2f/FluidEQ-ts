@@ -407,6 +407,48 @@ int main() {
   check(live_values[0] == -3 && live_values[1] == -16 && live_values[2] == -14 &&
             live_values[3] == 4 && live_values[4] == -21,
         "live Normalizer input and measured output LUFS retain their five-word order");
+
+  /**
+   * Dynamics reports what it is doing now, not the largest thing it ever did.
+   *
+   * A band's gain can change every block; a latched maximum would show a
+   * compression stroke that finished seconds ago as one still in progress. So
+   * the second publish has to overwrite the first, and the read has to come
+   * back with the second set of numbers exactly.
+   */
+  FeqCompanderReport dynamics{};
+  dynamics.level_db[0] = -32.0f;
+  dynamics.level_db[1] = -41.5f;
+  dynamics.level_db[2] = -55.0f;
+  dynamics.gain_db[0] = 6.5f;
+  dynamics.gain_db[1] = -3.25f;
+  dynamics.gain_db[2] = 0.0f;
+  dynamics.active = 1;
+  feq_meters_publish_dynamics(meters, &dynamics);
+  FeqCompanderReport read_dynamics{};
+  feq_meters_read_dynamics(meters, &read_dynamics);
+  check(read_dynamics.active == 1,
+        "Dynamics reports that it is running");
+  check(read_dynamics.level_db[1] == -41.5f &&
+            read_dynamics.gain_db[0] == 6.5f &&
+            read_dynamics.gain_db[1] == -3.25f,
+        "and the band levels and applied gains travel unchanged");
+
+  dynamics.level_db[1] = -20.0f;
+  dynamics.gain_db[0] = 0.5f;
+  feq_meters_publish_dynamics(meters, &dynamics);
+  feq_meters_read_dynamics(meters, &read_dynamics);
+  check(read_dynamics.level_db[1] == -20.0f && read_dynamics.gain_db[0] == 0.5f,
+        "a later publish replaces it rather than holding the largest");
+
+  FeqCompanderReport resting{};
+  feq_meters_publish_dynamics(meters, &resting);
+  feq_meters_read_dynamics(meters, &read_dynamics);
+  check(read_dynamics.active == 0,
+        "a stage that is not running says so");
+  check(read_dynamics.level_db[0] < -119.0f && read_dynamics.gain_db[0] == 0.0f,
+        "and reads the floor at unity rather than its last numbers");
+
   feq_meters_destroy(meters);
 
   if (g_failures > 0) {

@@ -77,6 +77,177 @@ const dynamicsBandParameters = () =>
     ];
   });
 
+const dband = (upThresholdDb, upRatio, upMaxDb, downThresholdDb, downRatio) => ({
+  upThresholdDb,
+  upRatio,
+  upMaxDb,
+  downThresholdDb,
+  downRatio,
+});
+const offBand = dband(-40, 1, 0, -20, 1);
+
+/** Ported from `dynamicsPresets.ts`; ids must match `rack_stages.rs`. */
+export const DYNAMICS_PRESETS = [
+  {
+    id: 'gentle',
+    label: 'Gentle',
+    detail: 'Basic',
+    attackMs: 15,
+    releaseMs: 300,
+    makeupDb: 0.5,
+    bands: [
+      dband(-31, 1.4, 4, -19, 1.5),
+      dband(-27, 1.4, 4, -17, 1.5),
+      dband(-44, 1.4, 4, -30, 1.5),
+    ],
+  },
+  {
+    id: 'transparent',
+    label: 'Transparent',
+    detail: 'Basic',
+    attackMs: 30,
+    releaseMs: 400,
+    makeupDb: 0,
+    bands: [dband(-40, 1, 0, -18, 1.3), dband(-40, 1, 0, -16, 1.2), dband(-40, 1, 0, -28, 1.3)],
+  },
+  {
+    id: 'punch',
+    label: 'Punch',
+    detail: 'Basic',
+    attackMs: 40,
+    releaseMs: 100,
+    makeupDb: 1,
+    bands: [dband(-40, 1, 0, -24, 2.5), dband(-40, 1, 0, -20, 1.8), dband(-40, 1, 0, -32, 1.5)],
+  },
+  {
+    id: 'acoustic',
+    label: 'Acoustic',
+    detail: 'Basic',
+    attackMs: 35,
+    releaseMs: 450,
+    makeupDb: 0,
+    bands: [offBand, dband(-30, 1.3, 3, -20, 1), dband(-46, 1.4, 3, -20, 1)],
+  },
+  {
+    id: 'vocal',
+    label: 'Vocal',
+    detail: 'Scene',
+    attackMs: 12,
+    releaseMs: 220,
+    makeupDb: 0.5,
+    bands: [dband(-40, 1, 0, -25, 2), dband(-29, 1.6, 5, -18, 2), dband(-40, 1, 0, -32, 2)],
+  },
+  {
+    id: 'warm',
+    label: 'Warm',
+    detail: 'Basic',
+    attackMs: 18,
+    releaseMs: 350,
+    makeupDb: 0,
+    bands: [dband(-33, 1.5, 3, -20, 1), offBand, dband(-40, 1, 0, -35, 2.5)],
+  },
+  {
+    id: 'movie',
+    label: 'Movie',
+    detail: 'Scene',
+    attackMs: 10,
+    releaseMs: 300,
+    makeupDb: 0.8,
+    bands: [dband(-40, 1, 0, -22, 2.5), dband(-30, 1.7, 6, -16, 1.8), dband(-46, 1.3, 3, -29, 2)],
+  },
+  {
+    id: 'lateNight',
+    label: 'Late night',
+    detail: 'Scene',
+    attackMs: 5,
+    releaseMs: 200,
+    makeupDb: 2.3,
+    bands: [dband(-40, 1, 0, -24, 4), dband(-27, 2, 10, -19, 3), dband(-42, 1.6, 6, -30, 3)],
+  },
+  {
+    id: 'speech',
+    label: 'Speech',
+    detail: 'Scene',
+    attackMs: 8,
+    releaseMs: 250,
+    makeupDb: 1.6,
+    bands: [dband(-40, 1, 0, -26, 3), dband(-27, 1.8, 8, -17, 2.5), dband(-42, 1.5, 5, -28, 2)],
+  },
+  {
+    id: 'gameQuietLift',
+    label: 'Quiet lift',
+    detail: 'Gaming',
+    attackMs: 8,
+    releaseMs: 250,
+    makeupDb: 0,
+    bands: [offBand, dband(-26, 2, 10, -20, 1), dband(-38, 2, 10, -20, 1)],
+  },
+  {
+    id: 'gameBlastGuard',
+    label: 'Blast guard',
+    detail: 'Gaming',
+    attackMs: 1,
+    releaseMs: 120,
+    makeupDb: 1.6,
+    bands: [dband(-40, 1, 0, -24, 4), dband(-40, 1, 0, -18, 2.5), offBand],
+  },
+  {
+    id: 'gameNight',
+    label: 'Night',
+    detail: 'Gaming',
+    attackMs: 3,
+    releaseMs: 180,
+    makeupDb: 2.9,
+    bands: [dband(-28, 2, 10, -24, 6), dband(-25, 2, 12, -20, 6), dband(-38, 2, 12, -32, 6)],
+  },
+  {
+    id: 'gameLongSession',
+    label: 'Long session',
+    detail: 'Gaming',
+    attackMs: 40,
+    releaseMs: 600,
+    makeupDb: 1.1,
+    bands: [dband(-30, 1.5, 6, -24, 1.5), dband(-26, 1.5, 6, -20, 1.5), dband(-40, 1.5, 6, -32, 1.5)],
+  },
+  {
+    id: 'gameCompetitiveLight',
+    label: 'Competitive',
+    detail: 'Gaming',
+    attackMs: 3,
+    releaseMs: 150,
+    makeupDb: 0.6,
+    bands: [dband(-40, 1, 0, -24, 3), offBand, dband(-44, 1.6, 5, -20, 1)],
+  },
+];
+
+export function dynamicsPresetKey(settings) {
+  const compander = settings?.compander;
+  if (!compander || !Array.isArray(compander.bands)) return null;
+  const near = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-9;
+  for (const preset of DYNAMICS_PRESETS) {
+    if (
+      !near(compander.attack_ms, preset.attackMs) ||
+      !near(compander.release_ms, preset.releaseMs) ||
+      !near(compander.makeup_db, preset.makeupDb) ||
+      !near(compander.mix, 1)
+    ) {
+      continue;
+    }
+    const matches = preset.bands.every((want, index) => {
+      const have = compander.bands[index] ?? {};
+      return (
+        near(have.up_threshold_db, want.upThresholdDb) &&
+        near(have.up_ratio, want.upRatio) &&
+        near(have.up_max_db, want.upMaxDb) &&
+        near(have.down_threshold_db, want.downThresholdDb) &&
+        near(have.down_ratio, want.downRatio)
+      );
+    });
+    if (matches) return preset.id;
+  }
+  return null;
+}
+
 const normalizerMode = (setting) => {
   const mode = Number(setting?.mode) || 0;
   if (mode === 2) return 'Leveler';

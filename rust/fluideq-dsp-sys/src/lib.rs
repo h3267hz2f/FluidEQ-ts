@@ -280,7 +280,9 @@ pub enum FeqMeterStage {
     FEQ_METER_STAGE_EQ = 1,
     FEQ_METER_STAGE_MASTER = 2,
     FEQ_METER_STAGE_DENOISE = 3,
-    FEQ_METER_STAGE_COUNT = 4,
+    FEQ_METER_STAGE_DYNAMICS_IN = 4,
+    FEQ_METER_STAGE_DYNAMICS_OUT = 5,
+    FEQ_METER_STAGE_COUNT = 6,
 }
 
 #[repr(C)]
@@ -695,6 +697,16 @@ impl Default for FeqCompanderSettings {
             makeup_db: 0.0,
         }
     }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeqCompanderReport {
+    pub level_db: [c_float; FEQ_COMPANDER_BANDS],
+    pub lift_db: [c_float; FEQ_COMPANDER_BANDS],
+    pub hold_db: [c_float; FEQ_COMPANDER_BANDS],
+    pub gain_db: [c_float; FEQ_COMPANDER_BANDS],
+    pub active: u32,
 }
 
 #[repr(C)]
@@ -1733,6 +1745,7 @@ extern "C" {
     );
     pub fn feq_meters_read_deesser(meters: *mut FeqMeters, out: *mut FeqDeEsserReport);
     pub fn feq_meters_read_footsteps(meters: *mut FeqMeters, out: *mut FeqFootstepsReport);
+    pub fn feq_meters_read_dynamics(meters: *const FeqMeters, out: *mut FeqCompanderReport);
     pub fn feq_meters_read_exciter(
         meters: *mut FeqMeters,
         out_bands: *mut c_float,
@@ -1855,6 +1868,19 @@ impl NativeMetersHandle {
             }
         }
         FeqMasterTelemetry::default()
+    }
+
+    /// Reads Dynamics' current per-band level and applied gain, in dB.
+    pub fn read_dynamics(&mut self) -> FeqCompanderReport {
+        #[cfg(feature = "link-cpp-core")]
+        unsafe {
+            if !self.raw.is_null() {
+                let mut out = FeqCompanderReport::default();
+                feq_meters_read_dynamics(self.raw, &mut out as *mut FeqCompanderReport);
+                return out;
+            }
+        }
+        FeqCompanderReport::default()
     }
 
     #[cfg(feature = "link-cpp-core")]
@@ -2152,10 +2178,10 @@ impl Drop for NativeChainHandle {
 }
 
 // ============================================================================
-// 16. `dsp-host` Binary Wire Protocol (`wire.h`, `FEQ_WIRE_PROTOCOL_VERSION = 8`)
+// 16. `dsp-host` Binary Wire Protocol (`wire.h`, `FEQ_WIRE_PROTOCOL_VERSION = 9`)
 // ============================================================================
 
-pub const FEQ_WIRE_PROTOCOL_VERSION: u32 = 8;
+pub const FEQ_WIRE_PROTOCOL_VERSION: u32 = 9;
 pub const FEQ_DECK_HANDOFF: u32 = 2;
 pub const FEQ_DECK_SPARE: u32 = 3;
 
@@ -2346,6 +2372,16 @@ pub struct FeqWireAnalysisFrame {
     pub footsteps_lift_db: [f32; FEQ_FOOTSTEPS_BANDS],
     pub footsteps_calm_db: f32,
     pub footsteps_reserved_tail: f32,
+    pub game_environment_db: f32,
+    pub game_ambience: f32,
+    pub game_voice: f32,
+    pub game_voice_db: f32,
+    pub game_duck_db: f32,
+    pub game_reserved_tail: f32,
+    pub dynamics_tag: u32,
+    pub dynamics_active: u32,
+    pub dynamics_level_db: [f32; FEQ_COMPANDER_BANDS],
+    pub dynamics_gain_db: [f32; FEQ_COMPANDER_BANDS],
 }
 
 impl Default for FeqWireAnalysisFrame {
@@ -2381,6 +2417,21 @@ pub fn feq_wire_footsteps_report(frame: &mut FeqWireAnalysisFrame, report: &FeqF
         frame.footsteps_lift_db[band] = report.lift_db[band];
     }
     frame.footsteps_calm_db = report.calm_db;
+    frame.game_environment_db = report.environment_db;
+    frame.game_ambience = report.ambience;
+    frame.game_voice = report.voice;
+    frame.game_voice_db = report.voice_db;
+    frame.game_duck_db = report.duck_db;
+}
+
+/// Exact port of `feq_wire_dynamics_report` in `/native/dsp-host/src/wire.h`.
+pub fn feq_wire_dynamics_report(frame: &mut FeqWireAnalysisFrame, report: &FeqCompanderReport) {
+    frame.dynamics_tag = 0x314e_5944;
+    frame.dynamics_active = report.active;
+    for band in 0..FEQ_COMPANDER_BANDS {
+        frame.dynamics_level_db[band] = report.level_db[band];
+        frame.dynamics_gain_db[band] = report.gain_db[band];
+    }
 }
 
 /// Exact port of `feq_wire_room_report` in `/native/dsp-host/src/wire.h`.
@@ -2398,13 +2449,15 @@ const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_par
 const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_active) == 148);
 const _: () = assert!(std::mem::offset_of!(FeqWireTelemetryFrame, processing_endpoint) == 152);
 const _: () = assert!(std::mem::size_of::<FeqWireStatsFrame>() == 24);
-const _: () = assert!(std::mem::size_of::<FeqWireAnalysisFrame>() == 816);
+const _: () = assert!(std::mem::size_of::<FeqWireAnalysisFrame>() == 872);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, eq_detail_window) == 84);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, eq_detail_bins) == 88);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, reserved_tail) == 116);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, bass_reserved_tail) == 396);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, deesser_reduction_db) == 560);
 const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, footsteps_level_db) == 784);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, game_environment_db) == 816);
+const _: () = assert!(std::mem::offset_of!(FeqWireAnalysisFrame, dynamics_tag) == 840);
 
 #[cfg(all(test, feature = "link-cpp-core"))]
 mod cpp_ffi_tests {

@@ -23,6 +23,8 @@ import {
   NORMALIZER_MODES,
   normalizerModeKey,
   MASTER_TARGETS,
+  DYNAMICS_PRESETS,
+  dynamicsPresetKey,
 } from './views/rack/index.js';
 import { settings } from './views/settings/index.js';
 import { room, KEMAR_HEADS } from './views/room/index.js';
@@ -231,6 +233,7 @@ let selectedId = 4;
 let drag = null;
 let drawFrame = 0;
 let spectrumBins = null;
+let lastDynamics = null;
 let pendingVolume = null;
 let volumeFrame = 0;
 let volumeAvailable = false;
@@ -322,6 +325,8 @@ function scheduleDraw() {
 
 function updateMeters(packet) {
   const stage = packet.stage_meters ?? {};
+  lastDynamics = stage.dynamics ?? null;
+  paintDynamicsMeters();
   const loudness = stage.loudness ?? {};
   const integrated = Number(loudness.integrated_lufs);
   const shortTerm = Number(loudness.short_term_lufs);
@@ -1138,6 +1143,7 @@ function renderRackEditor(settings) {
     ...rackEditorExtras(stage, settings)
   );
   els.rackEditor.hidden = false;
+  paintDynamicsMeters();
 }
 
 function currentMasterTarget(settings) {
@@ -1221,6 +1227,17 @@ function rackEditorExtras(stage, settings) {
       extras.push(row);
     }
   }
+  if (stage.id === 'dynamics') {
+    extras.push(buildDynamicsMeters());
+    extras.push(
+      buildChipGroup(
+        'Dynamics profile',
+        DYNAMICS_PRESETS,
+        dynamicsPresetKey(settings),
+        setDynamicsPreset
+      )
+    );
+  }
   if (stage.id === 'normalizer') {
     extras.push(
       buildChipGroup(
@@ -1242,6 +1259,58 @@ function rackEditorExtras(stage, settings) {
     );
   }
   return extras;
+}
+
+// What Dynamics is doing right now, not what it is set to. The bars cannot
+// show it: the stage changes gain rather than adding harmonics, and the
+// spectrum behind it is the whole mix. So the report the engine publishes is
+// drawn as one line per band and repainted from the live telemetry.
+function buildDynamicsMeters() {
+  const group = document.createElement('div');
+  group.className = 'rack-extra';
+
+  const heading = document.createElement('p');
+  heading.className = 'eyebrow';
+  heading.textContent = 'Doing now';
+  group.append(heading);
+
+  for (const [label, index] of [
+    ['Low', 0],
+    ['Mid', 1],
+    ['High', 2],
+  ]) {
+    const row = document.createElement('div');
+    row.className = 'stat-row';
+    const name = document.createElement('span');
+    name.textContent = label;
+    const value = document.createElement('span');
+    value.dataset.dynamicsBand = String(index);
+    value.textContent = '—';
+    row.append(name, value);
+    group.append(row);
+  }
+  return group;
+}
+
+function paintDynamicsMeters() {
+  const nodes = document.querySelectorAll('[data-dynamics-band]');
+  if (nodes.length === 0) return;
+  const report = lastDynamics;
+  const active = Number(report?.active) > 0;
+  for (const node of nodes) {
+    if (!active) {
+      node.textContent = 'idle';
+      continue;
+    }
+    const band = Number(node.dataset.dynamicsBand);
+    const level = Number(report?.level_db?.[band]);
+    const gain = Number(report?.gain_db?.[band]);
+    const levelText = Number.isFinite(level) ? level.toFixed(1) : '—';
+    const gainText = Number.isFinite(gain)
+      ? `${gain >= 0 ? '+' : ''}${gain.toFixed(1)}`
+      : '0.0';
+    node.textContent = `${levelText} dB · ${gainText} dB`;
+  }
 }
 
 async function setRackIsolate(stage, enabled) {
@@ -1274,6 +1343,17 @@ async function setMasterTarget(target) {
     renderAll();
   } catch (error) {
     showMessage(`Could not apply the delivery target: ${error}`);
+  }
+}
+
+async function setDynamicsPreset(preset) {
+  if (!invoke) return;
+  try {
+    snapshot = await invoke('set_dynamics_preset', { preset });
+    clearMessage();
+    renderAll();
+  } catch (error) {
+    showMessage(`Could not apply the dynamics profile: ${error}`);
   }
 }
 

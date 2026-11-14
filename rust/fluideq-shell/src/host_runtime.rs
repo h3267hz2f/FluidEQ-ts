@@ -1605,7 +1605,7 @@ mod tests {
         let hs = build_handshake_frame("wasapi", "2.1.0", "rev-12");
         assert_eq!(hs.magic, FEQ_MAGIC_HANDSHAKE);
         assert_eq!(hs.protocol_version, FEQ_WIRE_PROTOCOL_VERSION);
-        assert_eq!(hs.analysis_frame_bytes, 816);
+        assert_eq!(hs.analysis_frame_bytes, 872);
     }
 
     #[test]

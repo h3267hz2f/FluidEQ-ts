@@ -44,7 +44,7 @@ pub const COMMAND_BYTES: usize = 32;
 pub const ACK_BYTES: usize = 32;
 pub const TELEMETRY_BYTES: usize = 192;
 pub const STATS_BYTES: usize = 24;
-pub const ANALYSIS_HEADER_BYTES: usize = 816;
+pub const ANALYSIS_HEADER_BYTES: usize = 872;
 
 /// The most restarts allowed inside [`RESTART_WINDOW`] before supervision gives up.
 pub const RESTART_BUDGET: usize = 3;

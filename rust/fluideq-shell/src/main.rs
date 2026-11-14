@@ -361,6 +361,22 @@ fn set_master_target(
 }
 
 #[tauri::command]
+fn set_dynamics_preset(
+    state: State<'_, ShellState>,
+    preset: String,
+) -> Result<AppStateSnapshot, String> {
+    let mut store = store_of(&state)?;
+    let mut settings = store.snapshot().chain_settings;
+    fluideq_state::rack_stages::set_dynamics_preset(&mut settings, &preset)?;
+    store.update_chain_settings(settings);
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_band_gain(
     state: State<'_, ShellState>,
     band_id: u32,
@@ -1166,6 +1182,7 @@ fn main() {
             set_stage_isolate,
             set_normalizer_mode,
             set_master_target,
+            set_dynamics_preset,
             set_band_gain,
             set_band_config,
             import_apo_curve,

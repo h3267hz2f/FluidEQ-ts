@@ -17,8 +17,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //!   and 7.1 Room speaker RMS).
 
 use fluideq_dsp_sys::{
-    FeqDeEsserReport, FeqFootstepsReport, FeqMasterTelemetry, FeqMeterStage, FeqRoomReport,
-    FEQ_METER_BINS,
+    FeqCompanderReport, FeqDeEsserReport, FeqFootstepsReport, FeqMasterTelemetry, FeqMeterStage,
+    FeqRoomReport, FEQ_METER_BINS,
 };
 use fluideq_state::{residency::WindowResidencyMode, AppStateStore};
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,7 @@ pub struct MultiStageMeterSnapshot {
     pub bass_punch_duck_db: f32,
     pub deesser: FeqDeEsserReport,
     pub footsteps: FeqFootstepsReport,
+    pub dynamics: FeqCompanderReport,
     pub room: FeqRoomReport,
 }
 
@@ -127,6 +128,7 @@ impl SpectrumBridge {
                 range_lu: lufs[3],
             };
             self.last_stage_meters.master_telemetry = meters.read_master_telemetry();
+            self.last_stage_meters.dynamics = meters.read_dynamics();
         }
         self.poll_frame(residency, audio_playing, peak_db)
     }

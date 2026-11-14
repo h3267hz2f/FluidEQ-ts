@@ -10,7 +10,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! 1:1 faithful port of:
 //! - `/native/system-apo/src/source_analysis.h` & `source_analysis.cpp` (`SourceAnalysis`, `parse_source_analysis`, `source_for_endpoint`)
 //! - `/native/system-apo/src/analysis_link.h` & `analysis_link.cpp` (`AnalysisLink`, 44-byte handshake, commands 1/2/3)
-//! - `/native/system-apo/src/analysis_snapshot.cpp` (`AnalysisLink::snapshot` 816-byte `FeqWireAnalysisFrame` + variable payload)
+//! - `/native/system-apo/src/analysis_snapshot.cpp` (`AnalysisLink::snapshot` 872-byte `FeqWireAnalysisFrame` + variable payload)
 //! - `/native/system-apo/src/status_file.h` & `status_file.cpp` (`write_status`, `output_carried_flag`, `output_block_timing`, `StatusShare`)
 //! - `/native/system-apo/src/log.h` & `log.cpp` (`Log`, `trace`, `trace_built`, `guid_text`, `to_utf8`, `file_name_of`, `decibels`, 1 MB cap)
 //! - `/native/system-apo/src/paths.h` & `paths.cpp` (`engine_root`, `config_dir`, `log_path`, `owner_pipe_name`, `parent_of`, `deepest_existing`, `is_directory`)
@@ -18,7 +18,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 use crate::apo_engine_runtime::{endpoint_config_name, format_engine_status_json, EngineStatusReport};
 use crate::apo_graph_and_guard::BlockTiming;
 use fluideq_dsp_sys::{
-    feq_wire_deesser_report, feq_wire_footsteps_report, feq_wire_room_report, FeqDeEsserReport,
+    feq_wire_deesser_report, feq_wire_dynamics_report, feq_wire_footsteps_report,
+    feq_wire_room_report, FeqCompanderReport, FeqDeEsserReport,
     FeqDenoiseReport, FeqFootstepsReport, FeqMasterTelemetry, FeqNoiseProfile, FeqRoomReport,
     FeqWireAnalysisFrame, FEQ_BASS_FORGE_BANDS, FEQ_DENOISE_MAX_HUM_PARTIALS,
     FEQ_DENOISE_PROFILE_BANDS, FEQ_DENOISE_PROFILE_WIRE, FEQ_MAGIC_ANALYSIS, FEQ_METER_BINS,
@@ -476,6 +477,7 @@ pub struct AnalysisSnapshotInputs {
     pub bass_punch_duck_db: f32,
     pub deesser: FeqDeEsserReport,
     pub footsteps: FeqFootstepsReport,
+    pub dynamics: FeqCompanderReport,
     /// Trailing 5-float live input meter tail (`[-120, -120, -120, 0, -120]` by default).
     pub live_input: [f32; 5],
 }
@@ -508,6 +510,7 @@ impl Default for AnalysisSnapshotInputs {
             bass_punch_duck_db: 0.0,
             deesser: FeqDeEsserReport::default(),
             footsteps: FeqFootstepsReport::default(),
+            dynamics: FeqCompanderReport::default(),
             live_input: [-120.0, -120.0, -120.0, 0.0, -120.0],
         }
     }
@@ -621,7 +624,7 @@ impl AnalysisLink {
     }
 
     /// Exact port of `AnalysisLink::snapshot()` in `/native/system-apo/src/analysis_snapshot.cpp`.
-    /// Assembles the 816-byte `FeqWireAnalysisFrame` header + variable-length spectra, scope,
+    /// Assembles the 872-byte `FeqWireAnalysisFrame` header + variable-length spectra, scope,
     /// dynamic band amounts/levels, EQ detail long window, and 5-float `live_input` tail.
     pub fn snapshot(&mut self, inputs: &AnalysisSnapshotInputs) -> Vec<u8> {
         let mut frame = FeqWireAnalysisFrame::default();
@@ -723,6 +726,7 @@ impl AnalysisLink {
         frame.bass_punch_duck_db = inputs.bass_punch_duck_db;
         feq_wire_deesser_report(&mut frame, &inputs.deesser);
         feq_wire_footsteps_report(&mut frame, &inputs.footsteps);
+        feq_wire_dynamics_report(&mut frame, &inputs.dynamics);
 
         let header_bytes = std::mem::size_of::<FeqWireAnalysisFrame>();
         let spectrum_bytes = std::mem::size_of::<f32>() * spectra_concat.len();
@@ -1349,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn analysis_link_builds_hello_preamp_stats_and_816_byte_snapshot_frames() {
+    fn analysis_link_builds_hello_preamp_stats_and_872_byte_snapshot_frames() {
         let mut link = AnalysisLink::new("{11111111-2222-3333-4444-555555555555}", 48_000, 2);
         let hello = link.build_hello_packet();
         assert_eq!(&hello[..38], b"{11111111-2222-3333-4444-555555555555}");
@@ -1384,13 +1388,13 @@ mod tests {
         );
         assert!(link.meters_enabled());
 
-        // Active callback with EQ spectrum and detail window returns 816-byte header + payload
+        // Active callback with EQ spectrum and detail window returns 872-byte header + payload
         link.active.store(true, Ordering::Release);
         let mut inputs = AnalysisSnapshotInputs::default();
         inputs.stage_spectra[1] = Some(vec![-30.0f32; FEQ_METER_BINS]);
         inputs.eq_detail = Some(vec![-32.0f32; FEQ_METER_DETAIL_BINS]);
         let active_resp = link.handle_command(1, 1234, 0, 0, Some(&inputs));
-        let expected_payload = 816
+        let expected_payload = 872
             + FEQ_METER_BINS * 4
             + FEQ_METER_DETAIL_BINS * 4
             + 5 * 4;

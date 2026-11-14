@@ -1586,9 +1586,9 @@ pub fn compute_analysis_frame_payload_bytes(
 }
 
 /// Validates the header magic and total byte size of a single-write `FEQN` analysis packet
-/// (`816` header bytes + trailing spectrum, scope, band amounts/levels, and EQ long-window floats).
+/// (`872` header bytes + trailing spectrum, scope, band amounts/levels, and EQ long-window floats).
 pub fn validate_analysis_packet_layout(packet: &[u8]) -> Option<(u32, u32, usize)> {
-    const HEADER_BYTES: usize = 816;
+    const HEADER_BYTES: usize = 872;
     if packet.len() < HEADER_BYTES {
         return None;
     }
@@ -3048,12 +3048,12 @@ mod tests {
     #[test]
     fn analysis_packet_layout_reads_eq_detail_bins_at_offset_88_and_helpers_match_native() {
         // 1. Verify `validate_analysis_packet_layout` reads `eq_detail_bins` at byte offset 88 (`wire.h` line 659)
-        let mut packet = vec![0u8; 816 + 2048 * 4];
+        let mut packet = vec![0u8; 872 + 2048 * 4];
         packet[0..4].copy_from_slice(&FEQ_MAGIC_ANALYSIS.to_le_bytes());
         packet[4..8].copy_from_slice(&17u32.to_le_bytes()); // sequence = 17
         packet[88..92].copy_from_slice(&2048u32.to_le_bytes()); // eq_detail_bins = 2048 at offset 88
         let (seq, mask, payload_bytes) =
-            validate_analysis_packet_layout(&packet).expect("valid 816-byte header + detail bins");
+            validate_analysis_packet_layout(&packet).expect("valid 872-byte header + detail bins");
         assert_eq!(seq, 17);
         assert_eq!(mask, 0);
         assert_eq!(payload_bytes, 2048 * 4);

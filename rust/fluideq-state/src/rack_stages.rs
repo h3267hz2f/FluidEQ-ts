@@ -12,7 +12,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //! The normalizer has no `enabled` field — its mode *is* the switch — so the
 //! two shapes meet here rather than in the window.
 
-use fluideq_dsp_sys::{FeqChainSettings, FeqNormalizerMode};
+use fluideq_dsp_sys::{
+    FeqChainSettings, FeqCompanderBand, FeqNormalizerMode, FEQ_COMPANDER_BANDS,
+};
 use std::os::raw::c_int;
 
 /// The stages the rack page shows, in the order the chain runs them.
@@ -407,6 +409,235 @@ pub fn stage_enabled(settings: &FeqChainSettings, stage: &str) -> Option<bool> {
     }
 }
 
+/// One Dynamics profile, as the rack page's chips show it.
+///
+/// A profile owns the sound, never whether the stage runs: applying one to a
+/// switched-off stage leaves it switched off, so auditioning the chips cannot
+/// silently put a compressor into a chain that did not have one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynamicsPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub group: &'static str,
+    pub bands: [FeqCompanderBand; FEQ_COMPANDER_BANDS],
+    pub attack_ms: f64,
+    pub release_ms: f64,
+    pub makeup_db: f64,
+}
+
+const fn band(
+    up_threshold_db: f64,
+    up_ratio: f64,
+    up_max_db: f64,
+    down_threshold_db: f64,
+    down_ratio: f64,
+) -> FeqCompanderBand {
+    FeqCompanderBand {
+        up_threshold_db,
+        up_ratio,
+        up_max_db,
+        down_threshold_db,
+        down_ratio,
+    }
+}
+
+/// A band that does nothing.
+const OFF_BAND: FeqCompanderBand = band(-40.0, 1.0, 0.0, -20.0, 1.0);
+/// Lift under `threshold` by `ratio`, at most `max` dB.
+const fn up(threshold: f64, ratio: f64, max: f64) -> FeqCompanderBand {
+    band(threshold, ratio, max, -20.0, 1.0)
+}
+/// Hold over `threshold` by `ratio`.
+const fn down(threshold: f64, ratio: f64) -> FeqCompanderBand {
+    band(-40.0, 1.0, 0.0, threshold, ratio)
+}
+/// Both at once, for the profiles that do both.
+const fn up_down(
+    up_threshold: f64,
+    up_ratio: f64,
+    up_max: f64,
+    down_threshold: f64,
+    down_ratio: f64,
+) -> FeqCompanderBand {
+    band(up_threshold, up_ratio, up_max, down_threshold, down_ratio)
+}
+
+/// The presets the rack page offers, ported from upstream's
+/// `dynamicsPresets.ts` without the localisation keys (the labels here are
+/// the English the rest of this window is written in).
+pub const DYNAMICS_PRESETS: [DynamicsPreset; 14] = [
+    DynamicsPreset {
+        id: "gentle",
+        label: "Gentle",
+        group: "basic",
+        bands: [
+            up_down(-31.0, 1.4, 4.0, -19.0, 1.5),
+            up_down(-27.0, 1.4, 4.0, -17.0, 1.5),
+            up_down(-44.0, 1.4, 4.0, -30.0, 1.5),
+        ],
+        attack_ms: 15.0,
+        release_ms: 300.0,
+        makeup_db: 0.5,
+    },
+    DynamicsPreset {
+        id: "transparent",
+        label: "Transparent",
+        group: "basic",
+        bands: [down(-18.0, 1.3), down(-16.0, 1.2), down(-28.0, 1.3)],
+        attack_ms: 30.0,
+        release_ms: 400.0,
+        makeup_db: 0.0,
+    },
+    DynamicsPreset {
+        id: "punch",
+        label: "Punch",
+        group: "basic",
+        bands: [down(-24.0, 2.5), down(-20.0, 1.8), down(-32.0, 1.5)],
+        attack_ms: 40.0,
+        release_ms: 100.0,
+        makeup_db: 1.0,
+    },
+    DynamicsPreset {
+        id: "acoustic",
+        label: "Acoustic",
+        group: "basic",
+        bands: [OFF_BAND, up(-30.0, 1.3, 3.0), up(-46.0, 1.4, 3.0)],
+        attack_ms: 35.0,
+        release_ms: 450.0,
+        makeup_db: 0.0,
+    },
+    DynamicsPreset {
+        id: "vocal",
+        label: "Vocal",
+        group: "scene",
+        bands: [
+            down(-25.0, 2.0),
+            up_down(-29.0, 1.6, 5.0, -18.0, 2.0),
+            down(-32.0, 2.0),
+        ],
+        attack_ms: 12.0,
+        release_ms: 220.0,
+        makeup_db: 0.5,
+    },
+    DynamicsPreset {
+        id: "warm",
+        label: "Warm",
+        group: "basic",
+        bands: [up(-33.0, 1.5, 3.0), OFF_BAND, down(-35.0, 2.5)],
+        attack_ms: 18.0,
+        release_ms: 350.0,
+        makeup_db: 0.0,
+    },
+    DynamicsPreset {
+        id: "movie",
+        label: "Movie",
+        group: "scene",
+        bands: [
+            down(-22.0, 2.5),
+            up_down(-30.0, 1.7, 6.0, -16.0, 1.8),
+            up_down(-46.0, 1.3, 3.0, -29.0, 2.0),
+        ],
+        attack_ms: 10.0,
+        release_ms: 300.0,
+        makeup_db: 0.8,
+    },
+    DynamicsPreset {
+        id: "lateNight",
+        label: "Late night",
+        group: "scene",
+        bands: [
+            down(-24.0, 4.0),
+            up_down(-27.0, 2.0, 10.0, -19.0, 3.0),
+            up_down(-42.0, 1.6, 6.0, -30.0, 3.0),
+        ],
+        attack_ms: 5.0,
+        release_ms: 200.0,
+        makeup_db: 2.3,
+    },
+    DynamicsPreset {
+        id: "speech",
+        label: "Speech",
+        group: "scene",
+        bands: [
+            down(-26.0, 3.0),
+            up_down(-27.0, 1.8, 8.0, -17.0, 2.5),
+            up_down(-42.0, 1.5, 5.0, -28.0, 2.0),
+        ],
+        attack_ms: 8.0,
+        release_ms: 250.0,
+        makeup_db: 1.6,
+    },
+    DynamicsPreset {
+        id: "gameQuietLift",
+        label: "Quiet lift",
+        group: "gaming",
+        bands: [OFF_BAND, up(-26.0, 2.0, 10.0), up(-38.0, 2.0, 10.0)],
+        attack_ms: 8.0,
+        release_ms: 250.0,
+        makeup_db: 0.0,
+    },
+    DynamicsPreset {
+        id: "gameBlastGuard",
+        label: "Blast guard",
+        group: "gaming",
+        bands: [down(-24.0, 4.0), down(-18.0, 2.5), OFF_BAND],
+        attack_ms: 1.0,
+        release_ms: 120.0,
+        makeup_db: 1.6,
+    },
+    DynamicsPreset {
+        id: "gameNight",
+        label: "Night",
+        group: "gaming",
+        bands: [
+            up_down(-28.0, 2.0, 10.0, -24.0, 6.0),
+            up_down(-25.0, 2.0, 12.0, -20.0, 6.0),
+            up_down(-38.0, 2.0, 12.0, -32.0, 6.0),
+        ],
+        attack_ms: 3.0,
+        release_ms: 180.0,
+        makeup_db: 2.9,
+    },
+    DynamicsPreset {
+        id: "gameLongSession",
+        label: "Long session",
+        group: "gaming",
+        bands: [
+            up_down(-30.0, 1.5, 6.0, -24.0, 1.5),
+            up_down(-26.0, 1.5, 6.0, -20.0, 1.5),
+            up_down(-40.0, 1.5, 6.0, -32.0, 1.5),
+        ],
+        attack_ms: 40.0,
+        release_ms: 600.0,
+        makeup_db: 1.1,
+    },
+    DynamicsPreset {
+        id: "gameCompetitiveLight",
+        label: "Competitive",
+        group: "gaming",
+        bands: [down(-24.0, 3.0), OFF_BAND, up(-44.0, 1.6, 5.0)],
+        attack_ms: 3.0,
+        release_ms: 150.0,
+        makeup_db: 0.6,
+    },
+];
+
+pub fn dynamics_preset(id: &str) -> Option<&'static DynamicsPreset> {
+    DYNAMICS_PRESETS.iter().find(|preset| preset.id == id.trim())
+}
+
+/// Adopt a profile's sound, leaving the stage's switch exactly as it was.
+pub fn set_dynamics_preset(settings: &mut FeqChainSettings, id: &str) -> Result<(), String> {
+    let preset = dynamics_preset(id)
+        .ok_or_else(|| format!("there is no dynamics profile named \"{id}\""))?;
+    settings.compander.bands = preset.bands;
+    settings.compander.attack_ms = preset.attack_ms;
+    settings.compander.release_ms = preset.release_ms;
+    settings.compander.mix = 1.0;
+    settings.compander.makeup_db = preset.makeup_db;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +760,30 @@ mod tests {
         assert_eq!(settings.master.loudness_target_lufs, -24.0);
         assert_eq!(settings.master.ceiling_db, -2.0);
         assert!(set_master_target(&mut settings, "vinyl").is_err());
+    }
+
+    #[test]
+    fn every_dynamics_profile_applies_without_touching_the_switch() {
+        for preset in DYNAMICS_PRESETS {
+            let mut settings = FeqChainSettings::default();
+            settings.compander.enabled = 1;
+            set_dynamics_preset(&mut settings, preset.id).expect(preset.id);
+            assert_eq!(settings.compander.bands, preset.bands, "{}", preset.id);
+            assert_eq!(settings.compander.attack_ms, preset.attack_ms, "{}", preset.id);
+            assert_eq!(settings.compander.release_ms, preset.release_ms, "{}", preset.id);
+            assert_eq!(
+                settings.compander.makeup_db,
+                preset.makeup_db,
+                "{}",
+                preset.id
+            );
+            assert_eq!(settings.compander.mix, 1.0, "{}", preset.id);
+            assert_eq!(settings.compander.enabled, 1, "{}", preset.id);
+
+            settings.compander.enabled = 0;
+            set_dynamics_preset(&mut settings, preset.id).expect(preset.id);
+            assert_eq!(settings.compander.enabled, 0, "{}", preset.id);
+        }
+        assert!(set_dynamics_preset(&mut FeqChainSettings::default(), "loud").is_err());
     }
 }
