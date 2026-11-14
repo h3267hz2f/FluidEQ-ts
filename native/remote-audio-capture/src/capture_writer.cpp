@@ -8,13 +8,6 @@ CaptureWriter::CaptureWriter(HANDLE output, HANDLE parent,
       sample_rate_(sample_rate), channels_(channels) {
   if (output == nullptr || output == INVALID_HANDLE_VALUE ||
       parent == nullptr || parent == INVALID_HANDLE_VALUE) { return; }
-  // Windows says which kind of handle this is; guessing from the caller's
-  // transport would fail for every pipe the caller opened itself.
-  FILE_MODE_INFO mode{};
-  if (GetFileInformationByHandleEx(output_, FileModeInfo, &mode,
-                                   sizeof(mode))) {
-    overlapped_ = mode.SynchronousIo == FALSE;
-  }
   available_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   completed_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -80,6 +73,13 @@ bool CaptureWriter::write(const void* data, std::uint32_t bytes) noexcept {
     ResetEvent(completed_);
     DWORD written = 0;
     const BOOL sent = WriteFile(output_, cursor, bytes, &written, &operation);
+    if (!sent && GetLastError() == ERROR_INVALID_PARAMETER) {
+      // A synchronous handle (CreatePipe, Rust's Stdio::piped) refuses the
+      // OVERLAPPED before issuing anything, so the same bytes go out again
+      // without one, from then on.
+      overlapped_ = false;
+      continue;
+    }
     if (!sent && GetLastError() != ERROR_IO_PENDING) { return false; }
     if (!sent) {
       const HANDLE waits[]{stop_, parent_, completed_};
