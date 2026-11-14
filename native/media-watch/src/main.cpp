@@ -570,6 +570,7 @@ class Watcher {
     return std::nullopt;
   }
 
+ public:
   /**
    * One of the four moves the transport bar offers, applied to the session
    * the bar names. Choosing by the same rule as the reading is what keeps a
@@ -615,6 +616,7 @@ class Watcher {
     }
   }
 
+ private:
   /**
    * The cover follows the song it was read for. A player publishes the title
    * a moment before the picture, so a song with no picture yet is read again
