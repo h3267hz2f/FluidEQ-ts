@@ -42,6 +42,7 @@ pub mod remote_playback;
 pub mod residency;
 pub mod room_catalog;
 pub mod room_heads;
+pub mod share_audio;
 pub mod wav_ir;
 
 use biquad::{biquad_coefficients_designed, compute_auto_preamp_db, EqBandSpec};

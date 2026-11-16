@@ -14,13 +14,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 pub mod apo_bridge;
 pub mod audio_endpoint;
+pub mod capture_pipe;
 pub mod engine_host;
 pub mod engine_setup;
 pub mod game_presets;
 pub mod host_runtime;
+pub mod lan_share;
 pub mod media_watch;
 pub mod hotkeys;
 pub mod output_watch;
+pub mod playback_host;
 pub mod second_output;
 pub mod spectrum_bridge;
 pub mod startup;
@@ -846,13 +849,16 @@ fn second_output_status(
 #[tauri::command]
 fn second_output_start(
     app: tauri::AppHandle,
+    playback: State<'_, playback_host::PlaybackHostState>,
     state: State<'_, second_output::SecondOutputState>,
     endpoint: String,
     name: Option<String>,
     volume: Option<f64>,
 ) -> Result<second_output::SecondOutputSnapshot, String> {
+    let host = playback.ensure(&app)?;
     state.start(
         &app,
+        &host,
         &endpoint,
         name.as_deref().unwrap_or("Second output"),
         volume.unwrap_or(0.8),
@@ -875,6 +881,67 @@ fn second_output_volume(
     volume: f64,
 ) -> Result<second_output::SecondOutputSnapshot, String> {
     state.set_volume(volume)
+}
+
+/// Whether this computer is sharing, joining, or neither.
+#[tauri::command]
+fn lan_share_status(
+    app: tauri::AppHandle,
+    state: State<'_, lan_share::LanShareState>,
+) -> lan_share::LanShareSnapshot {
+    let mut snapshot = state.snapshot();
+    snapshot.available = lan_share::helpers_available(&app);
+    snapshot
+}
+
+/// Starts sharing this computer's system mix and shows the code to type.
+#[tauri::command]
+fn lan_share_host_start(
+    app: tauri::AppHandle,
+    playback: State<'_, playback_host::PlaybackHostState>,
+    state: State<'_, lan_share::LanShareState>,
+) -> Result<lan_share::LanShareSnapshot, String> {
+    lan_share::start_host(&app, &playback, &state)
+}
+
+#[tauri::command]
+fn lan_share_host_stop(
+    app: tauri::AppHandle,
+    state: State<'_, lan_share::LanShareState>,
+) -> Result<lan_share::LanShareSnapshot, String> {
+    lan_share::stop_host(&app, &state)
+}
+
+/// Looks for the computer that answers this code, on this network only.
+#[tauri::command]
+fn lan_share_scan(
+    app: tauri::AppHandle,
+    state: State<'_, lan_share::LanShareState>,
+    code: String,
+) -> Result<Vec<lan_share::FoundHost>, String> {
+    lan_share::scan(&app, &state, &code)
+}
+
+/// Joins the host at `address` and plays what it shares on `endpoint`.
+#[tauri::command]
+fn lan_share_join(
+    app: tauri::AppHandle,
+    playback: State<'_, playback_host::PlaybackHostState>,
+    state: State<'_, lan_share::LanShareState>,
+    code: String,
+    address: String,
+    endpoint: String,
+) -> Result<lan_share::LanShareSnapshot, String> {
+    lan_share::join(&app, &playback, &state, &code, &address, &endpoint)
+}
+
+#[tauri::command]
+fn lan_share_leave(
+    app: tauri::AppHandle,
+    playback: State<'_, playback_host::PlaybackHostState>,
+    state: State<'_, lan_share::LanShareState>,
+) -> Result<lan_share::LanShareSnapshot, String> {
+    lan_share::leave(&app, &playback, &state)
 }
 
 #[tauri::command]
@@ -1330,6 +1397,8 @@ fn main() {
             });
             app.manage(media_watch::MediaWatchState::start(app.handle()));
             app.manage(second_output::SecondOutputState::new());
+            app.manage(playback_host::PlaybackHostState::new());
+            app.manage(lan_share::LanShareState::new());
             setup_tray(app)?;
             hotkeys::spawn(app.handle().clone(), toggle_bypass_hotkey);
             output_watch::spawn(app.handle().clone(), follow_default_output_now);
@@ -1425,6 +1494,12 @@ fn main() {
             second_output_start,
             second_output_stop,
             second_output_volume,
+            lan_share_status,
+            lan_share_host_start,
+            lan_share_host_stop,
+            lan_share_scan,
+            lan_share_join,
+            lan_share_leave,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,

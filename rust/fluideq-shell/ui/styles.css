@@ -937,6 +937,76 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
+/* The code a host reads aloud, and where a guest types it. */
+.share-code {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+}
+
+.share-code[hidden] {
+  display: none;
+}
+
+.share-code-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.share-code-value {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  font-variant-numeric: tabular-nums;
+}
+
+.share-code-hint {
+  color: var(--muted-soft);
+  font-size: 10.5px;
+}
+
+.share-code-input {
+  width: 128px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+.share-code-input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+.share-code-input::placeholder {
+  color: var(--muted-soft);
+  letter-spacing: 0.12em;
+}
+
+.share-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .games-card {
   max-width: 780px;
 }

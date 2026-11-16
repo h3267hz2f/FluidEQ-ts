@@ -197,6 +197,15 @@ const els = {
   shareVolumeValue: document.getElementById('share-volume-value'),
   shareState: document.getElementById('share-state'),
   shareUnavailable: document.getElementById('share-unavailable'),
+  lanHostToggle: document.getElementById('lan-host-toggle'),
+  lanCodeBlock: document.getElementById('lan-code-block'),
+  lanCode: document.getElementById('lan-code'),
+  lanCodeInput: document.getElementById('lan-code-input'),
+  lanEndpoint: document.getElementById('lan-endpoint'),
+  lanJoin: document.getElementById('lan-join'),
+  lanLeave: document.getElementById('lan-leave'),
+  lanShareState: document.getElementById('lan-share-state'),
+  lanShareUnavailable: document.getElementById('lan-share-unavailable'),
   gamesList: document.getElementById('games-list'),
   gamesEmpty: document.getElementById('games-empty'),
   gamesUnavailable: document.getElementById('games-unavailable'),
@@ -287,6 +296,8 @@ let engineEndpointInFlight = false;
 let secondOutput = null;
 let secondOutputInFlight = false;
 let shareVolumeDragging = false;
+let lanShare = null;
+let lanShareInFlight = false;
 let presetNames = [];
 let presetCatalog = [];
 let roomCatalog = [];
@@ -1152,6 +1163,160 @@ async function toggleSecondOutput() {
   }
 }
 
+function lanEndpoints() {
+  const endpoints = Array.isArray(engineStatus?.endpoints)
+    ? engineStatus.endpoints
+    : [];
+  return endpoints.filter((endpoint) => endpoint?.guid);
+}
+
+function pairingCode(value) {
+  return String(value || '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase();
+}
+
+function renderPairingCode(code) {
+  const clean = pairingCode(code);
+  return clean.length === 8 ? `${clean.slice(0, 4)} ${clean.slice(4)}` : '---- ----';
+}
+
+function renderLanShare() {
+  const endpoints = lanEndpoints();
+  const previous = els.lanEndpoint.value;
+  els.lanEndpoint.replaceChildren(
+    ...endpoints.map((endpoint) => {
+      const option = document.createElement('option');
+      option.value = endpoint.guid;
+      option.textContent = endpoint.name || 'Unnamed output';
+      return option;
+    })
+  );
+  if (endpoints.some((endpoint) => endpoint.guid === previous)) {
+    els.lanEndpoint.value = previous;
+  }
+
+  const role = lanShare?.role || 'off';
+  const host = role === 'host';
+  const guest = role === 'guest';
+  const available = Boolean(lanShare?.available);
+  const typed = pairingCode(els.lanCodeInput.value);
+
+  els.lanHostToggle.textContent = host ? 'On' : 'Off';
+  els.lanHostToggle.setAttribute('aria-pressed', host ? 'true' : 'false');
+  els.lanHostToggle.disabled = !available || lanShareInFlight;
+  els.lanCodeBlock.hidden = !(host && lanShare?.code);
+  els.lanCode.textContent = renderPairingCode(lanShare?.code);
+  els.lanCodeInput.disabled = guest || lanShareInFlight || !available;
+  els.lanEndpoint.disabled = guest || lanShareInFlight || !available;
+  els.lanJoin.disabled =
+    guest || lanShareInFlight || !available || typed.length !== 8;
+  els.lanLeave.hidden = !guest;
+  els.lanShareUnavailable.hidden = available;
+
+  const parts = [];
+  if (lanShare?.problem) parts.push(lanShare.problem);
+  if (guest) {
+    parts.push(
+      `Playing what ${lanShare.peerName || 'the other computer'} shares`
+    );
+    const buffered = Number(lanShare.bufferedMs);
+    if (Number.isFinite(buffered) && buffered > 0) {
+      parts.push(`${buffered.toFixed(1)} ms buffered`);
+    }
+    const rms = Number(lanShare.rms);
+    if (Number.isFinite(rms) && rms > 0) {
+      parts.push(`${(20 * Math.log10(rms)).toFixed(0)} dB`);
+    }
+  } else if (host) {
+    parts.push(lanShare.state || 'Waiting for another computer');
+  } else if (!parts.length) {
+    parts.push('Nothing is shared across the network yet.');
+  }
+  els.lanShareState.textContent = parts.join(' · ');
+}
+
+async function refreshLanShare() {
+  if (!invoke) return renderLanShare();
+  try {
+    lanShare = await invoke('lan_share_status');
+  } catch {
+    lanShare = null;
+  }
+  renderLanShare();
+}
+
+async function toggleLanHost() {
+  if (!invoke || lanShareInFlight) return;
+  lanShareInFlight = true;
+  renderLanShare();
+  try {
+    if (lanShare?.role === 'host') {
+      lanShare = await invoke('lan_share_host_stop');
+      showMessage('Stopped sharing this computer', 'ok');
+    } else {
+      lanShare = await invoke('lan_share_host_start');
+      showMessage(`Sharing as ${renderPairingCode(lanShare.code)}`, 'ok');
+    }
+  } catch (error) {
+    showMessage(`Share: ${error}`);
+  } finally {
+    lanShareInFlight = false;
+    renderLanShare();
+  }
+}
+
+async function joinLanShare() {
+  if (!invoke || lanShareInFlight) return;
+  const code = pairingCode(els.lanCodeInput.value);
+  if (code.length !== 8) {
+    showMessage('Type the eight-character pairing code');
+    return;
+  }
+  if (!els.lanEndpoint.value) {
+    showMessage('Pick the output to play the shared sound on');
+    return;
+  }
+  lanShareInFlight = true;
+  els.lanJoin.textContent = 'Looking…';
+  renderLanShare();
+  try {
+    const hosts = await invoke('lan_share_scan', { code });
+    if (!Array.isArray(hosts) || hosts.length === 0) {
+      showMessage('No computer on this network answers that code');
+      return;
+    }
+    const host = hosts[0];
+    lanShare = await invoke('lan_share_join', {
+      code,
+      address: host.address,
+      endpoint: els.lanEndpoint.value,
+    });
+    showMessage(`Listening to ${host.name}`, 'ok');
+  } catch (error) {
+    showMessage(`Join: ${error}`);
+  } finally {
+    lanShareInFlight = false;
+    els.lanJoin.textContent = 'Join';
+    await refreshLanShare();
+  }
+}
+
+async function leaveLanShare() {
+  if (!invoke || lanShareInFlight) return;
+  lanShareInFlight = true;
+  renderLanShare();
+  try {
+    lanShare = await invoke('lan_share_leave');
+    showMessage('Left the shared mix', 'ok');
+  } catch (error) {
+    showMessage(`Leave: ${error}`);
+  } finally {
+    lanShareInFlight = false;
+    renderLanShare();
+  }
+}
+
 function renderGamePresetChoices() {
   const current = els.gamesPreset.value;
   els.gamesPreset.replaceChildren(
@@ -1928,7 +2093,9 @@ function showView(id) {
   if (view.id === 'games') renderGames();
   if (view.id === 'share') {
     renderSecondOutput();
+    renderLanShare();
     refreshSecondOutput();
+    refreshLanShare();
   }
   if (view.id === 'settings') renderSettings();
 }
@@ -2652,6 +2819,16 @@ for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]'))
 
 els.shareToggle.addEventListener('click', toggleSecondOutput);
 
+els.lanHostToggle.addEventListener('click', toggleLanHost);
+els.lanJoin.addEventListener('click', joinLanShare);
+els.lanLeave.addEventListener('click', leaveLanShare);
+els.lanCodeInput.addEventListener('input', () => {
+  const typed = pairingCode(els.lanCodeInput.value);
+  els.lanCodeInput.value =
+    typed.length > 4 ? `${typed.slice(0, 4)} ${typed.slice(4, 8)}` : typed;
+  renderLanShare();
+});
+
 els.shareVolume.addEventListener('input', () => {
   shareVolumeDragging = true;
   els.shareVolumeValue.textContent = `${els.shareVolume.value}%`;
@@ -3062,6 +3239,7 @@ async function boot() {
     refreshEngineStatus();
     refreshMedia();
     refreshSecondOutput();
+    refreshLanShare();
     refreshPresets();
     refreshRoomCatalog();
     refreshStartup();
@@ -3102,6 +3280,13 @@ TAURI?.event?.listen?.('snapshot', (event) => {
 TAURI?.event?.listen?.('second-output', (event) => {
   secondOutput = event.payload;
   if (activeView === 'share') renderSecondOutput();
+});
+
+// The share's own state: who is listening, what the meter reads, and why it
+// stopped. The page shows the newest snapshot instead of polling.
+TAURI?.event?.listen?.('lan-share', (event) => {
+  lanShare = event.payload;
+  if (activeView === 'share') renderLanShare();
 });
 
 function mediaClock(ms) {

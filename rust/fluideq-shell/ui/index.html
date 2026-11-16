@@ -553,6 +553,34 @@
               <p id="share-state" class="settings-note">Nothing is being mirrored yet.</p>
               <p id="share-unavailable" class="settings-note" hidden>The capture helper is not installed in this build; stage the native engine to use a second output.</p>
             </div>
+            <div class="settings-group">
+              <p class="eyebrow">Across the network</p>
+              <h2 class="settings-title">Share this mix with another computer</h2>
+              <p class="settings-note">Both computers must be on the same network. The sound travels encrypted between the two apps; nothing is uploaded anywhere else.</p>
+              <div class="stat-row">
+                <span>Share this computer</span>
+                <button id="lan-host-toggle" class="stat-toggle" type="button" aria-pressed="false" disabled>Off</button>
+              </div>
+              <div id="lan-code-block" class="share-code" hidden>
+                <span class="share-code-label">Pairing code</span>
+                <strong id="lan-code" class="share-code-value">---- ----</strong>
+                <span class="share-code-hint">Type it on the other computer</span>
+              </div>
+              <div class="stat-row">
+                <span>Join with a code</span>
+                <span class="share-buttons">
+                  <input id="lan-code-input" class="share-code-input" type="text" maxlength="9" autocomplete="off" spellcheck="false" placeholder="---- ----" aria-label="Pairing code" />
+                  <button id="lan-join" class="preset-action accent" type="button" disabled>Join</button>
+                  <button id="lan-leave" class="preset-action" type="button" hidden>Leave</button>
+                </span>
+              </div>
+              <div class="stat-row">
+                <span>Play it on</span>
+                <select id="lan-endpoint" class="preset-select" aria-label="Shared audio output"></select>
+              </div>
+              <p id="lan-share-state" class="settings-note">Nothing is shared across the network yet.</p>
+              <p id="lan-share-unavailable" class="settings-note" hidden>The LAN helpers are not installed in this build; stage the native engine to share audio.</p>
+            </div>
           </div>
         </section>
 
