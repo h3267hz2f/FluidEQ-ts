@@ -13,6 +13,7 @@ import { registerView, viewFor } from './views/registry.js';
 import { equalizer } from './views/equalizer/index.js';
 import { config } from './views/config/index.js';
 import { games } from './views/games/index.js';
+import { library } from './views/library/index.js';
 import { share } from './views/share/index.js';
 import {
   rack,
@@ -206,6 +207,21 @@ const els = {
   lanLeave: document.getElementById('lan-leave'),
   lanShareState: document.getElementById('lan-share-state'),
   lanShareUnavailable: document.getElementById('lan-share-unavailable'),
+  libraryFolderInput: document.getElementById('library-folder-input'),
+  libraryAdd: document.getElementById('library-add'),
+  libraryFolders: document.getElementById('library-folders'),
+  libraryCount: document.getElementById('library-count'),
+  libraryRescan: document.getElementById('library-rescan'),
+  librarySearch: document.getElementById('library-search'),
+  libraryState: document.getElementById('library-state'),
+  libraryList: document.getElementById('library-list'),
+  libraryDetail: document.getElementById('library-detail'),
+  libraryCover: document.getElementById('library-cover'),
+  libraryCoverEmpty: document.getElementById('library-cover-empty'),
+  libraryTitle: document.getElementById('library-title'),
+  libraryArtist: document.getElementById('library-artist'),
+  libraryAlbum: document.getElementById('library-album'),
+  libraryMeta: document.getElementById('library-meta'),
   gamesList: document.getElementById('games-list'),
   gamesEmpty: document.getElementById('games-empty'),
   gamesUnavailable: document.getElementById('games-unavailable'),
@@ -272,6 +288,7 @@ registerView(config);
 registerView(rack);
 registerView(room);
 registerView(games);
+registerView(library);
 registerView(share);
 registerView(settings);
 
@@ -298,6 +315,11 @@ let secondOutputInFlight = false;
 let shareVolumeDragging = false;
 let lanShare = null;
 let lanShareInFlight = false;
+let libraryState = null;
+let librarySelected = null;
+let libraryCoverToken = 0;
+let libraryBusy = false;
+const LIBRARY_ROW_LIMIT = 400;
 let presetNames = [];
 let presetCatalog = [];
 let roomCatalog = [];
@@ -1317,6 +1339,221 @@ async function leaveLanShare() {
   }
 }
 
+function libraryTracks() {
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  const filter = els.librarySearch.value.trim().toLowerCase();
+  if (!filter) return tracks;
+  return tracks.filter((track) =>
+    [track.title, track.artist, track.album, track.path]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(filter))
+  );
+}
+
+function libraryCountWord(tracks) {
+  if (libraryState?.scanning) return 'Scanning…';
+  if (!tracks.length) return 'No tracks yet';
+  return `${tracks.length} ${tracks.length === 1 ? 'track' : 'tracks'}`;
+}
+
+function libraryFolderChip(folder) {
+  const chip = document.createElement('span');
+  chip.className = 'library-folder';
+  const path = document.createElement('span');
+  path.className = 'library-folder-path';
+  path.textContent = folder;
+  path.title = folder;
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'library-folder-remove';
+  remove.textContent = '×';
+  remove.setAttribute('aria-label', `Remove ${folder}`);
+  remove.addEventListener('click', () => removeLibraryFolder(folder));
+  chip.append(path, remove);
+  return chip;
+}
+
+function libraryTrackRow(track) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'library-track';
+  row.setAttribute('role', 'listitem');
+  row.dataset.path = track.path;
+  row.classList.toggle('selected', track.path === librarySelected);
+  const main = document.createElement('span');
+  main.className = 'library-track-main';
+  const title = document.createElement('strong');
+  title.textContent = track.title;
+  const sub = document.createElement('span');
+  sub.textContent =
+    [track.artist, track.album].filter(Boolean).join(' · ') || track.format;
+  main.append(title, sub);
+  const time = document.createElement('span');
+  time.className = 'library-track-time';
+  time.textContent =
+    Number(track.durationMs) > 0 ? mediaClock(track.durationMs) : '—';
+  row.append(main, time);
+  row.addEventListener('click', () => selectLibraryTrack(track));
+  return row;
+}
+
+function renderLibraryDetail() {
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  const selected = tracks.find((track) => track.path === librarySelected);
+  if (!selected) {
+    librarySelected = null;
+    els.libraryDetail.hidden = true;
+    libraryCoverToken += 1;
+    return;
+  }
+  els.libraryDetail.hidden = false;
+  els.libraryTitle.textContent = selected.title;
+  els.libraryArtist.textContent = selected.artist || 'Unknown artist';
+  els.libraryAlbum.textContent = selected.album || 'Unknown album';
+  const meta = [selected.format];
+  if (Number(selected.durationMs) > 0) meta.push(mediaClock(selected.durationMs));
+  if (selected.disc) meta.push(`Disc ${selected.disc}`);
+  if (selected.track) meta.push(`Track ${selected.track}`);
+  els.libraryMeta.textContent = meta.filter(Boolean).join(' · ');
+}
+
+function renderLibrary() {
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  const folders = Array.isArray(libraryState?.folders)
+    ? libraryState.folders
+    : [];
+  const scanning = Boolean(libraryState?.scanning);
+
+  els.libraryFolders.replaceChildren(...folders.map(libraryFolderChip));
+  els.libraryAdd.disabled = libraryBusy;
+  els.libraryRescan.disabled = libraryBusy || scanning;
+  els.libraryCount.textContent = libraryCountWord(tracks);
+
+  const filtered = libraryTracks();
+  const rows = filtered.slice(0, LIBRARY_ROW_LIMIT).map(libraryTrackRow);
+  els.libraryList.replaceChildren(...rows);
+  if (!filtered.length) {
+    const empty = document.createElement('p');
+    empty.className = 'library-empty';
+    empty.textContent = tracks.length
+      ? 'Nothing matches that search.'
+      : 'No music here yet.';
+    els.libraryList.append(empty);
+  } else if (filtered.length > rows.length) {
+    const more = document.createElement('p');
+    more.className = 'library-empty';
+    more.textContent = `Showing ${rows.length} of ${filtered.length} — search to narrow.`;
+    els.libraryList.append(more);
+  }
+
+  renderLibraryDetail();
+
+  let note;
+  if (libraryState?.problem) note = libraryState.problem;
+  else if (scanning) {
+    note = `Reading tags and cover art… ${libraryState?.scanned || 0} found so far.`;
+  } else if (!folders.length) {
+    note = 'No folders yet — paste a folder path and add it.';
+  } else if (!tracks.length) {
+    note = 'No music found in those folders.';
+  } else {
+    const skipped = Number(libraryState?.skipped) || 0;
+    note = `${tracks.length} tracks scanned${skipped ? ` · ${skipped} skipped` : ''}.`;
+  }
+  els.libraryState.textContent = note;
+}
+
+function showLibraryCover(track) {
+  const token = ++libraryCoverToken;
+  els.libraryCover.hidden = true;
+  els.libraryCover.removeAttribute('src');
+  els.libraryCoverEmpty.hidden = false;
+  if (!invoke) return;
+  invoke('library_cover', { path: track.path })
+    .then((cover) => {
+      if (token !== libraryCoverToken || librarySelected !== track.path) return;
+      if (!cover?.data) return;
+      els.libraryCover.src = `data:${cover.mime};base64,${cover.data}`;
+      els.libraryCover.hidden = false;
+      els.libraryCoverEmpty.hidden = true;
+    })
+    .catch(() => {});
+}
+
+function selectLibraryTrack(track) {
+  librarySelected = track.path;
+  renderLibrary();
+  showLibraryCover(track);
+}
+
+async function refreshLibrary() {
+  if (!invoke) return renderLibrary();
+  try {
+    libraryState = await invoke('library_status');
+  } catch {
+    libraryState = null;
+  }
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  if (librarySelected && !tracks.some((track) => track.path === librarySelected)) {
+    librarySelected = null;
+  }
+  renderLibrary();
+}
+
+async function addLibraryFolder() {
+  if (!invoke || libraryBusy) return;
+  const folder = els.libraryFolderInput.value.trim();
+  if (!folder) {
+    showMessage('Paste the path of a music folder first');
+    return;
+  }
+  libraryBusy = true;
+  renderLibrary();
+  try {
+    libraryState = await invoke('library_add_folder', { folder });
+    els.libraryFolderInput.value = '';
+    showMessage('Folder added to the library', 'ok');
+  } catch (error) {
+    showMessage(`Library: ${error}`);
+  } finally {
+    libraryBusy = false;
+    renderLibrary();
+  }
+}
+
+async function removeLibraryFolder(folder) {
+  if (!invoke || libraryBusy) return;
+  libraryBusy = true;
+  renderLibrary();
+  try {
+    libraryState = await invoke('library_remove_folder', { folder });
+    const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+    if (librarySelected && !tracks.some((track) => track.path === librarySelected)) {
+      librarySelected = null;
+    }
+    showMessage('Folder removed', 'ok');
+  } catch (error) {
+    showMessage(`Library: ${error}`);
+  } finally {
+    libraryBusy = false;
+    renderLibrary();
+  }
+}
+
+async function rescanLibrary() {
+  if (!invoke || libraryBusy) return;
+  libraryBusy = true;
+  renderLibrary();
+  try {
+    libraryState = await invoke('library_scan');
+  } catch (error) {
+    showMessage(`Library: ${error}`);
+  } finally {
+    libraryBusy = false;
+    renderLibrary();
+  }
+}
+
 function renderGamePresetChoices() {
   const current = els.gamesPreset.value;
   els.gamesPreset.replaceChildren(
@@ -2090,6 +2327,10 @@ function showView(id) {
   if (view.id === 'config') renderConfig();
   if (view.id === 'rack') renderRack();
   if (view.id === 'room') renderRoom();
+  if (view.id === 'library') {
+    renderLibrary();
+    refreshLibrary();
+  }
   if (view.id === 'games') renderGames();
   if (view.id === 'share') {
     renderSecondOutput();
@@ -2819,6 +3060,17 @@ for (const button of document.querySelectorAll('.rail-nav .nav-btn[data-view]'))
 
 els.shareToggle.addEventListener('click', toggleSecondOutput);
 
+els.libraryAdd.addEventListener('click', addLibraryFolder);
+els.libraryRescan.addEventListener('click', rescanLibrary);
+els.librarySearch.addEventListener('input', () => {
+  if (activeView === 'library') renderLibrary();
+});
+els.libraryFolderInput.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  addLibraryFolder();
+});
+
 els.lanHostToggle.addEventListener('click', toggleLanHost);
 els.lanJoin.addEventListener('click', joinLanShare);
 els.lanLeave.addEventListener('click', leaveLanShare);
@@ -3240,6 +3492,7 @@ async function boot() {
     refreshMedia();
     refreshSecondOutput();
     refreshLanShare();
+    refreshLibrary();
     refreshPresets();
     refreshRoomCatalog();
     refreshStartup();
@@ -3287,6 +3540,17 @@ TAURI?.event?.listen?.('second-output', (event) => {
 TAURI?.event?.listen?.('lan-share', (event) => {
   lanShare = event.payload;
   if (activeView === 'share') renderLanShare();
+});
+
+// A scan publishes when it starts, every hundred tracks, and when it ends;
+// the list follows the newest snapshot.
+TAURI?.event?.listen?.('library', (event) => {
+  libraryState = event.payload;
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  if (librarySelected && !tracks.some((track) => track.path === librarySelected)) {
+    librarySelected = null;
+  }
+  if (activeView === 'library') renderLibrary();
 });
 
 function mediaClock(ms) {

@@ -1007,6 +1007,223 @@ kbd {
   gap: 6px;
 }
 
+/* Library: the folders, the list, and one track's cover at a time. */
+.view-library {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.library-card {
+  max-width: 980px;
+}
+
+.library-folder-input,
+.library-search {
+  width: 250px;
+  padding: 3px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+}
+
+.library-search {
+  width: 210px;
+}
+
+.library-folder-input:focus,
+.library-search:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+.library-folder-input::placeholder,
+.library-search::placeholder {
+  color: var(--muted-soft);
+}
+
+.library-folders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.library-folder {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.library-folder-path {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-folder-remove {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted-soft);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.library-folder-remove:hover {
+  color: var(--danger);
+}
+
+.library-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 18px;
+}
+
+.library-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.library-track {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.library-track:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.library-track.selected {
+  background: var(--accent-soft);
+}
+
+.library-track-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.library-track-main strong {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-track-main span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-track-time {
+  color: var(--muted-soft);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.library-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--muted-soft);
+  font-size: 10.5px;
+}
+
+.library-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: start;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.library-detail[hidden] {
+  display: none;
+}
+
+.library-cover {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.library-cover-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted-soft);
+  font-size: 10.5px;
+}
+
+.library-cover[hidden],
+.library-cover-empty[hidden] {
+  display: none;
+}
+
+.library-title {
+  font-size: 12.5px;
+}
+
+.library-artist {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.library-album {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.library-meta {
+  color: var(--muted-soft);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
 .games-card {
   max-width: 780px;
 }

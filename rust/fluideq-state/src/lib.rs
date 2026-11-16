@@ -31,6 +31,7 @@ pub mod compressed_audio;
 pub mod deck_transport;
 pub mod device_profiles;
 pub mod linear_phase;
+pub mod library;
 pub mod models;
 pub mod opra;
 pub mod persistence;

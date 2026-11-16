@@ -46,6 +46,13 @@
               <path d="M9 18v-5h6v5" />
             </svg>
           </button>
+          <button class="nav-btn" type="button" aria-label="Library" data-view="library">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 18V6l10-2v12" />
+              <circle cx="6.5" cy="18" r="2.4" />
+              <circle cx="16.5" cy="16" r="2.4" />
+            </svg>
+          </button>
           <button class="nav-btn" type="button" aria-label="Games" data-view="games">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M7 8h10a4 4 0 0 1 3.9 4.8l-1 4a2.5 2.5 0 0 1-4.4 1.2L14 16h-4l-1.5 2a2.5 2.5 0 0 1-4.4-1.2l-1-4A4 4 0 0 1 7 8Z" />
@@ -504,6 +511,46 @@
               <h2 class="settings-title">The engine's own verdicts</h2>
               <pre id="config-log" class="config-log"></pre>
               <p id="config-log-empty" class="settings-note">The engine has not written a log line yet.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-library" data-view-panel="library" hidden>
+          <div class="card settings-card library-card">
+            <div class="settings-group">
+              <p class="eyebrow">Local collection</p>
+              <h2 class="settings-title">Your music, read in place</h2>
+              <p class="settings-note">FluidEQ reads tags and cover art from the folders you choose; nothing is copied or uploaded.</p>
+              <div class="stat-row">
+                <span>Add a folder</span>
+                <span class="share-buttons">
+                  <input id="library-folder-input" class="library-folder-input" type="text" placeholder="C:\Users\you\Music" aria-label="Music folder path" spellcheck="false" />
+                  <button id="library-add" class="preset-action accent" type="button">Add</button>
+                </span>
+              </div>
+              <div id="library-folders" class="library-folders"></div>
+              <div class="stat-row">
+                <span id="library-count">No tracks yet</span>
+                <span class="share-buttons">
+                  <button id="library-rescan" class="preset-action" type="button">Rescan</button>
+                </span>
+              </div>
+              <div class="stat-row">
+                <span>Search</span>
+                <input id="library-search" class="library-search" type="search" placeholder="Title, artist, album" aria-label="Filter tracks" />
+              </div>
+              <p id="library-state" class="settings-note">No folders yet — paste a folder path and add it.</p>
+            </div>
+            <div class="library-body">
+              <div id="library-list" class="library-list" role="list"></div>
+              <aside id="library-detail" class="library-detail" hidden>
+                <img id="library-cover" class="library-cover" alt="" hidden />
+                <div id="library-cover-empty" class="library-cover-empty">No cover</div>
+                <strong id="library-title" class="library-title"></strong>
+                <span id="library-artist" class="library-artist"></span>
+                <span id="library-album" class="library-album"></span>
+                <span id="library-meta" class="library-meta"></span>
+              </aside>
             </div>
           </div>
         </section>

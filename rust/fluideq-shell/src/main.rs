@@ -20,6 +20,7 @@ pub mod engine_setup;
 pub mod game_presets;
 pub mod host_runtime;
 pub mod lan_share;
+pub mod library;
 pub mod media_watch;
 pub mod hotkeys;
 pub mod output_watch;
@@ -944,6 +945,49 @@ fn lan_share_leave(
     lan_share::leave(&app, &playback, &state)
 }
 
+/// The folders the owner chose, the tracks the last scan found, and whether a
+/// scan is running.
+#[tauri::command]
+fn library_status(state: State<'_, library::LibraryState>) -> library::LibrarySnapshot {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn library_add_folder(
+    app: tauri::AppHandle,
+    state: State<'_, library::LibraryState>,
+    folder: String,
+) -> Result<library::LibrarySnapshot, String> {
+    state.add_folder(&app, &folder)
+}
+
+#[tauri::command]
+fn library_remove_folder(
+    app: tauri::AppHandle,
+    state: State<'_, library::LibraryState>,
+    folder: String,
+) -> Result<library::LibrarySnapshot, String> {
+    state.remove_folder(&app, &folder)
+}
+
+#[tauri::command]
+fn library_scan(
+    app: tauri::AppHandle,
+    state: State<'_, library::LibraryState>,
+) -> library::LibrarySnapshot {
+    state.scan(&app);
+    state.snapshot()
+}
+
+/// The cover a track carries, read only when the page asks for it.
+#[tauri::command]
+fn library_cover(
+    state: State<'_, library::LibraryState>,
+    path: String,
+) -> Result<Option<fluideq_state::library::CoverArt>, String> {
+    state.cover(&path)
+}
+
 #[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
@@ -1356,6 +1400,7 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let state_path = data_dir.join("state.json");
+            app.manage(library::LibraryState::new(data_dir.clone()));
             let mut store = AppStateStore::new(48_000.0);
             if state_path.exists() {
                 // A corrupt file leaves the defaults in place; the first
@@ -1500,6 +1545,11 @@ fn main() {
             lan_share_scan,
             lan_share_join,
             lan_share_leave,
+            library_status,
+            library_add_folder,
+            library_remove_folder,
+            library_scan,
+            library_cover,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,

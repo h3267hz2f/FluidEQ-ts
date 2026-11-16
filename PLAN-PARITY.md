@@ -97,7 +97,7 @@
 1. **[x] 系统媒体栏与小窗（Transport & Compact Player）**：2026-11-14 已接入 `FluidEQ-Media`（SMTC 读取 + play/pause/next/previous 命令），顶部媒体栏与置顶无边框小窗已完成；音量沿用现有端点主音量命令，未单独打包 `FluidEQ-Volume`。
 2. **[x] 第二输出（Second Output）**：2026-11-14 已打包 `FluidEQ-LAN-Capture/Playback` 与 `--pipe-overlapped` 同步 stdout 支持；Share 页可把系统混音镜像到另一输出（端点选择、开关、电平、延迟与失败状态），主输出不重复播放。2026-11-16 起镜像由 `FluidEQ-LAN-Playback` 托管为子进程，网络共享的捕获可以整树排除它，两套输出不再互相串音。真机双设备听感待统一验证。
 3. **[x] 局域网共享（Share Audio mesh）**：2026-11-16 已完成配对码（8 位、输入免空格/连字符）、同网段 UDP 发现（只回应对应配对码指纹的请求）、TCP 握手双向证明、ChaCha20-Poly1305 加密 PCM（RFC 8439 向量单测）与发送/接收两端 Share 页；接收端复用 `FluidEQ-LAN-Playback`（开输出、抖动缓冲、电平表），发送端捕获作为 playblack helper 子进程并整树排除接收树，双机实听待统一真机验证。
-4. **本地曲库播放器（Library）**：文件夹异步扫描、标签/封面解析、双 Deck 播放与曲间 Crossfade。
+4. **[~] 本地曲库播放器（Library）**：2026-11-16 第一刀已完成——`fluideq-state::library` 按内容识别 MP3/FLAC/WAV 并读取 ID3v2 文本、FLAC Vorbis 评论、时长与内嵌封面（无新增依赖，标签/封面/base64 均有单测）；文件夹持久化到 `library.json`，扫描在后台线程按百首进度推送 `library` 快照；Library 页支持添加/移除文件夹、搜索、曲目列表与单曲封面详情。下一刀接双 Deck 播放与曲间 Crossfade。
 5. **视觉与外设（Visualizers / Wallpaper / Lighting）**：打包 `FluidEQ-Wallpaper` 与 `lighting-host`，接 GPU 频谱外观与灯效。
 6. **多语言与内置手册（i18n & F1 Guide）**：12 语言词条表与离线手册检索。
 7. **卡拉 OK 与 AI 分轨（Karaoke & Maker）**：`.lrc`/UltraStar 渲染与按需下载 ONNX 模型。
