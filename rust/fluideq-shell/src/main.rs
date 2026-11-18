@@ -19,6 +19,7 @@ pub mod engine_host;
 pub mod engine_setup;
 pub mod game_presets;
 pub mod host_runtime;
+pub mod playback;
 pub mod lan_share;
 pub mod library;
 pub mod media_watch;
@@ -989,6 +990,64 @@ fn library_cover(
 }
 
 #[tauri::command]
+fn player_status(state: State<'_, playback::PlaybackState>) -> playback::PlayerSnapshot {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn player_play(
+    app: tauri::AppHandle,
+    state: State<'_, playback::PlaybackState>,
+    path: String,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.play(&app, &path)
+}
+
+#[tauri::command]
+fn player_toggle(
+    state: State<'_, playback::PlaybackState>,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.toggle()
+}
+
+#[tauri::command]
+fn player_next(
+    state: State<'_, playback::PlaybackState>,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.next()
+}
+
+#[tauri::command]
+fn player_previous(
+    state: State<'_, playback::PlaybackState>,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.previous()
+}
+
+#[tauri::command]
+fn player_seek(
+    state: State<'_, playback::PlaybackState>,
+    position_ms: u64,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.seek(position_ms)
+}
+
+#[tauri::command]
+fn player_stop(
+    state: State<'_, playback::PlaybackState>,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.stop()
+}
+
+#[tauri::command]
+fn player_set_crossfade(
+    state: State<'_, playback::PlaybackState>,
+    seconds: f64,
+) -> Result<playback::PlayerSnapshot, String> {
+    state.set_crossfade(seconds)
+}
+
+#[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
 }
@@ -1430,6 +1489,7 @@ fn main() {
             // A dev build without the staged engine records the failure in the
             // host status; the window still opens.
             let _ = host.start();
+            let playback = playback::PlaybackState::new(data_dir.clone(), host.clone());
             let placement_path = data_dir.join("window.json");
             app.manage(ShellState {
                 store: Mutex::new(store),
@@ -1441,6 +1501,8 @@ fn main() {
                 spectrum: Mutex::new(spectrum_bridge::SpectrumBridge::new(96)),
             });
             app.manage(media_watch::MediaWatchState::start(app.handle()));
+            app.manage(playback.clone());
+            playback.start(app.handle().clone());
             app.manage(second_output::SecondOutputState::new());
             app.manage(playback_host::PlaybackHostState::new());
             app.manage(lan_share::LanShareState::new());
@@ -1550,6 +1612,14 @@ fn main() {
             library_remove_folder,
             library_scan,
             library_cover,
+            player_status,
+            player_play,
+            player_toggle,
+            player_next,
+            player_previous,
+            player_seek,
+            player_stop,
+            player_set_crossfade,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,

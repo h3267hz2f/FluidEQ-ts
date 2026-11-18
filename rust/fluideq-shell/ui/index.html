@@ -541,6 +541,30 @@
               </div>
               <p id="library-state" class="settings-note">No folders yet — paste a folder path and add it.</p>
             </div>
+            <div id="library-player" class="library-player">
+              <div class="library-player-now">
+                <img id="library-player-cover" class="library-player-cover" alt="" hidden />
+                <div class="library-player-text">
+                  <strong id="library-player-title">Nothing playing</strong>
+                  <span id="library-player-artist">Double-click a track to play it</span>
+                </div>
+              </div>
+              <div class="library-player-controls">
+                <button id="library-player-previous" class="preset-action" type="button">Previous</button>
+                <button id="library-player-toggle" class="preset-action accent" type="button">Play</button>
+                <button id="library-player-next" class="preset-action" type="button">Next</button>
+                <button id="library-player-stop" class="preset-action" type="button">Stop</button>
+              </div>
+              <div class="library-player-progress">
+                <input id="library-player-position" class="library-player-seek" type="range" min="0" max="0" step="100" value="0" aria-label="Seek" disabled />
+                <span id="library-player-time" class="library-player-time">0:00 / 0:00</span>
+              </div>
+              <label class="library-player-fade">
+                Crossfade
+                <input id="library-player-crossfade" type="number" min="0" max="12" step="0.5" value="4" aria-label="Crossfade seconds" />
+                s
+              </label>
+            </div>
             <div class="library-body">
               <div id="library-list" class="library-list" role="list"></div>
               <aside id="library-detail" class="library-detail" hidden>
@@ -550,6 +574,7 @@
                 <span id="library-artist" class="library-artist"></span>
                 <span id="library-album" class="library-album"></span>
                 <span id="library-meta" class="library-meta"></span>
+                <button id="library-play" class="preset-action accent library-play" type="button" disabled>Play</button>
               </aside>
             </div>
           </div>

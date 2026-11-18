@@ -25,6 +25,7 @@ use fluideq_dsp_sys::{
     FEQ_PARAMETER_COUNT, FEQ_PARAMETER_SCHEMA_VERSION, FEQ_WIRE_PROTOCOL_VERSION,
 };
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,41 @@ pub const ANALYSIS_HEADER_BYTES: usize = 872;
 pub const RESTART_BUDGET: usize = 3;
 /// Restarts older than this do not count against the budget.
 pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
+
+/// Player commands number themselves above every chain request, so the reader
+/// can hand their acknowledgements to the transport without touching the chain
+/// status.
+pub const PLAYER_REQUEST_BASE: u32 = 0x4000_0000;
+/// How long a load waits for the host to say which deck took the file.
+pub const PLAYER_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The transport numbers the host publishes with every audio report.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TransportTelemetry {
+    pub device_generation: u32,
+    pub active_deck: u32,
+    pub deck_state: u32,
+    pub position_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+/// Decodes the deck fields of a whole `FEQT` telemetry frame.
+pub fn parse_telemetry(bytes: &[u8]) -> Option<TransportTelemetry> {
+    if bytes.len() < TELEMETRY_BYTES {
+        return None;
+    }
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    if magic != FEQ_MAGIC_TELEMETRY {
+        return None;
+    }
+    Some(TransportTelemetry {
+        device_generation: u32::from_le_bytes(bytes[28..32].try_into().ok()?),
+        active_deck: u32::from_le_bytes(bytes[88..92].try_into().ok()?),
+        deck_state: u32::from_le_bytes(bytes[92..96].try_into().ok()?),
+        position_seconds: f64::from_le_bytes(bytes[96..104].try_into().ok()?),
+        duration_seconds: f64::from_le_bytes(bytes[104..112].try_into().ok()?),
+    })
+}
 
 /// One frame read from the host's stdout.
 #[derive(Debug, Clone)]
@@ -286,6 +322,75 @@ pub fn build_shutdown(revision: u32, request_id: u32) -> [u8; COMMAND_BYTES] {
     )
 }
 
+/// Encodes `FEQ_CMD_LOAD_DECK` plus the path bytes it carries.
+///
+/// `deck` is a concrete deck, or [`fluideq_dsp_sys::FEQ_DECK_HANDOFF`] to let
+/// the host choose the deck that is not playing.
+pub fn build_load_deck(
+    path: &str,
+    deck: u32,
+    cue_seconds: f64,
+    request_id: u32,
+) -> Result<Vec<u8>, String> {
+    if path.is_empty() {
+        return Err(String::from("a deck has no file to open"));
+    }
+    if path.len() > crate::host_runtime::MAX_WIRE_PATH_BYTES as usize {
+        return Err(String::from("the track path is longer than the wire allows"));
+    }
+    let mut frame = Vec::with_capacity(COMMAND_BYTES + path.len());
+    frame.extend_from_slice(&encode_dsp_host_command_frame(
+        fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_LOAD_DECK,
+        request_id,
+        0,
+        path.len() as u32,
+        deck as i32,
+        cue_seconds.max(0.0),
+    ));
+    frame.extend_from_slice(path.as_bytes());
+    Ok(frame)
+}
+
+/// Encodes a deck command that carries only a deck and one number.
+fn build_deck_frame(
+    command: fluideq_dsp_sys::FeqWireCommand,
+    deck: u32,
+    value: f64,
+    request_id: u32,
+) -> [u8; COMMAND_BYTES] {
+    encode_dsp_host_command_frame(command, request_id, 0, 0, deck as i32, value)
+}
+
+/// Encodes `FEQ_CMD_CROSSFADE`: the fade length in `value` and the curve in
+/// `parameter_id`, exactly as `host_deck_commands.cpp` reads it.
+pub fn build_crossfade(
+    deck: u32,
+    seconds: f64,
+    curve: u32,
+    request_id: u32,
+) -> [u8; COMMAND_BYTES] {
+    encode_dsp_host_command_frame(
+        fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_CROSSFADE,
+        request_id,
+        0,
+        curve,
+        deck as i32,
+        seconds.max(0.0),
+    )
+}
+
+/// Encodes `FEQ_CMD_SET_PLAYING`; `playing` rides in `parameter_id`.
+pub fn build_set_playing(playing: bool, request_id: u32) -> [u8; COMMAND_BYTES] {
+    encode_dsp_host_command_frame(
+        fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_SET_PLAYING,
+        request_id,
+        0,
+        u32::from(playing),
+        0,
+        0.0,
+    )
+}
+
 /// Records a restart at `now` when the budget allows it.
 ///
 /// Restarts older than [`RESTART_WINDOW`] are forgotten first, so a process
@@ -336,6 +441,10 @@ struct HostInner {
     restarts: Vec<Instant>,
     stopping: bool,
     next_request_id: u32,
+    player_request_id: u32,
+    telemetry: Option<TransportTelemetry>,
+    /// Loads waiting for the deck the host chose.
+    waiters: HashMap<u32, mpsc::Sender<FeqWireAckFrame>>,
 }
 
 /// Owns the supervised `FluidEQ-DSP` process.
@@ -344,6 +453,7 @@ struct HostInner {
 /// thread owns stdin, and a reader thread owns stdout. The split is the
 /// deadlock rule: the reader must keep draining while a write blocks, because
 /// a host blocked on a full stdout pipe stops reading stdin.
+#[derive(Clone)]
 pub struct EngineHost {
     inner: Arc<Mutex<HostInner>>,
 }
@@ -363,6 +473,9 @@ impl EngineHost {
                 restarts: Vec::new(),
                 stopping: false,
                 next_request_id: 1,
+                player_request_id: PLAYER_REQUEST_BASE,
+                telemetry: None,
+                waiters: HashMap::new(),
             })),
         }
     }
@@ -461,8 +574,123 @@ impl EngineHost {
     }
 }
 
+impl EngineHost {
+    /// The newest deck position the host has reported, if any.
+    pub fn telemetry(&self) -> Option<TransportTelemetry> {
+        lock(&self.inner).telemetry
+    }
+
+    /// Queues a player command without waiting for its acknowledgement.
+    fn queue_player(&self, build: impl FnOnce(u32) -> Vec<u8>) -> Result<(), String> {
+        let mut inner = lock(&self.inner);
+        let request_id = next_player_request(&mut inner);
+        let frame = build(request_id);
+        let writer = inner
+            .writer
+            .clone()
+            .ok_or_else(|| String::from("the DSP host is not running"))?;
+        writer
+            .send(frame)
+            .map_err(|_| String::from("the DSP host writer stopped"))
+    }
+
+    /// Loads a file and waits for the deck the host assigned it to.
+    ///
+    /// `deck` may be [`fluideq_dsp_sys::FEQ_DECK_HANDOFF`]; the answer is the
+    /// concrete deck either way, or `-1` when the file could not be opened.
+    pub fn player_load(&self, deck: u32, path: &str, cue_seconds: f64) -> Result<i32, String> {
+        let (request_id, receiver) = {
+            let mut inner = lock(&self.inner);
+            let request_id = next_player_request(&mut inner);
+            let frame = build_load_deck(path, deck, cue_seconds, request_id)?;
+            let writer = inner
+                .writer
+                .clone()
+                .ok_or_else(|| String::from("the DSP host is not running"))?;
+            let (sender, receiver) = mpsc::channel();
+            inner.waiters.insert(request_id, sender);
+            if writer.send(frame).is_err() {
+                inner.waiters.remove(&request_id);
+                return Err(String::from("the DSP host writer stopped"));
+            }
+            (request_id, receiver)
+        };
+        match receiver.recv_timeout(PLAYER_ACK_TIMEOUT) {
+            Ok(ack) => {
+                if ack.status != fluideq_dsp_sys::FeqWireStatus::FEQ_WIRE_APPLIED as u16 {
+                    return Err(format!(
+                        "the engine refused the track (wire status {})",
+                        ack.status
+                    ));
+                }
+                let assigned = ack.sanitized_value;
+                if !assigned.is_finite() || assigned < 0.0 {
+                    return Err(String::from("the engine could not open the file"));
+                }
+                Ok(assigned as i32)
+            }
+            Err(_) => {
+                lock(&self.inner).waiters.remove(&request_id);
+                Err(String::from("the engine did not answer the load"))
+            }
+        }
+    }
+
+    pub fn player_unload(&self, deck: u32) -> Result<(), String> {
+        self.queue_player(|request_id| {
+            build_deck_frame(
+                fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_UNLOAD_DECK,
+                deck,
+                0.0,
+                request_id,
+            )
+            .to_vec()
+        })
+    }
+
+    pub fn player_select(&self, deck: u32) -> Result<(), String> {
+        self.queue_player(|request_id| {
+            build_deck_frame(
+                fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_SELECT_DECK,
+                deck,
+                0.0,
+                request_id,
+            )
+            .to_vec()
+        })
+    }
+
+    pub fn player_crossfade(&self, deck: u32, seconds: f64, curve: u32) -> Result<(), String> {
+        self.queue_player(|request_id| {
+            build_crossfade(deck, seconds, curve, request_id).to_vec()
+        })
+    }
+
+    pub fn player_set_playing(&self, playing: bool) -> Result<(), String> {
+        self.queue_player(|request_id| build_set_playing(playing, request_id).to_vec())
+    }
+
+    pub fn player_seek(&self, deck: u32, position_seconds: f64) -> Result<(), String> {
+        self.queue_player(|request_id| {
+            build_deck_frame(
+                fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_SEEK_DECK,
+                deck,
+                position_seconds.max(0.0),
+                request_id,
+            )
+            .to_vec()
+        })
+    }
+}
+
 fn lock(inner: &Mutex<HostInner>) -> MutexGuard<'_, HostInner> {
     inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn next_player_request(inner: &mut HostInner) -> u32 {
+    let id = inner.player_request_id;
+    inner.player_request_id = inner.player_request_id.wrapping_add(1).max(PLAYER_REQUEST_BASE);
+    id
 }
 
 fn next_request_id(counter: &mut u32) -> u32 {
@@ -564,7 +792,16 @@ fn drain_host(inner: Arc<Mutex<HostInner>>, mut stdout: ChildStdout) {
                 }
             }
             Ok(HostFrame::Ack(ack)) => {
-                if ack.status != fluideq_dsp_sys::FeqWireStatus::FEQ_WIRE_APPLIED as u16 {
+                let waiter = if ack.request_id >= PLAYER_REQUEST_BASE {
+                    lock(&inner).waiters.remove(&ack.request_id)
+                } else {
+                    None
+                };
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(ack);
+                } else if ack.request_id < PLAYER_REQUEST_BASE
+                    && ack.status != fluideq_dsp_sys::FeqWireStatus::FEQ_WIRE_APPLIED as u16
+                {
                     let mut guard = lock(&inner);
                     guard.status.last_error = Some(format!(
                         "FluidEQ-DSP: request {} was not applied (wire status {})",
@@ -572,8 +809,13 @@ fn drain_host(inner: Arc<Mutex<HostInner>>, mut stdout: ChildStdout) {
                     ));
                 }
             }
-            // Telemetry, stats and analysis are drained, not interpreted: the
-            // shell's meters arrive over their own bridge.
+            Ok(HostFrame::Telemetry(bytes)) => {
+                if let Some(telemetry) = parse_telemetry(&bytes) {
+                    lock(&inner).telemetry = Some(telemetry);
+                }
+            }
+            // Stats and analysis are drained, not interpreted: the shell's
+            // meters arrive over their own bridge.
             Ok(_) => {}
             Err(error) => match restart_host(&inner, &error) {
                 Some(replacement) => {
@@ -591,6 +833,9 @@ fn drain_host(inner: Arc<Mutex<HostInner>>, mut stdout: ChildStdout) {
 fn restart_host(inner: &Arc<Mutex<HostInner>>, error: &str) -> Option<ChildStdout> {
     let mut guard = lock(inner);
     guard.writer = None;
+    // A load waiting on the host that just died has no answer coming.
+    guard.waiters.clear();
+    guard.telemetry = None;
     if let Some(mut child) = guard.child.take() {
         let _ = child.wait();
     }
@@ -890,5 +1135,81 @@ mod tests {
         bytes[3] = b'a' as c_char;
         bytes[5] = b'x' as c_char;
         assert_eq!(c_string(&bytes), "wasa");
+    }
+
+    #[test]
+    fn load_deck_carries_the_path_and_the_deck_it_asked_for() {
+        let path = r"C:\Music\a.flac";
+        let frame = build_load_deck(path, fluideq_dsp_sys::FEQ_DECK_HANDOFF, 1.5, 7)
+            .expect("a path within the ceiling");
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_LOAD_DECK as u16
+        );
+        assert_eq!(u32::from_le_bytes(frame[8..12].try_into().unwrap()), 7);
+        assert_eq!(
+            u32::from_le_bytes(frame[16..20].try_into().unwrap()),
+            path.len() as u32
+        );
+        assert_eq!(
+            i32::from_le_bytes(frame[20..24].try_into().unwrap()),
+            fluideq_dsp_sys::FEQ_DECK_HANDOFF as i32
+        );
+        assert_eq!(
+            f64::from_le_bytes(frame[24..32].try_into().unwrap()),
+            1.5
+        );
+        assert_eq!(&frame[32..], path.as_bytes());
+    }
+
+    #[test]
+    fn load_deck_refuses_an_empty_path() {
+        assert!(build_load_deck("", 0, 0.0, 1).is_err());
+    }
+
+    #[test]
+    fn crossfade_carries_the_length_and_the_curve_apart() {
+        let frame = build_crossfade(1, 3.5, 2, 9);
+        assert_eq!(
+            u16::from_le_bytes([frame[6], frame[7]]),
+            fluideq_dsp_sys::FeqWireCommand::FEQ_CMD_CROSSFADE as u16
+        );
+        assert_eq!(
+            i32::from_le_bytes(frame[20..24].try_into().unwrap()),
+            1
+        );
+        assert_eq!(
+            u32::from_le_bytes(frame[16..20].try_into().unwrap()),
+            2
+        );
+        assert_eq!(
+            f64::from_le_bytes(frame[24..32].try_into().unwrap()),
+            3.5
+        );
+    }
+
+    #[test]
+    fn telemetry_reports_the_active_deck_and_its_position() {
+        let mut bytes = vec![0u8; TELEMETRY_BYTES];
+        bytes[0..4].copy_from_slice(&FEQ_MAGIC_TELEMETRY.to_le_bytes());
+        bytes[28..32].copy_from_slice(&4u32.to_le_bytes());
+        bytes[88..92].copy_from_slice(&1u32.to_le_bytes());
+        bytes[92..96].copy_from_slice(&2u32.to_le_bytes());
+        bytes[96..104].copy_from_slice(&12.25f64.to_le_bytes());
+        bytes[104..112].copy_from_slice(&180.0f64.to_le_bytes());
+        let telemetry = parse_telemetry(&bytes).expect("a whole telemetry frame");
+        assert_eq!(telemetry.device_generation, 4);
+        assert_eq!(telemetry.active_deck, 1);
+        assert_eq!(telemetry.deck_state, 2);
+        assert_eq!(telemetry.position_seconds, 12.25);
+        assert_eq!(telemetry.duration_seconds, 180.0);
+    }
+
+    #[test]
+    fn a_short_or_foreign_telemetry_frame_is_not_read() {
+        assert!(parse_telemetry(&[0u8; 16]).is_none());
+        let mut bytes = vec![0u8; TELEMETRY_BYTES];
+        bytes[0..4].copy_from_slice(&FEQ_MAGIC_STATS.to_le_bytes());
+        assert!(parse_telemetry(&bytes).is_none());
     }
 }

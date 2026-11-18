@@ -222,6 +222,18 @@ const els = {
   libraryArtist: document.getElementById('library-artist'),
   libraryAlbum: document.getElementById('library-album'),
   libraryMeta: document.getElementById('library-meta'),
+  libraryPlay: document.getElementById('library-play'),
+  libraryPlayer: document.getElementById('library-player'),
+  libraryPlayerCover: document.getElementById('library-player-cover'),
+  libraryPlayerTitle: document.getElementById('library-player-title'),
+  libraryPlayerArtist: document.getElementById('library-player-artist'),
+  libraryPlayerPrevious: document.getElementById('library-player-previous'),
+  libraryPlayerToggle: document.getElementById('library-player-toggle'),
+  libraryPlayerNext: document.getElementById('library-player-next'),
+  libraryPlayerStop: document.getElementById('library-player-stop'),
+  libraryPlayerPosition: document.getElementById('library-player-position'),
+  libraryPlayerTime: document.getElementById('library-player-time'),
+  libraryPlayerCrossfade: document.getElementById('library-player-crossfade'),
   gamesList: document.getElementById('games-list'),
   gamesEmpty: document.getElementById('games-empty'),
   gamesUnavailable: document.getElementById('games-unavailable'),
@@ -319,6 +331,11 @@ let libraryState = null;
 let librarySelected = null;
 let libraryCoverToken = 0;
 let libraryBusy = false;
+let playerState = null;
+let playerSeekDragging = false;
+let playerCoverPath = null;
+let playerCoverToken = 0;
+let playerErrorShown = null;
 const LIBRARY_ROW_LIMIT = 400;
 let presetNames = [];
 let presetCatalog = [];
@@ -1380,6 +1397,7 @@ function libraryTrackRow(track) {
   row.setAttribute('role', 'listitem');
   row.dataset.path = track.path;
   row.classList.toggle('selected', track.path === librarySelected);
+  row.classList.toggle('playing', track.path === playerState?.path && Boolean(playerState?.playing));
   const main = document.createElement('span');
   main.className = 'library-track-main';
   const title = document.createElement('strong');
@@ -1394,6 +1412,7 @@ function libraryTrackRow(track) {
     Number(track.durationMs) > 0 ? mediaClock(track.durationMs) : '—';
   row.append(main, time);
   row.addEventListener('click', () => selectLibraryTrack(track));
+  row.addEventListener('dblclick', () => playLibraryTrack(track));
   return row;
 }
 
@@ -1403,10 +1422,12 @@ function renderLibraryDetail() {
   if (!selected) {
     librarySelected = null;
     els.libraryDetail.hidden = true;
+    els.libraryPlay.disabled = true;
     libraryCoverToken += 1;
     return;
   }
   els.libraryDetail.hidden = false;
+  els.libraryPlay.disabled = false;
   els.libraryTitle.textContent = selected.title;
   els.libraryArtist.textContent = selected.artist || 'Unknown artist';
   els.libraryAlbum.textContent = selected.album || 'Unknown album';
@@ -1552,6 +1573,152 @@ async function rescanLibrary() {
     libraryBusy = false;
     renderLibrary();
   }
+}
+
+function showPlayerCover(path) {
+  if (playerCoverPath === path) return;
+  playerCoverPath = path;
+  const token = ++playerCoverToken;
+  els.libraryPlayerCover.hidden = true;
+  els.libraryPlayerCover.removeAttribute('src');
+  if (!path || !invoke) return;
+  invoke('library_cover', { path })
+    .then((cover) => {
+      if (token !== playerCoverToken) return;
+      if (!cover?.data) return;
+      els.libraryPlayerCover.src = `data:${cover.mime};base64,${cover.data}`;
+      els.libraryPlayerCover.hidden = false;
+    })
+    .catch(() => {});
+}
+
+function updateLibraryPlayingRow() {
+  const path = playerState?.playing ? playerState.path : null;
+  for (const row of els.libraryList.querySelectorAll('.library-track')) {
+    row.classList.toggle('playing', row.dataset.path === path);
+  }
+}
+
+function renderPlayer() {
+  const current = playerState;
+  const hasTrack = Boolean(current?.path);
+  const playing = Boolean(current?.playing);
+  els.libraryPlayerTitle.textContent = hasTrack
+    ? current.title || 'Untitled track'
+    : 'Nothing playing';
+  els.libraryPlayerArtist.textContent = hasTrack
+    ? [current.artist, current.album].filter(Boolean).join(' · ') || 'Unknown artist'
+    : 'Double-click a track to play it';
+  els.libraryPlayerToggle.textContent = playing ? 'Pause' : 'Play';
+  const index = current?.queueIndex;
+  const queueLen = Number(current?.queueLen) || 0;
+  els.libraryPlayerToggle.disabled = !hasTrack;
+  els.libraryPlayerPrevious.disabled = !hasTrack;
+  els.libraryPlayerNext.disabled =
+    !hasTrack || (Number.isInteger(index) && index >= queueLen - 1);
+  els.libraryPlayerStop.disabled = !hasTrack;
+
+  const duration = Number(current?.durationMs) || 0;
+  const position = Number(current?.positionMs) || 0;
+  els.libraryPlayerPosition.disabled = !hasTrack || duration <= 0;
+  els.libraryPlayerPosition.max = String(duration);
+  if (!playerSeekDragging) {
+    els.libraryPlayerPosition.value = String(Math.min(position, duration || position));
+  }
+  els.libraryPlayerTime.textContent = `${mediaClock(position)} / ${mediaClock(duration)}`;
+  if (document.activeElement !== els.libraryPlayerCrossfade) {
+    els.libraryPlayerCrossfade.value = String(Number(current?.crossfadeSeconds ?? 4));
+  }
+  showPlayerCover(hasTrack ? current.path : null);
+  updateLibraryPlayingRow();
+  if (current?.error && current.error !== playerErrorShown) {
+    playerErrorShown = current.error;
+    showMessage(`Player: ${current.error}`);
+  } else if (!current?.error) {
+    playerErrorShown = null;
+  }
+}
+
+async function refreshPlayer() {
+  if (!invoke) return renderPlayer();
+  try {
+    playerState = await invoke('player_status');
+  } catch {
+    playerState = null;
+  }
+  renderPlayer();
+}
+
+async function playLibraryTrack(track) {
+  if (!invoke) return;
+  try {
+    playerState = await invoke('player_play', { path: track.path });
+  } catch (error) {
+    showMessage(`Player: ${error}`);
+  }
+  renderPlayer();
+}
+
+async function toggleLibraryPlayback() {
+  if (!invoke || !playerState?.path) return;
+  try {
+    playerState = await invoke('player_toggle');
+  } catch (error) {
+    showMessage(`Player: ${error}`);
+  }
+  renderPlayer();
+}
+
+async function nextLibraryTrack() {
+  if (!invoke || !playerState?.path) return;
+  try {
+    playerState = await invoke('player_next');
+  } catch (error) {
+    showMessage(`Player: ${error}`);
+  }
+  renderPlayer();
+}
+
+async function previousLibraryTrack() {
+  if (!invoke || !playerState?.path) return;
+  try {
+    playerState = await invoke('player_previous');
+  } catch (error) {
+    showMessage(`Player: ${error}`);
+  }
+  renderPlayer();
+}
+
+async function stopLibraryPlayback() {
+  if (!invoke || !playerState?.path) return;
+  try {
+    playerState = await invoke('player_stop');
+  } catch (error) {
+    showMessage(`Player: ${error}`);
+  }
+  renderPlayer();
+}
+
+async function seekLibraryPlayback() {
+  if (!invoke || !playerState?.path) return;
+  const positionMs = Number(els.libraryPlayerPosition.value) || 0;
+  try {
+    playerState = await invoke('player_seek', { positionMs });
+  } catch (error) {
+    showMessage(`Player: ${error}`);
+  }
+  renderPlayer();
+}
+
+async function setLibraryCrossfade() {
+  if (!invoke) return;
+  const seconds = Number(els.libraryPlayerCrossfade.value) || 0;
+  try {
+    playerState = await invoke('player_set_crossfade', { seconds });
+  } catch (error) {
+    showMessage(`Crossfade: ${error}`);
+  }
+  renderPlayer();
 }
 
 function renderGamePresetChoices() {
@@ -2330,6 +2497,7 @@ function showView(id) {
   if (view.id === 'library') {
     renderLibrary();
     refreshLibrary();
+    refreshPlayer();
   }
   if (view.id === 'games') renderGames();
   if (view.id === 'share') {
@@ -3070,6 +3238,26 @@ els.libraryFolderInput.addEventListener('keydown', (event) => {
   event.preventDefault();
   addLibraryFolder();
 });
+els.libraryPlay.addEventListener('click', () => {
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  const selected = tracks.find((track) => track.path === librarySelected);
+  if (selected) playLibraryTrack(selected);
+});
+els.libraryPlayerToggle.addEventListener('click', toggleLibraryPlayback);
+els.libraryPlayerPrevious.addEventListener('click', previousLibraryTrack);
+els.libraryPlayerNext.addEventListener('click', nextLibraryTrack);
+els.libraryPlayerStop.addEventListener('click', stopLibraryPlayback);
+els.libraryPlayerPosition.addEventListener('input', () => {
+  playerSeekDragging = true;
+  const duration = Number(playerState?.durationMs) || 0;
+  const position = Number(els.libraryPlayerPosition.value) || 0;
+  els.libraryPlayerTime.textContent = `${mediaClock(position)} / ${mediaClock(duration)}`;
+});
+els.libraryPlayerPosition.addEventListener('change', () => {
+  playerSeekDragging = false;
+  seekLibraryPlayback();
+});
+els.libraryPlayerCrossfade.addEventListener('change', setLibraryCrossfade);
 
 els.lanHostToggle.addEventListener('click', toggleLanHost);
 els.lanJoin.addEventListener('click', joinLanShare);
@@ -3493,6 +3681,7 @@ async function boot() {
     refreshSecondOutput();
     refreshLanShare();
     refreshLibrary();
+    refreshPlayer();
     refreshPresets();
     refreshRoomCatalog();
     refreshStartup();
@@ -3540,6 +3729,13 @@ TAURI?.event?.listen?.('second-output', (event) => {
 TAURI?.event?.listen?.('lan-share', (event) => {
   lanShare = event.payload;
   if (activeView === 'share') renderLanShare();
+});
+
+// The transport's clock comes from the host, not from a counter here: the
+// ticker publishes the position the decks actually reached.
+TAURI?.event?.listen?.('player', (event) => {
+  playerState = event.payload;
+  renderPlayer();
 });
 
 // A scan publishes when it starts, every hundred tracks, and when it ends;

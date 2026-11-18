@@ -29,7 +29,7 @@
 | **Room（房间）** | 24 个测量房间预设、俯视 7.1 音箱摆位拖拽（角度/距离/电平/Mute/Solo）、低音管理、5 对盲听测头型 | **Room 独立页已启用**（5 个空间预设、3 档 KEMAR、几何/衰减/低音管理）；仍无 24 个测量房间与 7.1 音箱摆位拖拽 |
 | **设备与第二输出** | 按端点记忆全套档案；**Second output** 同时镜像到多台设备并各自套用独立档案 | 默认输出跟随与档案记忆已通；**Second output 镜像未接线** |
 | **Gaming Lab** | 可折叠分栏编辑器、进程黑名单（排除系统/启动器）、桌面切换通知、每游戏独立档案副本 | 已有 `games.json`（exe → 预设名）+ `FluidEQ-Games.exe` 接管与还原；无运行中进程选择器与系统进程黑名单 |
-| **播放器 / Library / 紧凑模式** | 文件夹增量扫描、内嵌封面、Album/Artist/Genre/Folder/Video 视图、Cover Flow、每首歌记住调音、底部全局 Transport 栏（接管系统 SMTC）、Compact Player 小窗模式 | **0%（未建 UI，未接 `media-watch` / `volume-watch` 常驻）** |
+| **播放器 / Library / 紧凑模式** | 文件夹增量扫描、内嵌封面、Album/Artist/Genre/Folder/Video 视图、Cover Flow、每首歌记住调音、底部全局 Transport 栏（接管系统 SMTC）、Compact Player 小窗模式 | 曲库扫描/标签/封面、双 Deck 播放与 Crossfade、Library 内 Transport 与 Compact Player 小窗已落地；仍无 Album/Artist/Genre 视图、Cover Flow 与每首歌独立调音，Library Transport 未接管系统 SMTC |
 | **Karaoke & Maker** | `.lrc` / UltraStar 舞台、麦克风实时音高检测与打分；Maker 含本地 GPU 人声分离、Whisper 语音转写、旋律提取 | **0%** |
 | **Share Audio** | 局域网双向加密无损音频共享（连接码配对、`remote-audio-capture/playback`） | 协议算法在 `remote_playback.rs`，**守护进程未打包、UI 未建** |
 | **Online Media** | 内嵌独立 Cookie 仓的受限流媒体视图（YouTube / Bandcamp / Twitch / Suno）边播边调 | **0%** |
@@ -96,8 +96,8 @@
 
 1. **[x] 系统媒体栏与小窗（Transport & Compact Player）**：2026-11-14 已接入 `FluidEQ-Media`（SMTC 读取 + play/pause/next/previous 命令），顶部媒体栏与置顶无边框小窗已完成；音量沿用现有端点主音量命令，未单独打包 `FluidEQ-Volume`。
 2. **[x] 第二输出（Second Output）**：2026-11-14 已打包 `FluidEQ-LAN-Capture/Playback` 与 `--pipe-overlapped` 同步 stdout 支持；Share 页可把系统混音镜像到另一输出（端点选择、开关、电平、延迟与失败状态），主输出不重复播放。2026-11-16 起镜像由 `FluidEQ-LAN-Playback` 托管为子进程，网络共享的捕获可以整树排除它，两套输出不再互相串音。真机双设备听感待统一验证。
-3. **[x] 局域网共享（Share Audio mesh）**：2026-11-16 已完成配对码（8 位、输入免空格/连字符）、同网段 UDP 发现（只回应对应配对码指纹的请求）、TCP 握手双向证明、ChaCha20-Poly1305 加密 PCM（RFC 8439 向量单测）与发送/接收两端 Share 页；接收端复用 `FluidEQ-LAN-Playback`（开输出、抖动缓冲、电平表），发送端捕获作为 playblack helper 子进程并整树排除接收树，双机实听待统一真机验证。
-4. **[~] 本地曲库播放器（Library）**：2026-11-16 第一刀已完成——`fluideq-state::library` 按内容识别 MP3/FLAC/WAV 并读取 ID3v2 文本、FLAC Vorbis 评论、时长与内嵌封面（无新增依赖，标签/封面/base64 均有单测）；文件夹持久化到 `library.json`，扫描在后台线程按百首进度推送 `library` 快照；Library 页支持添加/移除文件夹、搜索、曲目列表与单曲封面详情。下一刀接双 Deck 播放与曲间 Crossfade。
+3. **[x] 局域网共享（Share Audio mesh）**：2026-11-16 已完成配对码（8 位、输入免空格/连字符）、同网段 UDP 发现（只回应对应配对码指纹的请求）、TCP 握手双向证明、ChaCha20-Poly1305 加密 PCM（RFC 8439 向量单测）与发送/接收两端 Share 页；接收端复用 `FluidEQ-LAN-Playback`（开输出、抖动缓冲、电平表），发送端捕获作为 playback helper 子进程并整树排除接收树，双机实听待统一真机验证。
+4. **[x] 本地曲库播放器（Library）**：2026-11-16 第一刀完成文件夹扫描、标签/封面与列表详情；2026-11-18 第二刀完成双 Deck 播放——`engine_host` 新增 LOAD/UNLOAD/SEEK/SELECT/CROSSFADE 与 `FEQT` 传送带遥测解析，`playback` 模块用两条 Deck 做预加载与曲间 Crossfade（0–12s、均衡功率曲线，写在 `player.json`），Library 页有播放/暂停/上一首/下一首/停止、拖动进度与封面；播放位置只取引擎遥测，设备重开（`device_generation` 变化）会按原位置重新入轨。仍无 Album/Artist/Genre 视图、Cover Flow 与每首歌独立调音。
 5. **视觉与外设（Visualizers / Wallpaper / Lighting）**：打包 `FluidEQ-Wallpaper` 与 `lighting-host`，接 GPU 频谱外观与灯效。
 6. **多语言与内置手册（i18n & F1 Guide）**：12 语言词条表与离线手册检索。
 7. **卡拉 OK 与 AI 分轨（Karaoke & Maker）**：`.lrc`/UltraStar 渲染与按需下载 ONNX 模型。

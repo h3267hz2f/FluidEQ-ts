@@ -1224,6 +1224,113 @@ kbd {
   letter-spacing: 0.02em;
 }
 
+.library-player {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.library-player-now {
+  display: flex;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.library-player-cover {
+  width: 42px;
+  height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.library-player-cover[hidden] {
+  display: none;
+}
+
+.library-player-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.library-player-text strong,
+.library-player-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-player-text strong {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.library-player-text span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.library-player-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.library-player-progress {
+  display: flex;
+  flex: 1 1 240px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+}
+
+.library-player-seek {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.library-player-time {
+  color: var(--muted-soft);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.library-player-fade {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.library-player-fade input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+}
+
+.library-track.playing {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.library-play {
+  width: 100%;
+  margin-top: 4px;
+}
+
 .games-card {
   max-width: 780px;
 }
