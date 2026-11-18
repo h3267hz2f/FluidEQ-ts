@@ -46,6 +46,11 @@
               <path d="M9 18v-5h6v5" />
             </svg>
           </button>
+          <button class="nav-btn" type="button" aria-label="Visualizer" data-view="visualizer">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 14v-4M8 17V7M12 20V4M16 17V7M20 14v-4" />
+            </svg>
+          </button>
           <button class="nav-btn" type="button" aria-label="Library" data-view="library">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M9 18V6l10-2v12" />
@@ -592,6 +597,18 @@
               </aside>
             </div>
           </div>
+        </section>
+
+        <section class="view-visualizer" data-view-panel="visualizer" hidden>
+          <div class="visualizer-stage">
+            <canvas id="visualizer-canvas" aria-label="Live spectrum of the mix" role="img"></canvas>
+            <p id="visualizer-idle" class="visualizer-idle">Nothing is playing</p>
+          </div>
+          <div class="visualizer-now">
+            <strong id="visualizer-title">Nothing playing</strong>
+            <span id="visualizer-artist">Start a track from the Library</span>
+          </div>
+          <p class="settings-note">The picture follows the engine's spectrum; it stops when the audio stops or the window hides.</p>
         </section>
 
         <section class="view-games" data-view-panel="games" hidden>

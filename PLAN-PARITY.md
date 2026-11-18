@@ -33,7 +33,7 @@
 | **Karaoke & Maker** | `.lrc` / UltraStar 舞台、麦克风实时音高检测与打分；Maker 含本地 GPU 人声分离、Whisper 语音转写、旋律提取 | **0%** |
 | **Share Audio** | 局域网双向加密无损音频共享（连接码配对、`remote-audio-capture/playback`） | 协议算法在 `remote_playback.rs`，**守护进程未打包、UI 未建** |
 | **Online Media** | 内嵌独立 Cookie 仓的受限流媒体视图（YouTube / Bandcamp / Twitch / Suno）边播边调 | **0%** |
-| **Visualizers / Studio / 壁纸 / 灯效** | 40 种 GPU 频谱外观、3D 场景、AI Studio、多屏动态壁纸（`FluidEQ-Wallpaper`）、Windows Dynamic Lighting & Razer Chroma（`lighting-host`） | **0%（仅 `system_daemons.rs` 有协议结构体，未拉起进程也无画布）** |
+| **Visualizers / Studio / 壁纸 / 灯效** | 40 种 GPU 频谱外观、3D 场景、AI Studio、多屏动态壁纸（`FluidEQ-Wallpaper`）、Windows Dynamic Lighting & Razer Chroma（`lighting-host`） | 应用内 Visualizer 页已落地（镜像频谱 + 峰值 + 当前曲目）；仍无 40 种 GPU 外观、3D 场景、壁纸与灯效进程 |
 | **国际化 / 指南 / 更新** | 12 语言切换、F1 模糊搜索图文手册、后台自动更新与签名校验 | 仅英文硬编码、无 F1 手册、无自动更新 |
 
 ---
@@ -98,7 +98,7 @@
 2. **[x] 第二输出（Second Output）**：2026-11-14 已打包 `FluidEQ-LAN-Capture/Playback` 与 `--pipe-overlapped` 同步 stdout 支持；Share 页可把系统混音镜像到另一输出（端点选择、开关、电平、延迟与失败状态），主输出不重复播放。2026-11-16 起镜像由 `FluidEQ-LAN-Playback` 托管为子进程，网络共享的捕获可以整树排除它，两套输出不再互相串音。真机双设备听感待统一验证。
 3. **[x] 局域网共享（Share Audio mesh）**：2026-11-16 已完成配对码（8 位、输入免空格/连字符）、同网段 UDP 发现（只回应对应配对码指纹的请求）、TCP 握手双向证明、ChaCha20-Poly1305 加密 PCM（RFC 8439 向量单测）与发送/接收两端 Share 页；接收端复用 `FluidEQ-LAN-Playback`（开输出、抖动缓冲、电平表），发送端捕获作为 playback helper 子进程并整树排除接收树，双机实听待统一真机验证。
 4. **[x] 本地曲库播放器（Library）**：2026-11-16 第一刀完成文件夹扫描、标签/封面与列表详情；2026-11-18 第二刀完成双 Deck 播放——`engine_host` 新增 LOAD/UNLOAD/SEEK/SELECT/CROSSFADE 与 `FEQT` 传送带遥测解析，`playback` 模块用两条 Deck 做预加载与曲间 Crossfade（0–12s、均衡功率曲线，写在 `player.json`），Library 页有播放/暂停/上一首/下一首/停止、拖动进度与封面；播放位置只取引擎遥测，设备重开（`device_generation` 变化）会按原位置重新入轨。同日第三刀补齐 Tracks / Albums / Artists / Queue 四种浏览：专辑与歌手按标签分组、点击即过滤曲目并可清除，Queue 由新命令 `player_up_next` 按引擎队列顺序给出待播窗口。第四刀接上每首歌独立调音：曲目详情可记住/清除当前整链曲线（存 `track-tunings.json`，最多 2000 首），播放进入该曲时由播放器钩子调用 `restore_curve` 自动套回；游戏预设接管期间让位，游戏退出时恢复它打断的那条曲线。第五刀补齐 Genre / Folder 浏览与专辑封面网格：`Track` 增加 genre（ID3 `TCON` 兼容 `(17)` 写法、FLAC `GENRE`），文件夹按目录分组；Albums 改为封面卡片网格，封面按专辑懒加载并缓存（首 80 张）。仍无 Cover Flow 与 Library Transport 接管 SMTC。
-5. **视觉与外设（Visualizers / Wallpaper / Lighting）**：打包 `FluidEQ-Wallpaper` 与 `lighting-host`，接 GPU 频谱外观与灯效。
+5. **[~] 视觉与外设（Visualizers / Wallpaper / Lighting）**：2026-11-18 第一刀完成应用内 Visualizer 页——镜像频谱条 + 下落峰值，复用 `spectrum` 事件，停止发声或离开页面即停止重绘，并显示当前曲目；仍未打包 `FluidEQ-Wallpaper` 与 `lighting-host`，无 40 种 GPU 外观与灯效。
 6. **多语言与内置手册（i18n & F1 Guide）**：12 语言词条表与离线手册检索。
 7. **卡拉 OK 与 AI 分轨（Karaoke & Maker）**：`.lrc`/UltraStar 渲染与按需下载 ONNX 模型。
 

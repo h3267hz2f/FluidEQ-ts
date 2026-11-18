@@ -15,6 +15,7 @@ import { config } from './views/config/index.js';
 import { games } from './views/games/index.js';
 import { library } from './views/library/index.js';
 import { share } from './views/share/index.js';
+import { visualizer } from './views/visualizer/index.js';
 import {
   rack,
   rackStages,
@@ -238,6 +239,10 @@ const els = {
   libraryPlayerPosition: document.getElementById('library-player-position'),
   libraryPlayerTime: document.getElementById('library-player-time'),
   libraryPlayerCrossfade: document.getElementById('library-player-crossfade'),
+  visualizerCanvas: document.getElementById('visualizer-canvas'),
+  visualizerIdle: document.getElementById('visualizer-idle'),
+  visualizerTitle: document.getElementById('visualizer-title'),
+  visualizerArtist: document.getElementById('visualizer-artist'),
   gamesList: document.getElementById('games-list'),
   gamesEmpty: document.getElementById('games-empty'),
   gamesUnavailable: document.getElementById('games-unavailable'),
@@ -306,6 +311,7 @@ registerView(room);
 registerView(games);
 registerView(library);
 registerView(share);
+registerView(visualizer);
 registerView(settings);
 
 let activeView = 'equalizer';
@@ -2130,6 +2136,7 @@ function renderPlayer() {
   }
   showPlayerCover(hasTrack ? current.path : null);
   updateLibraryPlayingRow();
+  renderVisualizer();
   if (current?.error && current.error !== playerErrorShown) {
     playerErrorShown = current.error;
     showMessage(`Player: ${current.error}`);
@@ -3007,6 +3014,7 @@ function showView(id) {
   els.presetBar.hidden = !equalizerView;
   if (!equalizerView) els.presetForm.hidden = true;
   if (equalizerView) scheduleDraw();
+  setVisualizerActive(view.id === 'visualizer');
   if (view.id === 'config') renderConfig();
   if (view.id === 'rack') renderRack();
   if (view.id === 'room') renderRoom();
@@ -4349,6 +4357,120 @@ els.mediaMini.addEventListener('click', async () => {
 
 TAURI?.event?.listen?.('media', (event) => renderMedia(event.payload));
 
+// The Visualizer is a second reading of the same spectrum event: mirrored
+// bars around the middle, with a falling peak so a hit stays readable after
+// the frame that produced it.
+const VISUALIZER_BARS = 56;
+const visualizerPeaks = [];
+let visualizerFrame = null;
+
+function visualizerLevels(bins) {
+  const levels = new Array(VISUALIZER_BARS).fill(0);
+  if (!bins || bins.length === 0) return levels;
+  const nyquist = Math.max(sampleRate / 2, 1);
+  for (let bar = 0; bar < VISUALIZER_BARS; bar += 1) {
+    const low = F_MIN * (F_MAX / F_MIN) ** (bar / VISUALIZER_BARS);
+    const high = F_MIN * (F_MAX / F_MIN) ** ((bar + 1) / VISUALIZER_BARS);
+    const first = clamp(Math.round((low / nyquist) * (bins.length - 1)), 0, bins.length - 1);
+    const last = clamp(Math.round((high / nyquist) * (bins.length - 1)), first, bins.length - 1);
+    let peak = -96;
+    for (let index = first; index <= last; index += 1) {
+      const db = Number(bins[index]);
+      if (Number.isFinite(db) && db > peak) peak = db;
+    }
+    levels[bar] = clamp((peak + 96) / 90, 0, 1);
+  }
+  return levels;
+}
+
+function renderVisualizer() {
+  const current = playerState;
+  const hasTrack = Boolean(current?.path);
+  els.visualizerTitle.textContent = hasTrack
+    ? current.title || 'Untitled track'
+    : 'Nothing playing';
+  els.visualizerArtist.textContent = hasTrack
+    ? [current.artist, current.album].filter(Boolean).join(' · ') || 'Unknown artist'
+    : 'Start a track from the Library';
+}
+
+function drawVisualizer() {
+  visualizerFrame = null;
+  if (activeView !== 'visualizer') return;
+  const canvas = els.visualizerCanvas;
+  if (!canvas) return;
+  const dpr = Math.max(window.devicePixelRatio || 1, 1);
+  const width = Math.max(canvas.clientWidth, 1);
+  const height = Math.max(canvas.clientHeight, 1);
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const middle = height / 2;
+  const levels = visualizerLevels(spectrumBins);
+  const side = 12;
+  const slot = (width - side * 2) / VISUALIZER_BARS;
+  const barWidth = Math.max(1.5, slot * 0.66);
+  const maxHalf = middle - 12;
+  const gradient = ctx.createLinearGradient(0, middle - maxHalf, 0, middle + maxHalf);
+  gradient.addColorStop(0, 'rgba(124,160,255,0.95)');
+  gradient.addColorStop(0.5, 'rgba(59,232,196,0.95)');
+  gradient.addColorStop(1, 'rgba(124,160,255,0.95)');
+
+  let alive = false;
+  for (let bar = 0; bar < VISUALIZER_BARS; bar += 1) {
+    const level = levels[bar];
+    const peak = Math.max(level, (visualizerPeaks[bar] ?? 0) - 0.012);
+    visualizerPeaks[bar] = peak;
+    if (peak > 0.004) alive = true;
+    const x = side + bar * slot + (slot - barWidth) / 2;
+    const half = level > 0.001 ? Math.max(level * maxHalf, 1.5) : 0;
+    if (half > 0) {
+      ctx.fillStyle = gradient;
+      if (typeof ctx.roundRect === 'function') {
+        ctx.beginPath();
+        ctx.roundRect(x, middle - half, barWidth, half * 2, Math.min(barWidth / 2, 3));
+        ctx.fill();
+      } else {
+        ctx.fillRect(x, middle - half, barWidth, half * 2);
+      }
+    }
+    if (peak > 0.01) {
+      const cap = Math.max(peak * maxHalf, 2);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.fillRect(x, middle - cap - 2, barWidth, 1.5);
+      ctx.fillRect(x, middle + cap + 0.5, barWidth, 1.5);
+    }
+  }
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.fillRect(side, middle - 0.5, width - side * 2, 1);
+
+  els.visualizerIdle.hidden = spectrumBins !== null;
+  if (spectrumBins !== null || alive) scheduleVisualizer();
+}
+
+function scheduleVisualizer() {
+  if (activeView !== 'visualizer' || visualizerFrame !== null) return;
+  visualizerFrame = requestAnimationFrame(drawVisualizer);
+}
+
+function setVisualizerActive(active) {
+  if (!active && visualizerFrame !== null) {
+    cancelAnimationFrame(visualizerFrame);
+    visualizerFrame = null;
+  }
+  if (!active) return;
+  renderVisualizer();
+  scheduleVisualizer();
+}
+
 // Live spectrum and multi-stage telemetry. The Rust bridge only emits while
 // the window is focused and sound is actually playing, so this listener never
 // keeps the canvas animating over silence or in the tray.
@@ -4361,6 +4483,7 @@ TAURI?.event?.listen?.('spectrum', (event) => {
   if (activeView === 'equalizer' && (spectrumBins !== null || wasActive)) {
     scheduleDraw();
   }
+  if (activeView === 'visualizer') scheduleVisualizer();
 });
 
 // The volume hotkeys change Windows directly; the slider follows the same
