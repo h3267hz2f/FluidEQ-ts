@@ -33,6 +33,8 @@ const PRELOAD_LEAD_SECONDS: f64 = 2.5;
 const FADE_TRIGGER_LEAD_SECONDS: f64 = 0.3;
 const MAX_CROSSFADE_SECONDS: f64 = 12.0;
 const DEFAULT_CROSSFADE_SECONDS: f64 = 4.0;
+/// The page shows a window of the queue, not a copy of a 50,000-track list.
+const MAX_UP_NEXT: usize = 200;
 /// A transition whose deck never appears is not a slow device: the player was
 /// rebuilt under it.
 const AWAIT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -351,6 +353,23 @@ impl PlaybackState {
         inner.awaiting = None;
         inner.error = None;
         Ok(snapshot_of(&inner))
+    }
+
+    /// The tracks after the one playing, in the order the queue will take
+    /// them. Empty when nothing has been played.
+    pub fn up_next(&self, limit: u32) -> Vec<Track> {
+        let inner = lock(&self.inner);
+        let Some(index) = inner.index else {
+            return Vec::new();
+        };
+        let limit = (limit as usize).min(MAX_UP_NEXT);
+        inner
+            .queue
+            .iter()
+            .skip(index + 1)
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     pub fn set_crossfade(&self, seconds: f64) -> Result<PlayerSnapshot, String> {
@@ -706,6 +725,48 @@ mod tests {
         assert_eq!(seconds_to_ms(1.2345), 1235);
         assert_eq!(seconds_to_ms(-1.0), 0);
         assert_eq!(seconds_to_ms(f64::INFINITY), 0);
+    }
+
+    fn demo_track(path: &str) -> Track {
+        Track {
+            path: path.to_string(),
+            title: path.to_string(),
+            artist: None,
+            album: None,
+            track: None,
+            disc: None,
+            duration_ms: Some(1_000),
+            format: String::from("WAV"),
+        }
+    }
+
+    #[test]
+    fn up_next_starts_after_the_current_track_and_stops_at_the_window() {
+        let state = PlaybackState::new(
+            std::env::temp_dir().join("fluideq-player-queue"),
+            EngineHost::new(PathBuf::from("no-such-host.exe")),
+        );
+        {
+            let mut inner = lock(&state.inner);
+            inner.queue = (0..5).map(|at| demo_track(&format!("t{at}"))).collect();
+            inner.index = Some(1);
+        }
+        let next: Vec<String> = state
+            .up_next(2)
+            .into_iter()
+            .map(|track| track.path)
+            .collect();
+        assert_eq!(next, vec![String::from("t2"), String::from("t3")]);
+        assert_eq!(state.up_next(50).len(), 3);
+    }
+
+    #[test]
+    fn a_stopped_transport_has_nothing_up_next() {
+        let state = PlaybackState::new(
+            std::env::temp_dir().join("fluideq-player-empty"),
+            EngineHost::new(PathBuf::from("no-such-host.exe")),
+        );
+        assert!(state.up_next(10).is_empty());
     }
 
     #[test]

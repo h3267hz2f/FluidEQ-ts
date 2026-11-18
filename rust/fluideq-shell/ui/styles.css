@@ -1046,6 +1046,54 @@ kbd {
   color: var(--muted-soft);
 }
 
+.library-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.library-mode {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.library-mode:hover {
+  color: var(--text);
+}
+
+.library-mode.active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.library-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.library-filter[hidden] {
+  display: none;
+}
+
+.library-filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 .library-folders {
   display: flex;
   flex-wrap: wrap;

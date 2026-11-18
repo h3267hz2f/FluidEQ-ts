@@ -536,9 +536,19 @@
                 </span>
               </div>
               <div class="stat-row">
+                <span>Browse</span>
+                <div id="library-modes" class="library-modes" role="group" aria-label="Browse the library">
+                  <button class="library-mode active" type="button" data-library-mode="tracks" aria-pressed="true">Tracks</button>
+                  <button class="library-mode" type="button" data-library-mode="albums" aria-pressed="false">Albums</button>
+                  <button class="library-mode" type="button" data-library-mode="artists" aria-pressed="false">Artists</button>
+                  <button class="library-mode" type="button" data-library-mode="queue" aria-pressed="false">Queue</button>
+                </div>
+              </div>
+              <div class="stat-row">
                 <span>Search</span>
                 <input id="library-search" class="library-search" type="search" placeholder="Title, artist, album" aria-label="Filter tracks" />
               </div>
+              <div id="library-filter" class="library-filter" hidden></div>
               <p id="library-state" class="settings-note">No folders yet — paste a folder path and add it.</p>
             </div>
             <div id="library-player" class="library-player">

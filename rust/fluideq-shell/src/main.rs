@@ -1048,6 +1048,14 @@ fn player_set_crossfade(
 }
 
 #[tauri::command]
+fn player_up_next(
+    state: State<'_, playback::PlaybackState>,
+    limit: u32,
+) -> Vec<fluideq_state::library::Track> {
+    state.up_next(limit)
+}
+
+#[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
 }
@@ -1620,6 +1628,7 @@ fn main() {
             player_seek,
             player_stop,
             player_set_crossfade,
+            player_up_next,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,
