@@ -225,6 +225,8 @@ const els = {
   libraryAlbum: document.getElementById('library-album'),
   libraryMeta: document.getElementById('library-meta'),
   libraryPlay: document.getElementById('library-play'),
+  libraryRemember: document.getElementById('library-remember'),
+  libraryTuningNote: document.getElementById('library-tuning-note'),
   libraryPlayer: document.getElementById('library-player'),
   libraryPlayerCover: document.getElementById('library-player-cover'),
   libraryPlayerTitle: document.getElementById('library-player-title'),
@@ -338,6 +340,10 @@ let libraryAlbumFilter = null;
 let libraryArtistFilter = null;
 let upNext = [];
 let playerUpNextPath = undefined;
+let libraryTuningPath = null;
+let libraryTuning = null;
+let libraryTuningToken = 0;
+let libraryTuningBusy = false;
 let playerState = null;
 let playerSeekDragging = false;
 let playerCoverPath = null;
@@ -1593,13 +1599,22 @@ function renderLibraryDetail() {
   const selected = tracks.find((track) => track.path === librarySelected);
   if (!selected) {
     librarySelected = null;
+    libraryTuningPath = null;
+    libraryTuning = null;
+    libraryTuningToken += 1;
     els.libraryDetail.hidden = true;
     els.libraryPlay.disabled = true;
+    els.libraryRemember.disabled = true;
+    els.libraryTuningNote.textContent = '';
     libraryCoverToken += 1;
     return;
   }
   els.libraryDetail.hidden = false;
   els.libraryPlay.disabled = false;
+  if (libraryTuningPath !== selected.path) {
+    refreshLibraryTuning(selected.path);
+  }
+  renderLibraryTuning();
   els.libraryTitle.textContent = selected.title;
   els.libraryArtist.textContent = selected.artist || 'Unknown artist';
   els.libraryAlbum.textContent = selected.album || 'Unknown album';
@@ -1608,6 +1623,68 @@ function renderLibraryDetail() {
   if (selected.disc) meta.push(`Disc ${selected.disc}`);
   if (selected.track) meta.push(`Track ${selected.track}`);
   els.libraryMeta.textContent = meta.filter(Boolean).join(' · ');
+}
+
+function selectedLibraryTrack() {
+  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
+  return tracks.find((track) => track.path === librarySelected) ?? null;
+}
+
+function renderLibraryTuning() {
+  const selected = selectedLibraryTrack();
+  const remembered = Boolean(
+    selected && libraryTuningPath === selected.path && libraryTuning?.remembered
+  );
+  els.libraryRemember.disabled = !selected || libraryTuningBusy;
+  els.libraryRemember.textContent = remembered
+    ? "Forget this track's tuning"
+    : "Remember this track's tuning";
+  els.libraryTuningNote.textContent = remembered
+    ? `Its own curve plays with it${libraryTuning.preset ? ` · ${libraryTuning.preset}` : ''}.`
+    : '';
+}
+
+async function refreshLibraryTuning(path) {
+  const token = ++libraryTuningToken;
+  libraryTuningPath = path;
+  libraryTuning = null;
+  if (!invoke) return renderLibraryTuning();
+  try {
+    const info = await invoke('track_tuning_status', { path });
+    if (token !== libraryTuningToken || librarySelected !== path) return;
+    libraryTuning = info;
+  } catch {
+    libraryTuning = null;
+  }
+  renderLibraryTuning();
+}
+
+async function toggleLibraryTuning() {
+  const selected = selectedLibraryTrack();
+  if (!invoke || !selected || libraryTuningBusy) return;
+  const remembered = Boolean(
+    libraryTuningPath === selected.path && libraryTuning?.remembered
+  );
+  libraryTuningBusy = true;
+  renderLibraryTuning();
+  try {
+    libraryTuning = await invoke(
+      remembered ? 'track_tuning_forget' : 'track_tuning_remember',
+      { path: selected.path }
+    );
+    libraryTuningPath = selected.path;
+    showMessage(
+      remembered
+        ? 'This track no longer carries its own curve'
+        : "This track's curve is remembered",
+      'ok'
+    );
+  } catch (error) {
+    showMessage(`Track tuning: ${error}`);
+  } finally {
+    libraryTuningBusy = false;
+    renderLibraryTuning();
+  }
 }
 
 function renderLibrary() {
@@ -3477,10 +3554,10 @@ els.libraryFolderInput.addEventListener('keydown', (event) => {
   addLibraryFolder();
 });
 els.libraryPlay.addEventListener('click', () => {
-  const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
-  const selected = tracks.find((track) => track.path === librarySelected);
+  const selected = selectedLibraryTrack();
   if (selected) playLibraryTrack(selected);
 });
+els.libraryRemember.addEventListener('click', toggleLibraryTuning);
 els.libraryPlayerToggle.addEventListener('click', toggleLibraryPlayback);
 els.libraryPlayerPrevious.addEventListener('click', previousLibraryTrack);
 els.libraryPlayerNext.addEventListener('click', nextLibraryTrack);

@@ -20,6 +20,7 @@ pub mod engine_setup;
 pub mod game_presets;
 pub mod host_runtime;
 pub mod playback;
+pub mod track_tuning;
 pub mod lan_share;
 pub mod library;
 pub mod media_watch;
@@ -150,6 +151,39 @@ fn release_game(app: &tauri::AppHandle) {
         .ok()
         .and_then(|mut slot| slot.take())
     else {
+        return;
+    };
+    let Ok(mut store) = store_of(&state) else {
+        return;
+    };
+    store.restore_curve(&saved);
+    store.ensure_room_head_loaded(&room_heads_dir(app));
+    let snapshot = store.snapshot();
+    save(&store, &state);
+    push_chain(&store, &state, snapshot.revision);
+    let _ = apo_bridge::publish(&snapshot);
+    let _ = app.emit("snapshot", snapshot);
+}
+
+/// A track came onto the path: put back the curve it remembers, unless a game
+/// preset owns the sound. The game's release restores what it interrupted,
+/// which is the track's curve if one had just been applied.
+fn apply_track_tuning(app: &tauri::AppHandle, path: &str) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    if state
+        .game_restore
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(tunings) = app.try_state::<track_tuning::TrackTuningState>() else {
+        return;
+    };
+    let Some(saved) = tunings.get(path) else {
         return;
     };
     let Ok(mut store) = store_of(&state) else {
@@ -1056,6 +1090,37 @@ fn player_up_next(
 }
 
 #[tauri::command]
+fn track_tuning_status(
+    tunings: State<'_, track_tuning::TrackTuningState>,
+    path: String,
+) -> track_tuning::TrackTuningInfo {
+    tunings.info(&path)
+}
+
+#[tauri::command]
+fn track_tuning_remember(
+    app: tauri::AppHandle,
+    state: State<'_, ShellState>,
+    tunings: State<'_, track_tuning::TrackTuningState>,
+    path: String,
+) -> Result<track_tuning::TrackTuningInfo, String> {
+    let snapshot = store_of(&state)?.snapshot();
+    let library = app.state::<library::LibraryState>().snapshot();
+    if !library.tracks.iter().any(|track| track.path == path) {
+        return Err(String::from("that track is not in the library"));
+    }
+    tunings.remember(&path, snapshot)
+}
+
+#[tauri::command]
+fn track_tuning_forget(
+    tunings: State<'_, track_tuning::TrackTuningState>,
+    path: String,
+) -> Result<track_tuning::TrackTuningInfo, String> {
+    tunings.forget(&path)
+}
+
+#[tauri::command]
 fn engine_host_status(state: State<'_, ShellState>) -> Result<engine_host::EngineHostStatus, String> {
     Ok(state.host.status())
 }
@@ -1468,6 +1533,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let state_path = data_dir.join("state.json");
             app.manage(library::LibraryState::new(data_dir.clone()));
+            app.manage(track_tuning::TrackTuningState::new(data_dir.clone()));
             let mut store = AppStateStore::new(48_000.0);
             if state_path.exists() {
                 // A corrupt file leaves the defaults in place; the first
@@ -1509,6 +1575,10 @@ fn main() {
                 spectrum: Mutex::new(spectrum_bridge::SpectrumBridge::new(96)),
             });
             app.manage(media_watch::MediaWatchState::start(app.handle()));
+            let track_app = app.handle().clone();
+            playback.set_track_hook(std::sync::Arc::new(move |path| {
+                apply_track_tuning(&track_app, path);
+            }));
             app.manage(playback.clone());
             playback.start(app.handle().clone());
             app.manage(second_output::SecondOutputState::new());
@@ -1629,6 +1699,9 @@ fn main() {
             player_stop,
             player_set_crossfade,
             player_up_next,
+            track_tuning_status,
+            track_tuning_remember,
+            track_tuning_forget,
             engine_host_status,
             get_startup_enabled,
             set_startup_enabled,

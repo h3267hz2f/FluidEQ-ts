@@ -155,6 +155,11 @@ impl Default for Inner {
     }
 }
 
+/// Called with the path of a track the transport just moved to, after the
+/// engine accepted it. The shell uses it to put that track's remembered curve
+/// back; playback itself stays out of the store.
+pub type TrackHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct PlaybackState {
     inner: Arc<Mutex<Inner>>,
@@ -163,6 +168,7 @@ pub struct PlaybackState {
     ops: Arc<Mutex<()>>,
     host: EngineHost,
     data_dir: PathBuf,
+    hook: Arc<Mutex<Option<TrackHook>>>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -183,7 +189,13 @@ impl PlaybackState {
             ops: Arc::new(Mutex::new(())),
             host,
             data_dir,
+            hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Installs the callback that applies a track's remembered curve.
+    pub fn set_track_hook(&self, hook: TrackHook) {
+        *lock(&self.hook) = Some(hook);
     }
 
     /// Starts the loop that follows the host's clock and readies the next
@@ -383,16 +395,21 @@ impl PlaybackState {
     /// Loads `target` onto a deck and puts it on the path. The caller holds
     /// [`Self::ops`].
     fn transition(&self, target: usize, fade: bool, cue_seconds: f64) -> Result<(), String> {
-        let (track, from_index, current_deck, preloaded, playing, crossfade_seconds) = {
+        let (track, from_index, from_path, current_deck, preloaded, playing, crossfade_seconds) = {
             let inner = lock(&self.inner);
             let track = inner
                 .queue
                 .get(target)
                 .cloned()
                 .ok_or_else(|| String::from("that track is not in the queue"))?;
+            let from_path = inner
+                .index
+                .and_then(|index| inner.queue.get(index))
+                .map(|track| track.path.clone());
             (
                 track,
                 inner.index,
+                from_path,
                 inner.current_deck,
                 inner.preloaded,
                 inner.playing,
@@ -439,6 +456,15 @@ impl PlaybackState {
         inner.error = None;
         if inner.playing {
             inner.paused = false;
+        }
+        // A re-cue of the same track (device reopen, restart after the end)
+        // is not a new choice of tuning; a different file is.
+        let announce = from_path.as_deref() != Some(track.path.as_str());
+        drop(inner);
+        if announce {
+            if let Some(hook) = lock(&self.hook).clone() {
+                hook(&track.path);
+            }
         }
         Ok(())
     }
