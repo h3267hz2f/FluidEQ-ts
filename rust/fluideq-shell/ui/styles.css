@@ -1083,6 +1083,101 @@ kbd {
   display: none;
 }
 
+.library-album-layout {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.library-album-layout[hidden] {
+  display: none;
+}
+
+.coverflow {
+  position: relative;
+  height: 320px;
+  overflow: hidden;
+  perspective: 1100px;
+}
+
+.coverflow-card {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 170px;
+  margin-left: -85px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  transform-style: preserve-3d;
+  transition:
+    transform 0.3s ease,
+    opacity 0.3s ease;
+}
+
+.coverflow-cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 170px;
+  height: 170px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+  color: var(--muted-soft);
+  font-size: 10px;
+}
+
+.coverflow-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.coverflow-cover img[hidden],
+.coverflow-cover-empty[hidden] {
+  display: none;
+}
+
+.coverflow-card strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverflow-card:not(.center) strong {
+  opacity: 0.65;
+}
+
+.coverflow-controls {
+  position: absolute;
+  right: 0;
+  bottom: 6px;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.coverflow-count {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 .library-filter-chip {
   display: flex;
   align-items: center;

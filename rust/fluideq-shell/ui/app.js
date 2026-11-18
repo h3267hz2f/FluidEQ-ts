@@ -216,6 +216,7 @@ const els = {
   librarySearch: document.getElementById('library-search'),
   libraryModes: document.getElementById('library-modes'),
   libraryFilter: document.getElementById('library-filter'),
+  libraryAlbumLayout: document.getElementById('library-album-layout'),
   libraryState: document.getElementById('library-state'),
   libraryList: document.getElementById('library-list'),
   libraryDetail: document.getElementById('library-detail'),
@@ -346,6 +347,9 @@ let libraryAlbumFilter = null;
 let libraryArtistFilter = null;
 let libraryGenreFilter = null;
 let libraryFolderFilter = null;
+let libraryAlbumLayout = 'grid';
+let libraryFlowIndex = 0;
+let libraryFlowCount = 0;
 const albumCoverCache = new Map();
 const albumCoverPending = new Set();
 let upNext = [];
@@ -1697,7 +1701,7 @@ function libraryAlbumCard(group) {
 }
 
 function refreshAlbumCoverElements() {
-  for (const card of els.libraryList.querySelectorAll('.library-album')) {
+  for (const card of els.libraryList.querySelectorAll('[data-cover-key]')) {
     let key;
     try {
       key = decodeURIComponent(card.dataset.coverKey);
@@ -1707,13 +1711,97 @@ function refreshAlbumCoverElements() {
     const data = albumCoverCache.get(key);
     if (!data) continue;
     const image = card.querySelector('img');
-    const placeholder = card.querySelector('.library-album-cover-empty');
+    const placeholder = card.querySelector(
+      '.library-album-cover-empty, .coverflow-cover-empty'
+    );
     if (image && image.hidden) {
       image.src = data;
       image.hidden = false;
       if (placeholder) placeholder.hidden = true;
     }
   }
+}
+
+function libraryCoverFlow(groups) {
+  const flow = document.createElement('div');
+  flow.className = 'coverflow';
+  const count = Math.min(groups.length, 60);
+  libraryFlowCount = count;
+  libraryFlowIndex = clamp(libraryFlowIndex, 0, Math.max(count - 1, 0));
+  if (count === 0) return flow;
+  for (let index = 0; index < count; index += 1) {
+    const distance = index - libraryFlowIndex;
+    if (Math.abs(distance) > 3) continue;
+    const group = groups[index];
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = `coverflow-card${distance === 0 ? ' center' : ''}`;
+    card.dataset.coverKey = encodeURIComponent(group.key);
+    card.style.transform = [
+      `translateX(${distance * 168}px)`,
+      `translateZ(${-Math.abs(distance) * 150}px)`,
+      `rotateY(${-distance * 42}deg)`,
+      `scale(${distance === 0 ? 1.06 : 1})`,
+    ].join(' ');
+    card.style.opacity = String(
+      distance === 0 ? 1 : Math.max(0.25, 0.72 - Math.abs(distance) * 0.18)
+    );
+    card.style.zIndex = String(10 - Math.abs(distance));
+    const cover = document.createElement('span');
+    cover.className = 'coverflow-cover';
+    const image = document.createElement('img');
+    image.alt = '';
+    image.hidden = true;
+    const placeholder = document.createElement('span');
+    placeholder.className = 'coverflow-cover-empty';
+    placeholder.textContent = 'No cover';
+    cover.append(image, placeholder);
+    const data = albumCoverCache.get(group.key);
+    if (data) {
+      image.src = data;
+      image.hidden = false;
+      placeholder.hidden = true;
+    }
+    const title = document.createElement('strong');
+    title.textContent = group.album || 'Unknown album';
+    card.append(cover, title);
+    card.addEventListener('click', () => {
+      if (index === libraryFlowIndex) {
+        openLibraryAlbum(group);
+        return;
+      }
+      libraryFlowIndex = index;
+      renderLibrary();
+    });
+    loadAlbumCover(group);
+    flow.append(card);
+  }
+  const controls = document.createElement('div');
+  controls.className = 'coverflow-controls';
+  const previous = document.createElement('button');
+  previous.type = 'button';
+  previous.className = 'library-mode';
+  previous.textContent = 'Previous';
+  previous.disabled = libraryFlowIndex <= 0;
+  previous.addEventListener('click', () => {
+    libraryFlowIndex = Math.max(0, libraryFlowIndex - 1);
+    renderLibrary();
+  });
+  const label = document.createElement('span');
+  label.className = 'coverflow-count';
+  label.textContent = `${libraryFlowIndex + 1} / ${count}`;
+  const next = document.createElement('button');
+  next.type = 'button';
+  next.className = 'library-mode';
+  next.textContent = 'Next';
+  next.disabled = libraryFlowIndex >= count - 1;
+  next.addEventListener('click', () => {
+    libraryFlowIndex = Math.min(count - 1, libraryFlowIndex + 1);
+    renderLibrary();
+  });
+  controls.append(previous, label, next);
+  flow.append(controls);
+  return flow;
 }
 
 function loadAlbumCover(group) {
@@ -1895,14 +1983,27 @@ function renderLibrary() {
   renderLibraryModes();
   renderLibraryFilter();
 
+  const albumsMode = libraryMode === 'albums';
+  els.libraryAlbumLayout.hidden = !albumsMode;
+  if (albumsMode) {
+    for (const button of els.libraryAlbumLayout.querySelectorAll('[data-album-layout]')) {
+      const active = button.dataset.albumLayout === libraryAlbumLayout;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    }
+  }
   let rows = [];
   let total = 0;
-  els.libraryList.classList.toggle('grid', libraryMode === 'albums');
-  if (libraryMode === 'albums') {
+  els.libraryList.classList.toggle('grid', albumsMode && libraryAlbumLayout === 'grid');
+  if (albumsMode) {
     const groups = libraryAlbums(libraryTracks());
     total = groups.length;
-    rows = groups.slice(0, LIBRARY_ROW_LIMIT).map(libraryAlbumCard);
-    groups.slice(0, ALBUM_COVER_LIMIT).forEach(loadAlbumCover);
+    if (libraryAlbumLayout === 'flow') {
+      rows = groups.length ? [libraryCoverFlow(groups)] : [];
+    } else {
+      rows = groups.slice(0, LIBRARY_ROW_LIMIT).map(libraryAlbumCard);
+      groups.slice(0, ALBUM_COVER_LIMIT).forEach(loadAlbumCover);
+    }
   } else if (libraryMode === 'artists') {
     const groups = libraryArtists(libraryTracks());
     total = groups.length;
@@ -3764,6 +3865,23 @@ els.libraryModes.addEventListener('click', (event) => {
   clearLibraryFilters();
   renderLibrary();
   if (libraryMode === 'queue') refreshUpNext();
+});
+els.libraryAlbumLayout.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-album-layout]');
+  if (!button) return;
+  libraryAlbumLayout = button.dataset.albumLayout;
+  renderLibrary();
+});
+document.addEventListener('keydown', (event) => {
+  if (activeView !== 'library' || libraryMode !== 'albums') return;
+  if (libraryAlbumLayout !== 'flow' || libraryFlowCount === 0) return;
+  if (event.key === 'ArrowLeft') {
+    libraryFlowIndex = Math.max(0, libraryFlowIndex - 1);
+    renderLibrary();
+  } else if (event.key === 'ArrowRight') {
+    libraryFlowIndex = Math.min(libraryFlowCount - 1, libraryFlowIndex + 1);
+    renderLibrary();
+  }
 });
 els.libraryFolderInput.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') return;
