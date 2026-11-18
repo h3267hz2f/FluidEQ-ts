@@ -33,6 +33,8 @@ pub struct Track {
     pub title: String,
     pub artist: Option<String>,
     pub album: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
     pub track: Option<u32>,
     pub disc: Option<u32>,
     pub duration_ms: Option<u64>,
@@ -60,6 +62,7 @@ struct Tags {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    genre: Option<String>,
     track: Option<u32>,
     disc: Option<u32>,
     duration_ms: Option<u64>,
@@ -169,9 +172,7 @@ pub fn read_cover(path: &Path) -> Option<CoverArt> {
     let container = crate::compressed_audio::sniff_container(&head[..read])?;
     let _ = file.seek(SeekFrom::Start(0));
     let found = match container {
-        crate::compressed_audio::AudioContainer::Flac => {
-            read_flac(&mut file, true).1
-        }
+        crate::compressed_audio::AudioContainer::Flac => read_flac(&mut file, true).1,
         _ => read_id3(&mut file, true).1,
     }?;
     let (mime, bytes) = found;
@@ -226,6 +227,7 @@ pub fn read_track(path: &Path) -> Option<Track> {
         title: tags.title.unwrap_or(stem),
         artist: tags.artist,
         album: tags.album,
+        genre: tags.genre,
         track: tags.track,
         disc: tags.disc,
         duration_ms: tags.duration_ms,
@@ -256,7 +258,9 @@ fn syncsafe(bytes: &[u8]) -> u64 {
 }
 
 fn big_endian(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0u64, |value, byte| (value << 8) | u64::from(*byte))
+    bytes
+        .iter()
+        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte))
 }
 
 fn deunsync(bytes: &[u8]) -> Vec<u8> {
@@ -279,13 +283,30 @@ fn first_text(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Old taggers write `(17)Rock`, `(17)`, or bare `17`. Keep the name when the
+/// frame carries one; a table index alone is not a genre to browse by.
+fn genre_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let named = match trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.split_once(')'))
+    {
+        Some((index, tail)) if index.chars().all(|c| c.is_ascii_digit()) => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                return None;
+            }
+            tail
+        }
+        _ => trimmed,
+    };
+    (!named.is_empty() && !named.chars().all(|c| c.is_ascii_digit())).then(|| named.to_string())
+}
+
 fn decode_text(encoding: u8, bytes: &[u8]) -> Option<String> {
     match encoding {
         0 => {
-            let text: String = bytes
-                .iter()
-                .map(|byte| char::from(*byte))
-                .collect();
+            let text: String = bytes.iter().map(|byte| char::from(*byte)).collect();
             first_text(&text)
         }
         3 => first_text(&String::from_utf8_lossy(bytes)),
@@ -337,6 +358,7 @@ fn apply_text_frame(tags: &mut Tags, id: &[u8], body: &[u8]) {
         b"TIT2" | b"TT2" => tags.title = Some(text),
         b"TPE1" | b"TP1" => tags.artist = Some(text),
         b"TALB" | b"TAL" => tags.album = Some(text),
+        b"TCON" | b"TCO" => tags.genre = genre_text(&text),
         b"TRCK" | b"TRK" => tags.track = number(Some(text)),
         b"TPOS" | b"TPA" => tags.disc = number(Some(text)),
         b"TLEN" | b"TLE" => {
@@ -384,11 +406,7 @@ fn walk_id3_frames(
     let no_flags = [0u8; 2];
     while at < body.len() {
         let (id, header, flags) = if version >= 3 {
-            (
-                body.get(at..at + 4)?,
-                10usize,
-                body.get(at + 8..at + 10)?,
-            )
+            (body.get(at..at + 4)?, 10usize, body.get(at + 8..at + 10)?)
         } else {
             (body.get(at..at + 3)?, 6usize, &no_flags[..])
         };
@@ -529,9 +547,8 @@ fn flac_stream_info(block: &[u8], tags: &mut Tags) {
     if block.len() < 18 {
         return;
     }
-    let rate = (u64::from(block[10]) << 12)
-        | (u64::from(block[11]) << 4)
-        | (u64::from(block[12]) >> 4);
+    let rate =
+        (u64::from(block[10]) << 12) | (u64::from(block[11]) << 4) | (u64::from(block[12]) >> 4);
     let total = (u64::from(block[13] & 0x0f) << 32) | big_endian(&block[14..18]);
     if rate > 0 && total > 0 {
         tags.duration_ms = Some(total * 1000 / rate);
@@ -571,6 +588,7 @@ fn flac_vorbis_comment(block: &[u8], tags: &mut Tags) {
                 }
             }
             "ALBUM" => tags.album = first_text(value),
+            "GENRE" => tags.genre = first_text(value),
             "TRACKNUMBER" => tags.track = number(Some(value.to_string())),
             "DISCNUMBER" => tags.disc = number(Some(value.to_string())),
             _ => {}
@@ -641,8 +659,7 @@ fn wav_duration_ms(file: &mut File) -> Option<u64> {
 /// Standard base64, written here so the page needs no extra crate to show a
 /// cover that is already on disk.
 pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
@@ -706,10 +723,8 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "fluideq-library-{}-{name}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("fluideq-library-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         directory
@@ -727,6 +742,15 @@ mod tests {
     }
 
     #[test]
+    fn a_genre_frame_keeps_its_name_and_drops_a_bare_table_index() {
+        assert_eq!(genre_text("Rock").as_deref(), Some("Rock"));
+        assert_eq!(genre_text("  (17)Rock ").as_deref(), Some("Rock"));
+        assert_eq!(genre_text("(17)"), None);
+        assert_eq!(genre_text("17"), None);
+        assert_eq!(genre_text("   "), None);
+    }
+
+    #[test]
     fn id3v23_text_frames_become_tags_and_a_title_falls_back_to_the_stem() {
         let directory = temp_path("id3v23");
         let path = directory.join("track.mp3");
@@ -736,6 +760,7 @@ mod tests {
                 (b"TIT2", text_frame(0, b"A latin title")),
                 (b"TPE1", text_frame(3, "Björk".as_bytes())),
                 (b"TALB", text_frame(3, b"Homogenic")),
+                (b"TCON", text_frame(0, b"(17)Rock")),
                 (b"TRCK", text_frame(0, b"3/9")),
                 (b"TLEN", text_frame(0, b"321000")),
             ],
@@ -749,6 +774,7 @@ mod tests {
         assert_eq!(track.title, "A latin title");
         assert_eq!(track.artist.as_deref(), Some("Björk"));
         assert_eq!(track.album.as_deref(), Some("Homogenic"));
+        assert_eq!(track.genre.as_deref(), Some("Rock"));
         assert_eq!(track.track, Some(3));
         assert_eq!(track.duration_ms, Some(321_000));
         assert_eq!(track.format, "MP3");
@@ -764,11 +790,8 @@ mod tests {
             utf16.extend_from_slice(&unit.to_le_bytes());
         }
         let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(&id3_file(
-            &[(b"TIT2", text_frame(1, &utf16))],
-            4,
-        ))
-        .unwrap();
+        file.write_all(&id3_file(&[(b"TIT2", text_frame(1, &utf16))], 4))
+            .unwrap();
         drop(file);
         assert_eq!(read_track(&path).unwrap().title, "Café");
         std::fs::remove_dir_all(&directory).unwrap();
@@ -808,11 +831,13 @@ mod tests {
         let mut comments = Vec::new();
         comments.extend_from_slice(&2u32.to_le_bytes());
         comments.extend_from_slice(b"eq");
-        comments.extend_from_slice(&3u32.to_le_bytes());
+        comments.extend_from_slice(&4u32.to_le_bytes());
         comments.extend_from_slice(&9u32.to_le_bytes());
         comments.extend_from_slice(b"TITLE=One");
         comments.extend_from_slice(&10u32.to_le_bytes());
         comments.extend_from_slice(b"ARTIST=Two");
+        comments.extend_from_slice(&10u32.to_le_bytes());
+        comments.extend_from_slice(b"GENRE=Rock");
         comments.extend_from_slice(&13u32.to_le_bytes());
         comments.extend_from_slice(b"TRACKNUMBER=4");
 
@@ -829,6 +854,7 @@ mod tests {
         assert_eq!(track.format, "FLAC");
         assert_eq!(track.title, "One");
         assert_eq!(track.artist.as_deref(), Some("Two"));
+        assert_eq!(track.genre.as_deref(), Some("Rock"));
         assert_eq!(track.track, Some(4));
         assert_eq!(track.duration_ms, Some(1000));
         std::fs::remove_dir_all(&directory).unwrap();
@@ -877,11 +903,8 @@ mod tests {
         .unwrap();
         drop(file);
         let mut file = std::fs::File::create(directory.join("first.mp3")).unwrap();
-        file.write_all(&id3_file(
-            &[(b"TIT2", text_frame(3, b"First"))],
-            3,
-        ))
-        .unwrap();
+        file.write_all(&id3_file(&[(b"TIT2", text_frame(3, b"First"))], 3))
+            .unwrap();
         drop(file);
         std::fs::write(directory.join("notes.txt"), b"not music").unwrap();
 

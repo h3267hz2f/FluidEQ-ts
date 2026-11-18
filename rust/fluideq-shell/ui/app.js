@@ -338,6 +338,10 @@ let libraryBusy = false;
 let libraryMode = 'tracks';
 let libraryAlbumFilter = null;
 let libraryArtistFilter = null;
+let libraryGenreFilter = null;
+let libraryFolderFilter = null;
+const albumCoverCache = new Map();
+const albumCoverPending = new Set();
 let upNext = [];
 let playerUpNextPath = undefined;
 let libraryTuningPath = null;
@@ -1381,6 +1385,26 @@ function artistKeyOf(track) {
   return normaliseLibraryText(track.artist);
 }
 
+function genreKeyOf(track) {
+  return normaliseLibraryText(track.genre);
+}
+
+function folderPathOf(track) {
+  const path = String(track.path || '');
+  const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+  return cut > 0 ? path.slice(0, cut) : path;
+}
+
+function folderKeyOf(track) {
+  return normaliseLibraryText(folderPathOf(track));
+}
+
+function folderNameOf(path) {
+  const trimmed = String(path || '').replace(/[\\/]+$/, '');
+  const cut = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'));
+  return cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
+}
+
 function trackMatchesFilter(track, filter) {
   return [track.title, track.artist, track.album, track.path]
     .filter(Boolean)
@@ -1389,11 +1413,17 @@ function trackMatchesFilter(track, filter) {
 
 function libraryTracks() {
   let tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
-  if (libraryAlbumFilter) {
+  if (libraryAlbumFilter !== null) {
     tracks = tracks.filter((track) => albumKeyOf(track) === libraryAlbumFilter);
   }
-  if (libraryArtistFilter) {
+  if (libraryArtistFilter !== null) {
     tracks = tracks.filter((track) => artistKeyOf(track) === libraryArtistFilter);
+  }
+  if (libraryGenreFilter !== null) {
+    tracks = tracks.filter((track) => genreKeyOf(track) === libraryGenreFilter);
+  }
+  if (libraryFolderFilter !== null) {
+    tracks = tracks.filter((track) => folderKeyOf(track) === libraryFolderFilter);
   }
   const filter = els.librarySearch.value.trim().toLowerCase();
   if (!filter) return tracks;
@@ -1451,7 +1481,57 @@ function libraryArtists(tracks) {
   );
 }
 
+function libraryGenres(tracks) {
+  const groups = new Map();
+  for (const track of tracks) {
+    const key = genreKeyOf(track);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        name: track.genre || '',
+        albums: new Set(),
+        tracks: [],
+      };
+      groups.set(key, group);
+    }
+    group.albums.add(albumKeyOf(track));
+    group.tracks.push(track);
+  }
+  return [...groups.values()].sort((left, right) =>
+    (left.name || 'No genre').localeCompare(right.name || 'No genre')
+  );
+}
+
+function libraryFolders(tracks) {
+  const groups = new Map();
+  for (const track of tracks) {
+    const path = folderPathOf(track);
+    const key = normaliseLibraryText(path);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        path,
+        name: folderNameOf(path),
+        tracks: [],
+      };
+      groups.set(key, group);
+    }
+    group.tracks.push(track);
+  }
+  return [...groups.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function clearLibraryFilters() {
+  libraryAlbumFilter = null;
+  libraryArtistFilter = null;
+  libraryGenreFilter = null;
+  libraryFolderFilter = null;
+}
+
 function openLibraryAlbum(group) {
+  clearLibraryFilters();
   libraryAlbumFilter = group.key;
   libraryArtistFilter = normaliseLibraryText(group.artist);
   libraryMode = 'tracks';
@@ -1459,8 +1539,22 @@ function openLibraryAlbum(group) {
 }
 
 function openLibraryArtist(group) {
+  clearLibraryFilters();
   libraryArtistFilter = group.key;
-  libraryAlbumFilter = null;
+  libraryMode = 'tracks';
+  renderLibrary();
+}
+
+function openLibraryGenre(group) {
+  clearLibraryFilters();
+  libraryGenreFilter = group.key;
+  libraryMode = 'tracks';
+  renderLibrary();
+}
+
+function openLibraryFolder(group) {
+  clearLibraryFilters();
+  libraryFolderFilter = group.key;
   libraryMode = 'tracks';
   renderLibrary();
 }
@@ -1480,6 +1574,16 @@ function libraryCountWord(tracks) {
     return artists
       ? `${artists} ${artists === 1 ? 'artist' : 'artists'}`
       : 'No artists yet';
+  }
+  if (libraryMode === 'genres') {
+    const genres = libraryGenres(libraryTracks()).length;
+    return genres ? `${genres} ${genres === 1 ? 'genre' : 'genres'}` : 'No genres yet';
+  }
+  if (libraryMode === 'folders') {
+    const folders = libraryFolders(libraryTracks()).length;
+    return folders
+      ? `${folders} ${folders === 1 ? 'folder' : 'folders'}`
+      : 'No folders yet';
   }
   if (!tracks.length) return 'No tracks yet';
   const shown = libraryTracks().length;
@@ -1549,6 +1653,80 @@ function libraryGroupRow({ title, sub, meta, onOpen }) {
   return row;
 }
 
+const ALBUM_COVER_LIMIT = 80;
+
+function libraryAlbumCard(group) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'library-album';
+  card.dataset.coverKey = encodeURIComponent(group.key);
+  card.setAttribute('role', 'listitem');
+  const cover = document.createElement('span');
+  cover.className = 'library-album-cover';
+  const image = document.createElement('img');
+  image.alt = '';
+  image.hidden = true;
+  const placeholder = document.createElement('span');
+  placeholder.className = 'library-album-cover-empty';
+  placeholder.textContent = 'No cover';
+  cover.append(image, placeholder);
+  const data = albumCoverCache.get(group.key);
+  if (data) {
+    image.src = data;
+    image.hidden = false;
+    placeholder.hidden = true;
+  }
+  const title = document.createElement('strong');
+  title.className = 'library-album-title';
+  title.textContent = group.album || 'Unknown album';
+  const sub = document.createElement('span');
+  sub.className = 'library-album-sub';
+  sub.textContent = group.artist || 'Unknown artist';
+  const meta = document.createElement('span');
+  meta.className = 'library-album-meta';
+  meta.textContent = `${group.tracks.length} ${group.tracks.length === 1 ? 'track' : 'tracks'}`;
+  card.append(cover, title, sub, meta);
+  card.addEventListener('click', () => openLibraryAlbum(group));
+  return card;
+}
+
+function refreshAlbumCoverElements() {
+  for (const card of els.libraryList.querySelectorAll('.library-album')) {
+    let key;
+    try {
+      key = decodeURIComponent(card.dataset.coverKey);
+    } catch {
+      continue;
+    }
+    const data = albumCoverCache.get(key);
+    if (!data) continue;
+    const image = card.querySelector('img');
+    const placeholder = card.querySelector('.library-album-cover-empty');
+    if (image && image.hidden) {
+      image.src = data;
+      image.hidden = false;
+      if (placeholder) placeholder.hidden = true;
+    }
+  }
+}
+
+function loadAlbumCover(group) {
+  if (!invoke || albumCoverCache.has(group.key) || albumCoverPending.has(group.key)) return;
+  albumCoverPending.add(group.key);
+  invoke('library_cover', { path: group.tracks[0].path })
+    .then((cover) => {
+      albumCoverCache.set(
+        group.key,
+        cover?.data ? `data:${cover.mime};base64,${cover.data}` : ''
+      );
+    })
+    .catch(() => albumCoverCache.set(group.key, ''))
+    .finally(() => {
+      albumCoverPending.delete(group.key);
+      if (libraryMode === 'albums') refreshAlbumCoverElements();
+    });
+}
+
 function renderLibraryModes() {
   for (const button of els.libraryModes.querySelectorAll('[data-library-mode]')) {
     const active = button.dataset.libraryMode === libraryMode;
@@ -1558,23 +1736,33 @@ function renderLibraryModes() {
 }
 
 function clearLibraryFilter() {
-  libraryAlbumFilter = null;
-  libraryArtistFilter = null;
+  clearLibraryFilters();
   renderLibrary();
 }
 
 function renderLibraryFilter() {
-  if (!libraryAlbumFilter && !libraryArtistFilter) {
+  if (
+    libraryAlbumFilter === null &&
+    libraryArtistFilter === null &&
+    libraryGenreFilter === null &&
+    libraryFolderFilter === null
+  ) {
     els.libraryFilter.hidden = true;
     els.libraryFilter.replaceChildren();
     return;
   }
   const tracks = Array.isArray(libraryState?.tracks) ? libraryState.tracks : [];
   let label;
-  if (libraryAlbumFilter) {
+  if (libraryAlbumFilter !== null) {
     const track = tracks.find((item) => albumKeyOf(item) === libraryAlbumFilter);
     label = `Album: ${track?.album || 'Unknown album'}`;
     if (track?.artist) label += ` · ${track.artist}`;
+  } else if (libraryGenreFilter !== null) {
+    const track = tracks.find((item) => genreKeyOf(item) === libraryGenreFilter);
+    label = `Genre: ${track?.genre || 'No genre'}`;
+  } else if (libraryFolderFilter !== null) {
+    const track = tracks.find((item) => folderKeyOf(item) === libraryFolderFilter);
+    label = `Folder: ${track ? folderNameOf(folderPathOf(track)) : 'Unknown folder'}`;
   } else {
     const track = tracks.find((item) => artistKeyOf(item) === libraryArtistFilter);
     label = `Artist: ${track?.artist || 'Unknown artist'}`;
@@ -1703,17 +1891,12 @@ function renderLibrary() {
 
   let rows = [];
   let total = 0;
+  els.libraryList.classList.toggle('grid', libraryMode === 'albums');
   if (libraryMode === 'albums') {
     const groups = libraryAlbums(libraryTracks());
     total = groups.length;
-    rows = groups.slice(0, LIBRARY_ROW_LIMIT).map((group) =>
-      libraryGroupRow({
-        title: group.album || 'Unknown album',
-        sub: group.artist || 'Unknown artist',
-        meta: `${group.tracks.length} ${group.tracks.length === 1 ? 'track' : 'tracks'}`,
-        onOpen: () => openLibraryAlbum(group),
-      })
-    );
+    rows = groups.slice(0, LIBRARY_ROW_LIMIT).map(libraryAlbumCard);
+    groups.slice(0, ALBUM_COVER_LIMIT).forEach(loadAlbumCover);
   } else if (libraryMode === 'artists') {
     const groups = libraryArtists(libraryTracks());
     total = groups.length;
@@ -1723,6 +1906,28 @@ function renderLibrary() {
         sub: `${group.albums.size} ${group.albums.size === 1 ? 'album' : 'albums'}`,
         meta: `${group.tracks.length} ${group.tracks.length === 1 ? 'track' : 'tracks'}`,
         onOpen: () => openLibraryArtist(group),
+      })
+    );
+  } else if (libraryMode === 'genres') {
+    const groups = libraryGenres(libraryTracks());
+    total = groups.length;
+    rows = groups.slice(0, LIBRARY_ROW_LIMIT).map((group) =>
+      libraryGroupRow({
+        title: group.name || 'No genre',
+        sub: `${group.albums.size} ${group.albums.size === 1 ? 'album' : 'albums'}`,
+        meta: `${group.tracks.length} ${group.tracks.length === 1 ? 'track' : 'tracks'}`,
+        onOpen: () => openLibraryGenre(group),
+      })
+    );
+  } else if (libraryMode === 'folders') {
+    const groups = libraryFolders(libraryTracks());
+    total = groups.length;
+    rows = groups.slice(0, LIBRARY_ROW_LIMIT).map((group) =>
+      libraryGroupRow({
+        title: group.name || group.path,
+        sub: group.path,
+        meta: `${group.tracks.length} ${group.tracks.length === 1 ? 'track' : 'tracks'}`,
+        onOpen: () => openLibraryFolder(group),
       })
     );
   } else if (libraryMode === 'queue') {
@@ -1741,7 +1946,12 @@ function renderLibrary() {
     if (libraryMode === 'queue') {
       empty.textContent =
         'Nothing queued — play a track and the order it will take appears here.';
-    } else if (libraryAlbumFilter || libraryArtistFilter) {
+    } else if (
+      libraryAlbumFilter !== null ||
+      libraryArtistFilter !== null ||
+      libraryGenreFilter !== null ||
+      libraryFolderFilter !== null
+    ) {
       empty.textContent = 'Nothing matches this selection.';
     } else {
       empty.textContent = tracks.length
@@ -3543,8 +3753,7 @@ els.libraryModes.addEventListener('click', (event) => {
   const button = event.target.closest('[data-library-mode]');
   if (!button) return;
   libraryMode = button.dataset.libraryMode;
-  libraryAlbumFilter = null;
-  libraryArtistFilter = null;
+  clearLibraryFilters();
   renderLibrary();
   if (libraryMode === 'queue') refreshUpNext();
 });

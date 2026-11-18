@@ -759,6 +759,7 @@ mod tests {
             title: path.to_string(),
             artist: None,
             album: None,
+            genre: None,
             track: None,
             disc: None,
             duration_ms: Some(1_000),
