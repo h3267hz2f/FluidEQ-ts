@@ -86,7 +86,7 @@
 
 - [x] **M11 压缩音频嗅探**：`compressed_audio.rs` / `wav_ir.rs` 魔数分流已就位。
 - [x] **M12 系统事务**：SHA-256 摘要、服务依赖图重启、注册表 ACL 交接单测已就位。
-- [ ] **冷驻留收口**：确认 `MinimizedWarm` 停频谱推送闭环；`ColdStandby` 视唤醒体验作为可选策略。
+- [x] **冷驻留收口**：`spectrum_bridge::should_emit_frame` 只在 `Active` 返回真，`poll_frame` 在 `MinimizedWarm`/`ColdStandby` 返回 `sleeping=true`、`target_fps=0`、空 bins，主循环据此跳过 `app.emit("spectrum")`；两条既有单测覆盖该闭环。`ColdStandby` 仍按 15 秒规则降级，WebView 保活作为唤醒体验的可选策略。
 - [x] **参数表唯一来源与预览桥清理**：参数表已迁到 `native/parameters/nativeParameters.ts`，`src/` 与 `server.ts` 已删除，`--ipc-stdio` 桥随 `ipc.rs` 移除。
 - [ ] **M14 发布与真机矩阵**：安装包代码签名、升级/卸载回滚验证、补全 Realtek / USB DAC / 蓝牙真机回归记录。（2026-11-14：用户要求推迟，待功能面收口后统一做一次真机与发布验证）
 
